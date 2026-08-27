@@ -31,6 +31,7 @@ export class SonusRuntime {
   evaluate(source: string): EvaluationResult[] {
     const oscillators = new Map<string, OscillatorDefinition>();
     const routes = new Map<string, RouteDefinition>();
+    const views = new Set<string>();
     const results: EvaluationResult[] = [];
     const diagnostics: SonusDiagnostic[] = [];
 
@@ -39,26 +40,37 @@ export class SonusRuntime {
       .map((line, index) => ({ source: line.trim(), line: index + 1 }))
       .filter(({ source: line }) => line.length > 0 && !line.startsWith('#'));
 
-    // Pass 1: declarations. Collect every declaration error so the editor can
-    // mark all invalid lines in a single evaluation pass.
+    // Pass 1: declarations. Declarations are collected before the remaining
+    // statements so the source is declarative rather than execution-order dependent.
     for (const { source: line, line: lineNumber } of lines) {
-      const match = line.match(/^([A-Za-z_]\w*)\s*=\s*osc\(\s*\)\s*$/);
-      if (!match) continue;
+      const declaration = parseOscillatorDeclaration(line);
+      if (!declaration) continue;
 
-      const name = match[1];
+      const { name, calls } = declaration;
+      if (name === 'Main') {
+        diagnostics.push({ line: lineNumber, message: 'Main is a built-in singleton and cannot be assigned' });
+        continue;
+      }
       if (oscillators.has(name)) {
         diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` });
         continue;
       }
 
-      oscillators.set(name, { frequency: 440 });
+      const definition: OscillatorDefinition = { frequency: 440 };
+      oscillators.set(name, definition);
+
+      for (const call of calls) {
+        const error = applyOscillatorCall(name, definition, call, views);
+        if (error) diagnostics.push({ line: lineNumber, message: error });
+      }
+
       results.push({ message: `${name} = osc` });
     }
 
-    // Pass 2: parameters and routes. Invalid lines do not stop validation of
-    // later lines. The audio program is only applied if the whole document is valid.
+    // Pass 2: parameters, views and routes. Invalid lines do not stop validation
+    // of later lines. The audio program is applied only if the whole document is valid.
     for (const { source: line, line: lineNumber } of lines) {
-      if (/^([A-Za-z_]\w*)\s*=\s*osc\(\s*\)\s*$/.test(line)) continue;
+      if (parseOscillatorDeclaration(line)) continue;
 
       let match = line.match(/^([A-Za-z_]\w*)\.freq\(\s*(-?\d+(?:\.\d+)?)\s*\)\s*$/);
       if (match) {
@@ -97,12 +109,31 @@ export class SonusRuntime {
           continue;
         }
 
-        oscillator.frequency = 440 * 2 ** ((note - 69) / 12);
+        oscillator.frequency = midiToFrequency(note);
         results.push({ message: `${name}.note ${formatNumber(note)}` });
         continue;
       }
 
-      match = line.match(/^([A-Za-z_]\w*)\.out(?:\(\s*(-?\d+(?:\.\d+)?)\s*\))?\s*->\s*out\.main\s*$/);
+      if (/^Main(?:\.out)?\.view\(\s*\)\s*$/.test(line)) {
+        views.add('Main.out');
+        results.push({ message: 'Main.out view' });
+        continue;
+      }
+
+      match = line.match(/^([A-Za-z_]\w*)(?:\.out)?\.view\(\s*\)\s*$/);
+      if (match) {
+        const name = match[1];
+        if (!oscillators.has(name)) {
+          diagnostics.push({ line: lineNumber, message: `unknown object: ${name}` });
+          continue;
+        }
+
+        views.add(`${name}.out`);
+        results.push({ message: `${name}.out view` });
+        continue;
+      }
+
+      match = line.match(/^([A-Za-z_]\w*)\.out(?:\(\s*(-?\d+(?:\.\d+)?)\s*\))?\s*->\s*Main\.in\s*$/);
       if (match) {
         const [, name, rawAmount] = match;
         if (!oscillators.has(name)) {
@@ -117,8 +148,8 @@ export class SonusRuntime {
           continue;
         }
 
-        routes.set(`${name}.out->out.main`, { source: name, amount });
-        results.push({ message: `${name}.out -> out.main @ ${formatNumber(amount)}%` });
+        routes.set(`${name}.out->Main.in`, { source: name, amount });
+        results.push({ message: `${name}.out -> Main.in @ ${formatNumber(amount)}%` });
         continue;
       }
 
@@ -134,14 +165,88 @@ export class SonusRuntime {
       })),
       routes: [...routes.values()].map((route) => ({
         source: route.source,
-        destination: 'out.main' as const,
+        destination: 'Main.in' as const,
         amount: route.amount,
       })),
+      views: [...views].map((signal) => ({ signal })),
     };
 
     this.audio.applyProgram(program);
     return results.length > 0 ? results : [{ message: 'ok' }];
   }
+}
+
+interface ChainedCall {
+  name: string;
+  argument: string;
+}
+
+interface OscillatorDeclaration {
+  name: string;
+  calls: ChainedCall[];
+}
+
+function parseOscillatorDeclaration(line: string): OscillatorDeclaration | null {
+  const match = line.match(/^([A-Za-z_]\w*)\s*=\s*osc\(\s*\)(.*)$/);
+  if (!match) return null;
+
+  const name = match[1];
+  const tail = match[2].trim();
+  if (!tail) return { name, calls: [] };
+
+  const calls: ChainedCall[] = [];
+  let consumed = '';
+  const callPattern = /\.([A-Za-z_]\w*)\(\s*([^()]*)\s*\)/g;
+  let callMatch: RegExpExecArray | null;
+  while ((callMatch = callPattern.exec(tail)) !== null) {
+    if (callMatch.index !== consumed.length) return null;
+    consumed += callMatch[0];
+    calls.push({ name: callMatch[1], argument: callMatch[2].trim() });
+  }
+
+  return consumed === tail ? { name, calls } : null;
+}
+
+function applyOscillatorCall(
+  objectName: string,
+  oscillator: OscillatorDefinition,
+  call: ChainedCall,
+  views: Set<string>,
+): string | null {
+  switch (call.name) {
+    case 'freq': {
+      const frequency = parseSingleNumber(call.argument);
+      if (frequency === null) return 'freq expects one numeric value';
+      const error = frequencyError(frequency);
+      if (error) return error;
+      oscillator.frequency = frequency;
+      return null;
+    }
+    case 'note': {
+      const note = parseSingleNumber(call.argument);
+      if (note === null) return 'note expects one numeric value';
+      const error = noteError(note);
+      if (error) return error;
+      oscillator.frequency = midiToFrequency(note);
+      return null;
+    }
+    case 'view':
+      if (call.argument.length > 0) return 'view does not accept parameters yet';
+      views.add(`${objectName}.out`);
+      return null;
+    default:
+      return `unknown osc method: ${call.name}`;
+  }
+}
+
+function parseSingleNumber(value: string): number | null {
+  if (!/^-?\d+(?:\.\d+)?$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function midiToFrequency(note: number): number {
+  return 440 * 2 ** ((note - 69) / 12);
 }
 
 function frequencyError(value: number): string | null {

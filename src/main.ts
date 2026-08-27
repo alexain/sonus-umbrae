@@ -20,7 +20,12 @@ app.innerHTML = `
 
     <section id="surface" class="surface">
       <div id="live-screen" class="screen live-screen">
-        <textarea id="editor" class="editor" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Live coding editor"></textarea>
+        <div class="editor-pane">
+          <textarea id="editor" class="editor" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Live coding editor"></textarea>
+        </div>
+        <aside id="view-panel" class="view-panel hidden" aria-label="Signal views">
+          <div id="view-stack" class="view-stack"></div>
+        </aside>
       </div>
 
       <div id="config-screen" class="screen system-screen hidden" aria-hidden="true">
@@ -77,6 +82,8 @@ const phosphorLayer = must<HTMLElement>('phosphor-layer');
 const message = must<HTMLElement>('message');
 const blockCaret = must<HTMLElement>('block-caret');
 const errorOverlays = must<HTMLElement>('error-overlays');
+const viewPanel = must<HTMLElement>('view-panel');
+const viewStack = must<HTMLElement>('view-stack');
 const diagnostic = must<HTMLElement>('diagnostic');
 const liveDot = must<HTMLElement>('live-dot');
 const dspStatus = must<HTMLElement>('dsp-status');
@@ -87,6 +94,7 @@ const runtime = new SonusRuntime(audioEngine);
 let screen: Screen = 'live';
 let commandMode = false;
 let messageTimer = 0;
+let scopeFrame = 0;
 let savedEditorSelection: { start: number; end: number; direction: 'forward' | 'backward' | 'none' } | null = null;
 
 audioEngine.subscribe((snapshot) => {
@@ -96,6 +104,7 @@ audioEngine.subscribe((snapshot) => {
   liveDot.setAttribute('aria-label', isRunning ? 'engine running' : 'engine stopped');
   dspStatus.textContent = snapshot.sampleRate ? `${Math.round(snapshot.sampleRate / 1000)}K` : '--';
   dspStatus.classList.toggle('disabled', snapshot.sampleRate === null);
+  syncViews();
 });
 
 editor.value = '';
@@ -196,6 +205,86 @@ function evaluateLiveSource(): void {
   }
 }
 
+
+function syncViews(): void {
+  const signals = audioEngine.getViewSignals();
+  const hasViews = signals.length > 0;
+  liveScreen.classList.toggle('with-views', hasViews);
+  viewPanel.classList.toggle('hidden', !hasViews);
+
+  const existing = new Map(
+    [...viewStack.querySelectorAll<HTMLElement>('.view-card')].map((card) => [card.dataset.signal ?? '', card]),
+  );
+
+  for (const signal of signals) {
+    let card = existing.get(signal);
+    if (card) {
+      existing.delete(signal);
+      continue;
+    }
+
+    card = document.createElement('section');
+    card.className = 'view-card';
+    card.dataset.signal = signal;
+
+    const title = document.createElement('div');
+    title.className = 'view-title';
+    title.textContent = signal.toUpperCase();
+
+    const canvas = document.createElement('canvas');
+    canvas.className = 'scope-canvas';
+    canvas.dataset.signal = signal;
+    canvas.setAttribute('aria-label', `${signal} oscilloscope`);
+
+    card.append(title, canvas);
+    viewStack.append(card);
+  }
+
+  for (const card of existing.values()) card.remove();
+
+  if (hasViews && scopeFrame === 0) scopeFrame = requestAnimationFrame(drawScopes);
+  requestAnimationFrame(positionBlockCaret);
+}
+
+function drawScopes(): void {
+  scopeFrame = 0;
+  const canvases = [...viewStack.querySelectorAll<HTMLCanvasElement>('canvas.scope-canvas')];
+  if (canvases.length === 0) return;
+
+  const phosphor = getComputedStyle(document.documentElement).getPropertyValue('--phosphor-hot').trim() || '#ffe783';
+  for (const canvas of canvases) {
+    const signal = canvas.dataset.signal;
+    if (!signal) continue;
+
+    const width = Math.max(1, Math.floor(canvas.clientWidth * window.devicePixelRatio));
+    const height = Math.max(1, Math.floor(canvas.clientHeight * window.devicePixelRatio));
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+
+    const data = new Float32Array(512);
+    if (!audioEngine.readOscilloscope(signal, data)) continue;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) continue;
+
+    ctx.clearRect(0, 0, width, height);
+    ctx.strokeStyle = phosphor;
+    ctx.lineWidth = Math.max(1, window.devicePixelRatio);
+    ctx.shadowColor = phosphor;
+    ctx.shadowBlur = 3 * window.devicePixelRatio;
+    ctx.beginPath();
+    for (let i = 0; i < data.length; i += 1) {
+      const x = (i / (data.length - 1)) * width;
+      const y = height * 0.5 - data[i] * height * 0.42;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+
+  scopeFrame = requestAnimationFrame(drawScopes);
+}
 
 function clearDiagnostic(): void {
   errorOverlays.replaceChildren();
@@ -522,7 +611,13 @@ liveScreen.addEventListener('scroll', () => {
   clearDiagnostic();
   requestAnimationFrame(positionBlockCaret);
 });
-window.addEventListener('resize', () => requestAnimationFrame(positionBlockCaret));
+editor.addEventListener('scroll', () => {
+  clearDiagnostic();
+  requestAnimationFrame(positionBlockCaret);
+});
+window.addEventListener('resize', () => {
+  requestAnimationFrame(positionBlockCaret);
+});
 
 editor.addEventListener('beforeinput', (event) => {
   const input = event as InputEvent;

@@ -15,8 +15,11 @@ export interface AudioProgram {
   }>;
   routes: Array<{
     source: string;
-    destination: 'out.main';
+    destination: 'Main.in';
     amount: number;
+  }>;
+  views: Array<{
+    signal: string;
   }>;
 }
 
@@ -40,6 +43,7 @@ export class AudioEngine {
   private testGain: GainNode | null = null;
   private oscillators = new Map<string, OscillatorVoice>();
   private routes = new Map<string, AudioRoute>();
+  private views = new Map<string, AnalyserNode>();
   private listeners = new Set<AudioEngineListener>();
 
   snapshot(): AudioEngineSnapshot {
@@ -78,6 +82,13 @@ export class AudioEngine {
   applyProgram(program: AudioProgram): void {
     const desiredOscillators = new Map(program.oscillators.map((definition) => [definition.name, definition]));
     const desiredRoutes = new Map(program.routes.map((route) => [`${route.source}.out->${route.destination}`, route]));
+    const desiredViews = new Set(program.views.map((view) => view.signal));
+
+    // Views and routes are removed before objects so their taps/connections can
+    // be detached cleanly from nodes that may be retired in the same reconcile.
+    for (const signal of this.views.keys()) {
+      if (!desiredViews.has(signal)) this.removeView(signal);
+    }
 
     // Remove routes first so an oscillator can be safely retired afterwards.
     for (const [key] of this.routes) {
@@ -96,6 +107,8 @@ export class AudioEngine {
     for (const route of program.routes) {
       this.connectToMain(route.source, route.amount, false);
     }
+
+    for (const view of program.views) this.createView(view.signal);
 
     this.emit();
   }
@@ -151,7 +164,7 @@ export class AudioEngine {
     const master = this.master;
     if (!master) throw new Error('audio engine unavailable');
 
-    const routeKey = `${name}.out->out.main`;
+    const routeKey = `${name}.out->Main.in`;
     const existing = this.routes.get(routeKey);
     const normalized = amount / 100;
 
@@ -168,6 +181,54 @@ export class AudioEngine {
     gain.connect(master);
     this.routes.set(routeKey, { gain, amount });
     if (emit) this.emit();
+  }
+
+  getViewSignals(): string[] {
+    return [...this.views.keys()];
+  }
+
+  readOscilloscope(signal: string, target: Float32Array<ArrayBuffer>): boolean {
+    const analyser = this.views.get(signal);
+    if (!analyser) return false;
+    analyser.getFloatTimeDomainData(target);
+    return true;
+  }
+
+  private createView(signal: string): void {
+    if (this.views.has(signal)) return;
+
+    const context = this.ensureContext();
+    const source = this.sourceNodeForSignal(signal);
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0;
+    source.connect(analyser);
+    this.views.set(signal, analyser);
+  }
+
+  private removeView(signal: string): void {
+    const analyser = this.views.get(signal);
+    if (!analyser) return;
+
+    try {
+      this.sourceNodeForSignal(signal).disconnect(analyser);
+    } catch {
+      // The source may already have been retired; disconnecting the analyser is enough.
+    }
+    analyser.disconnect();
+    this.views.delete(signal);
+  }
+
+  private sourceNodeForSignal(signal: string): AudioNode {
+    if (signal === 'Main.out') {
+      this.ensureContext();
+      if (!this.master) throw new Error('audio engine unavailable');
+      return this.master;
+    }
+
+    const match = signal.match(/^([A-Za-z_]\w*)\.out$/);
+    if (!match) throw new Error(`unknown signal: ${signal}`);
+    return this.requireOscillator(match[1]).output;
   }
 
   async testTone(frequency = 440): Promise<void> {
@@ -271,6 +332,8 @@ export class AudioEngine {
     } else {
       voice.oscillator.stop();
     }
+
+    this.removeView(`${name}.out`);
 
     voice.oscillator.addEventListener('ended', () => {
       voice.oscillator.disconnect();
