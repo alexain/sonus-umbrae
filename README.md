@@ -1,74 +1,101 @@
 # Sonus Umbrae
 
-Experimental browser-based live coding environment for sound.
+**Sonus Umbrae** is an experimental browser-based live coding environment for building and performing modular audio systems entirely from text.
 
-## Development
+It is designed around a simple idea: **the source code is the patch**. Objects describe sound generators and processors, `->` creates signal connections, and editing the source continuously reconciles the running audio graph without requiring a separate graphical patch editor.
 
-Requirements: Node.js 24 LTS recommended.
+Sonus Umbrae is currently an early prototype. The language, runtime and APIs are expected to evolve.
 
-```bash
-npm install
+## Current features
 
-# Recommended on macOS for the intended pixel rendering
-brew install font-departure-mono
+- Browser-based live coding interface with a monochrome phosphor-inspired UI.
+- Declarative source model: editing the document updates the running graph.
+- Web Audio engine with AudioWorklet processing.
+- WebAssembly DSP support compiled from C/C++ with Emscripten.
+- `Voice()` synthesis engine based on the MIT-licensed Mutable Instruments Plaits DSP.
+- Built-in `Main` audio interface singleton.
+- Built-in `Clock` master clock and derived clock rates.
+- Signal routing with per-connection attenuation and inversion.
+- Live signal, trigger and parameter views.
+- Read-only `:scheme` view for inspecting the current routing graph.
+- Source diagnostics with per-line error highlighting.
+- Plain-text `.sum` session files.
 
-npm run dev
-```
-
-The development server uses `http://localhost:5173` and will fail instead of silently switching ports if that port is already in use.
-
-## v0.0.3 controls
-
-- Type directly in the main live editor.
-- `Esc` opens command mode at the bottom of the display.
-- `Enter` evaluates the current line or selected source (`Ctrl+Enter` is also accepted).
-- `Cmd+Enter` evaluates the entire source buffer.
-- `:config` opens the placeholder configuration screen.
-- `:help` lists currently implemented commands.
-- `:save [name]` saves the current source as a `.sum` text file.
-- `:load` opens a text source file.
-- `:new` / `:clear` clears the source.
-- `Esc` leaves command/config/help mode and returns to live editing.
-
-## Audio engine
-
-- `:start` starts or resumes Web Audio.
-- `:stop` suspends Web Audio.
-- `:test` plays a 440 Hz diagnostic sine tone.
-- `:test 220` changes the diagnostic frequency.
-- `:test stop` stops the diagnostic tone.
-- `:panic` immediately silences current audio.
-
-## First Sonus Umbrae language primitives
-
-The 0.0.3 runtime deliberately starts with one native Web Audio oscillator so the live language and routing model can be validated before adding external DSP engines.
+## Example
 
 ```text
-a = osc()
-a.freq(440)
-a.out -> out.main
+Clock.bpm(120)
+
+a = Voice().model(2).freq(220)
+Clock.out -> a.trig
+
+a.timbre(55)
+a.out(70) -> Main.in
+
+a.out.view()
+a.timbre.view()
+Main.view()
 ```
 
-While the engine is running, changing and evaluating:
+Connection gain is part of the route itself:
 
 ```text
-a.freq(220)
+a.out(50) -> Main.in
 ```
 
-updates the oscillator without rebuilding it.
-
-MIDI-style note numbers are also accepted:
+A negative value acts as an attenuverter:
 
 ```text
-a.note(60)
+source.out(-50) -> destination.parameter
 ```
 
-Per-connection output gain uses the same syntax planned for future modules:
+Sonus Umbrae does not enforce a hard language-level distinction between audio and control voltage. Internally, ports carry metadata such as `signal`, `gate`, or `trigger`, mainly so the environment can visualize them appropriately.
+
+## Interface
+
+The main screen is intentionally minimal: a status bar and the live source editor. Press `Esc` to enter command mode.
+
+Useful commands currently include:
 
 ```text
-a.out(40) -> out.main
+:scheme
+:config
+:help
+:save
+:load
+:start
+:stop
+:clock start
+:clock stop
+:panic
 ```
 
-Re-evaluating `a = osc()` is idempotent: the existing live object is preserved rather than duplicated.
+`Tab` toggles directly between the live editor and the read-only Scheme view.
 
-This oscillator still uses native Web Audio nodes. AudioWorklet and WASM DSP modules will be added after the language/runtime contract is stable enough to support them.
+## Project status
+
+Sonus Umbrae is pre-alpha software. At this stage the project is focused on defining:
+
+- the live language and its declarative runtime;
+- signal routing semantics;
+- reusable port and parameter metadata;
+- browser-native real-time DSP infrastructure;
+- a compact visual language for inspecting live patches.
+
+The current `Voice()` engine is only the first external DSP integration. Future engines and processors are not intended to be limited to Mutable Instruments-derived code.
+
+## Building
+
+See [BUILD.md](BUILD.md) for macOS setup, Node.js, Emscripten, DSP source setup and local development instructions.
+
+## Language reference
+
+The current language notes and examples live in [docs/LANGUAGE.md](docs/LANGUAGE.md).
+
+## Open source and third-party code
+
+Sonus Umbrae's own source code is released under the MIT License. See [LICENSE](LICENSE).
+
+The project can download and compile third-party DSP code during development. Those components retain their own copyright and license terms. See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+
+The current `Voice()` implementation uses DSP code from the Mutable Instruments Eurorack repository. Mutable Instruments states that its STM32F project code, including Plaits, is distributed under the MIT License. Mutable Instruments is a registered trademark; Sonus Umbrae is an independent project and is not affiliated with or endorsed by Mutable Instruments.
