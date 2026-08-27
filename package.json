@@ -1,12 +1,14 @@
 {
   "name": "sonus-umbrae",
   "private": true,
-  "version": "0.0.3",
+  "version": "0.0.4",
   "type": "module",
   "scripts": {
     "dev": "vite --port 5173 --strictPort",
     "build": "tsc && vite build",
-    "preview": "vite preview --port 4173 --strictPort"
+    "preview": "vite preview --port 4173 --strictPort",
+    "dsp:setup": "bash scripts/setup-dsp.sh",
+    "dsp:build": "bash scripts/build-dsp.sh"
   },
   "devDependencies": {
     "typescript": "^5.9.2",

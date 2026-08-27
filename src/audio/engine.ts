@@ -13,9 +13,21 @@ export interface AudioProgram {
     name: string;
     frequency: number;
   }>;
+  voices: Array<{
+    name: string;
+    model: number;
+    frequency: number;
+    harmo: number;
+    timbre: number;
+    morph: number;
+  }>;
+  gains: Array<{
+    name: string;
+    level: number;
+  }>;
   routes: Array<{
     source: string;
-    destination: 'Main.in';
+    destination: string;
     amount: number;
   }>;
   views: Array<{
@@ -31,9 +43,30 @@ interface OscillatorVoice {
   frequency: number;
 }
 
+interface GainVoice {
+  node: GainNode;
+  level: number;
+}
+
+interface MacroVoice {
+  node: AudioWorkletNode;
+  model: number;
+  frequency: number;
+  harmo: number;
+  timbre: number;
+  morph: number;
+}
+
+interface SignalSource {
+  node: AudioNode;
+  output: number;
+}
+
 interface AudioRoute {
   gain: GainNode;
   amount: number;
+  source: string;
+  destination: string;
 }
 
 export class AudioEngine {
@@ -42,6 +75,11 @@ export class AudioEngine {
   private testOscillator: OscillatorNode | null = null;
   private testGain: GainNode | null = null;
   private oscillators = new Map<string, OscillatorVoice>();
+  private gains = new Map<string, GainVoice>();
+  private voices = new Map<string, MacroVoice>();
+  private voiceWasmBytes: ArrayBuffer | null = null;
+  private voiceWorkletLoaded = false;
+  private pendingProgram: AudioProgram | null = null;
   private routes = new Map<string, AudioRoute>();
   private views = new Map<string, AnalyserNode>();
   private listeners = new Set<AudioEngineListener>();
@@ -55,7 +93,7 @@ export class AudioEngine {
           : 'suspended',
       sampleRate: this.context?.sampleRate ?? null,
       testFrequency: this.testOscillator?.frequency.value ?? null,
-      objectCount: this.oscillators.size,
+      objectCount: this.oscillators.size + this.gains.size + this.voices.size,
       routeCount: this.routes.size,
     };
   }
@@ -68,7 +106,13 @@ export class AudioEngine {
 
   async start(): Promise<void> {
     const context = this.ensureContext();
+    await this.ensureVoiceRuntime();
     if (context.state !== 'running') await context.resume();
+    if (this.pendingProgram) {
+      const program = this.pendingProgram;
+      this.pendingProgram = null;
+      this.applyProgram(program);
+    }
     this.emit();
   }
 
@@ -80,17 +124,21 @@ export class AudioEngine {
   }
 
   applyProgram(program: AudioProgram): void {
+    if (program.voices.length > 0 && !this.voiceWorkletLoaded) {
+      this.pendingProgram = program;
+      return;
+    }
+
     const desiredOscillators = new Map(program.oscillators.map((definition) => [definition.name, definition]));
-    const desiredRoutes = new Map(program.routes.map((route) => [`${route.source}.out->${route.destination}`, route]));
+    const desiredVoices = new Map(program.voices.map((definition) => [definition.name, definition]));
+    const desiredGains = new Map(program.gains.map((definition) => [definition.name, definition]));
+    const desiredRoutes = new Map(program.routes.map((route) => [`${route.source}->${route.destination}`, route]));
     const desiredViews = new Set(program.views.map((view) => view.signal));
 
-    // Views and routes are removed before objects so their taps/connections can
-    // be detached cleanly from nodes that may be retired in the same reconcile.
     for (const signal of this.views.keys()) {
       if (!desiredViews.has(signal)) this.removeView(signal);
     }
 
-    // Remove routes first so an oscillator can be safely retired afterwards.
     for (const [key] of this.routes) {
       if (!desiredRoutes.has(key)) this.removeRoute(key);
     }
@@ -99,13 +147,31 @@ export class AudioEngine {
       if (!desiredOscillators.has(name)) this.removeOscillator(name);
     }
 
+    for (const [name] of this.gains) {
+      if (!desiredGains.has(name)) this.removeGain(name);
+    }
+
+    for (const [name] of this.voices) {
+      if (!desiredVoices.has(name)) this.removeVoice(name);
+    }
+
     for (const definition of program.oscillators) {
       this.createOscillator(definition.name);
       this.setOscillatorFrequency(definition.name, definition.frequency, false);
     }
 
+    for (const definition of program.voices) {
+      this.createVoice(definition);
+      this.updateVoice(definition);
+    }
+
+    for (const definition of program.gains) {
+      this.createGain(definition.name);
+      this.setGainLevel(definition.name, definition.level, false);
+    }
+
     for (const route of program.routes) {
-      this.connectToMain(route.source, route.amount, false);
+      this.connect(route.source, route.destination, route.amount, false);
     }
 
     for (const view of program.views) this.createView(view.signal);
@@ -133,6 +199,57 @@ export class AudioEngine {
     });
   }
 
+  private createVoice(definition: AudioProgram['voices'][number]): void {
+    if (this.voices.has(definition.name)) return;
+    if (!this.voiceWorkletLoaded || !this.voiceWasmBytes) {
+      throw new Error('Voice DSP is not ready; run :start after building the DSP');
+    }
+
+    const context = this.ensureContext();
+    const wasmBytes = this.voiceWasmBytes.slice(0);
+    const node = new AudioWorkletNode(context, 'sonus-voice', {
+      numberOfInputs: 0,
+      numberOfOutputs: 2,
+      outputChannelCount: [1, 1],
+      processorOptions: { wasmBytes },
+    });
+
+    this.voices.set(definition.name, {
+      node,
+      model: definition.model,
+      frequency: definition.frequency,
+      harmo: definition.harmo,
+      timbre: definition.timbre,
+      morph: definition.morph,
+    });
+  }
+
+  private updateVoice(definition: AudioProgram['voices'][number]): void {
+    const voice = this.voices.get(definition.name);
+    if (!voice) return;
+    voice.model = definition.model;
+    voice.frequency = definition.frequency;
+    voice.harmo = definition.harmo;
+    voice.timbre = definition.timbre;
+    voice.morph = definition.morph;
+    voice.node.port.postMessage({
+      type: 'params',
+      model: definition.model,
+      frequency: definition.frequency,
+      harmo: definition.harmo / 100,
+      timbre: definition.timbre / 100,
+      morph: definition.morph / 100,
+    });
+  }
+
+  createGain(name: string): void {
+    if (this.gains.has(name)) return;
+    const context = this.ensureContext();
+    const node = context.createGain();
+    node.gain.value = 1;
+    this.gains.set(name, { node, level: 100 });
+  }
+
   setOscillatorFrequency(name: string, frequency: number, emit = true): void {
     if (!Number.isFinite(frequency) || frequency < 20 || frequency > 20000) {
       throw new RangeError('frequency must be between 20 and 20000 Hz');
@@ -154,17 +271,27 @@ export class AudioEngine {
     this.setOscillatorFrequency(name, frequency);
   }
 
-  connectToMain(name: string, amount = 100, emit = true): void {
+  setGainLevel(name: string, level: number, emit = true): void {
+    if (!Number.isFinite(level) || level < 0 || level > 100) {
+      throw new RangeError('gain level must be between 0 and 100');
+    }
+
+    const voice = this.requireGain(name);
+    const context = this.ensureContext();
+    voice.level = level;
+    voice.node.gain.setTargetAtTime(level / 100, context.currentTime, 0.008);
+    if (emit) this.emit();
+  }
+
+  connect(source: string, destination: string, amount = 100, emit = true): void {
     if (!Number.isFinite(amount) || amount < 0 || amount > 100) {
       throw new RangeError('route amount must be between 0 and 100');
     }
 
-    const voice = this.requireOscillator(name);
     const context = this.ensureContext();
-    const master = this.master;
-    if (!master) throw new Error('audio engine unavailable');
-
-    const routeKey = `${name}.out->Main.in`;
+    const sourceSignal = this.sourceForSignal(source);
+    const destinationNode = this.destinationNodeForPort(destination);
+    const routeKey = `${source}->${destination}`;
     const existing = this.routes.get(routeKey);
     const normalized = amount / 100;
 
@@ -177,9 +304,9 @@ export class AudioEngine {
 
     const gain = context.createGain();
     gain.gain.value = normalized;
-    voice.output.connect(gain);
-    gain.connect(master);
-    this.routes.set(routeKey, { gain, amount });
+    sourceSignal.node.connect(gain, sourceSignal.output, 0);
+    gain.connect(destinationNode);
+    this.routes.set(routeKey, { gain, amount, source, destination });
     if (emit) this.emit();
   }
 
@@ -198,11 +325,11 @@ export class AudioEngine {
     if (this.views.has(signal)) return;
 
     const context = this.ensureContext();
-    const source = this.sourceNodeForSignal(signal);
+    const source = this.sourceForSignal(signal);
     const analyser = context.createAnalyser();
     analyser.fftSize = 512;
     analyser.smoothingTimeConstant = 0;
-    source.connect(analyser);
+    source.node.connect(analyser, source.output, 0);
     this.views.set(signal, analyser);
   }
 
@@ -211,7 +338,7 @@ export class AudioEngine {
     if (!analyser) return;
 
     try {
-      this.sourceNodeForSignal(signal).disconnect(analyser);
+      this.sourceForSignal(signal).node.disconnect(analyser);
     } catch {
       // The source may already have been retired; disconnecting the analyser is enough.
     }
@@ -219,16 +346,38 @@ export class AudioEngine {
     this.views.delete(signal);
   }
 
-  private sourceNodeForSignal(signal: string): AudioNode {
+  private sourceForSignal(signal: string): SignalSource {
     if (signal === 'Main.out') {
+      this.ensureContext();
+      if (!this.master) throw new Error('audio engine unavailable');
+      return { node: this.master, output: 0 };
+    }
+
+    const match = signal.match(/^([A-Za-z_]\w*)\.(out|aux)$/);
+    if (!match) throw new Error(`unknown signal: ${signal}`);
+    const [, name, port] = match;
+
+    const voice = this.voices.get(name);
+    if (voice) return { node: voice.node, output: port === 'aux' ? 1 : 0 };
+
+    if (port === 'aux') throw new Error(`aux output is not available on ${name}`);
+    const oscillator = this.oscillators.get(name);
+    if (oscillator) return { node: oscillator.output, output: 0 };
+    const gain = this.gains.get(name);
+    if (gain) return { node: gain.node, output: 0 };
+    throw new Error(`unknown object: ${name}`);
+  }
+
+  private destinationNodeForPort(port: string): AudioNode {
+    if (port === 'Main.in') {
       this.ensureContext();
       if (!this.master) throw new Error('audio engine unavailable');
       return this.master;
     }
 
-    const match = signal.match(/^([A-Za-z_]\w*)\.out$/);
-    if (!match) throw new Error(`unknown signal: ${signal}`);
-    return this.requireOscillator(match[1]).output;
+    const match = port.match(/^([A-Za-z_]\w*)\.in$/);
+    if (!match) throw new Error(`unknown destination: ${port}`);
+    return this.requireGain(match[1]).node;
   }
 
   async testTone(frequency = 440): Promise<void> {
@@ -304,6 +453,12 @@ export class AudioEngine {
     const route = this.routes.get(key);
     if (!route) return;
 
+    try {
+      this.sourceForSignal(route.source).node.disconnect(route.gain);
+    } catch {
+      // Source may already have gone away during reconcile.
+    }
+
     const context = this.context;
     if (context) {
       const now = context.currentTime;
@@ -342,10 +497,47 @@ export class AudioEngine {
     this.oscillators.delete(name);
   }
 
+  private removeVoice(name: string): void {
+    const voice = this.voices.get(name);
+    if (!voice) return;
+    this.removeView(`${name}.out`);
+    this.removeView(`${name}.aux`);
+    voice.node.disconnect();
+    voice.node.port.close();
+    this.voices.delete(name);
+  }
+
+  private removeGain(name: string): void {
+    const voice = this.gains.get(name);
+    if (!voice) return;
+    this.removeView(`${name}.out`);
+    voice.node.disconnect();
+    this.gains.delete(name);
+  }
+
   private requireOscillator(name: string): OscillatorVoice {
     const voice = this.oscillators.get(name);
     if (!voice) throw new Error(`unknown object: ${name}`);
     return voice;
+  }
+
+  private requireGain(name: string): GainVoice {
+    const voice = this.gains.get(name);
+    if (!voice) throw new Error(`unknown gain: ${name}`);
+    return voice;
+  }
+
+  private async ensureVoiceRuntime(): Promise<void> {
+    if (this.voiceWorkletLoaded && this.voiceWasmBytes) return;
+
+    const context = this.ensureContext();
+    const response = await fetch('/dsp/voice.wasm');
+    if (!response.ok) {
+      throw new Error('Voice DSP missing. Run npm run dsp:setup and npm run dsp:build.');
+    }
+    this.voiceWasmBytes = await response.arrayBuffer();
+    await context.audioWorklet.addModule('/worklets/voice-processor.js');
+    this.voiceWorkletLoaded = true;
   }
 
   private ensureContext(): AudioContext {

@@ -4,7 +4,7 @@ import { SonusEvaluationError, SonusRuntime, type SchemeConnection, type SchemeM
 
 type Screen = 'live' | 'config' | 'help' | 'scheme';
 
-const VERSION = '0.0.3';
+const VERSION = '0.0.4';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Missing #app');
@@ -719,8 +719,8 @@ async function runCommand(raw: string): Promise<void> {
       try {
         await audioEngine.start();
         notify('audio engine running');
-      } catch {
-        notify('audio start failed');
+      } catch (error) {
+        notify(error instanceof Error ? error.message : 'audio start failed');
       }
       return;
     case 'stop':
