@@ -1,6 +1,6 @@
 import './style.css';
 import { AudioEngine } from './audio/engine';
-import { SonusEvaluationError, SonusRuntime, type SchemeConnection, type SchemeModel, type SchemeNode } from './language/runtime';
+import { SonusEvaluationError, SonusRuntime, type ParameterViewState, type SchemeConnection, type SchemeModel, type SchemeNode } from './language/runtime';
 
 type Screen = 'live' | 'config' | 'help' | 'scheme';
 
@@ -252,7 +252,12 @@ function evaluateLiveSource(): void {
 
 
 function syncViews(): void {
-  const views = audioEngine.getViewSignals();
+  const signalViews = audioEngine.getViewSignals();
+  const parameterViews = runtime.getParameterViews();
+  const views = [
+    ...signalViews.map((view) => ({ signal: view.signal, kind: view.kind as string, parameter: null as ParameterViewState | null })),
+    ...parameterViews.map((view) => ({ signal: view.signal, kind: 'parameter', parameter: view })),
+  ];
   const hasViews = views.length > 0;
   liveScreen.classList.toggle('with-views', hasViews);
   viewPanel.classList.toggle('hidden', !hasViews);
@@ -262,10 +267,16 @@ function syncViews(): void {
   );
 
   for (const view of views) {
-    const { signal, kind } = view;
+    const { signal, kind, parameter } = view;
     let card = existing.get(signal);
     if (card) {
       card.dataset.kind = kind;
+      if (kind === 'parameter' && parameter) {
+        const value = card.querySelector<HTMLElement>('.parameter-value');
+        const base = card.querySelector<HTMLElement>('.parameter-base');
+        if (value) value.textContent = parameter.value;
+        if (base) base.textContent = parameter.base;
+      }
       existing.delete(signal);
       continue;
     }
@@ -279,13 +290,28 @@ function syncViews(): void {
     title.className = 'view-title';
     title.textContent = `${signal.toUpperCase()} / ${kind.toUpperCase()}`;
 
-    const canvas = document.createElement('canvas');
-    canvas.className = `scope-canvas view-${kind}`;
-    canvas.dataset.signal = signal;
-    canvas.dataset.kind = kind;
-    canvas.setAttribute('aria-label', `${signal} ${kind} monitor`);
+    if (kind === 'parameter' && parameter) {
+      const readout = document.createElement('div');
+      readout.className = 'parameter-readout';
+      readout.dataset.signal = signal;
 
-    card.append(title, canvas);
+      const valueRow = document.createElement('div');
+      valueRow.className = 'parameter-row';
+      valueRow.innerHTML = `<span>VALUE</span><span class="parameter-value">${parameter.value}</span>`;
+
+      const baseRow = document.createElement('div');
+      baseRow.className = 'parameter-row parameter-base-row';
+      baseRow.innerHTML = `<span>BASE</span><span class="parameter-base">${parameter.base}</span>`;
+      readout.append(valueRow, baseRow);
+      card.append(title, readout);
+    } else {
+      const canvas = document.createElement('canvas');
+      canvas.className = `scope-canvas view-${kind}`;
+      canvas.dataset.signal = signal;
+      canvas.dataset.kind = kind;
+      canvas.setAttribute('aria-label', `${signal} ${kind} monitor`);
+      card.append(title, canvas);
+    }
     viewStack.append(card);
   }
 
@@ -419,7 +445,7 @@ function renderScheme(): void {
   requestAnimationFrame(() => {
     layoutScheme(model, nodeElements);
     drawSchemeConnections(model.connections, nodeElements);
-    if (model.nodes.some((node) => node.kind === 'view') && scopeFrame === 0) {
+    if (model.nodes.some((node) => (node.views?.length ?? 0) > 0) && scopeFrame === 0) {
       scopeFrame = requestAnimationFrame(drawScopes);
     }
   });
@@ -427,7 +453,7 @@ function renderScheme(): void {
 
 function buildSchemeNode(node: SchemeNode): HTMLElement {
   const element = document.createElement('section');
-  element.className = `scheme-node ${node.kind === 'view' ? 'scheme-view-node' : 'scheme-module-node'}`;
+  element.className = 'scheme-node scheme-module-node';
   element.dataset.nodeId = node.id;
 
   const title = document.createElement('div');
@@ -446,13 +472,21 @@ function buildSchemeNode(node: SchemeNode): HTMLElement {
     element.append(row);
   }
 
-  if (node.kind === 'view' && node.signal) {
+  for (const view of node.views ?? []) {
+    const embedded = document.createElement('div');
+    embedded.className = 'scheme-embedded-view';
+
+    const label = document.createElement('div');
+    label.className = 'scheme-view-label';
+    label.textContent = view.port;
+
     const canvas = document.createElement('canvas');
-    canvas.className = `scope-canvas scheme-scope view-${node.signalKind ?? 'signal'}`;
-    canvas.dataset.signal = node.signal;
-    canvas.dataset.kind = node.signalKind ?? 'signal';
-    canvas.setAttribute('aria-label', `${node.signal} oscilloscope`);
-    element.append(canvas);
+    canvas.className = `scope-canvas scheme-scope view-${view.signalKind}`;
+    canvas.dataset.signal = view.signal;
+    canvas.dataset.kind = view.signalKind;
+    canvas.setAttribute('aria-label', `${view.signal} ${view.signalKind} monitor`);
+    embedded.append(label, canvas);
+    element.append(embedded);
   }
 
   return element;
@@ -501,7 +535,7 @@ function layoutScheme(model: SchemeModel, elements: Map<string, HTMLElement>): v
 
 function calculateSchemeLevels(model: SchemeModel): Map<string, number> {
   const levels = new Map(model.nodes.map((node) => [node.id, 0]));
-  const nonViewIds = new Set(model.nodes.filter((node) => node.kind !== 'view').map((node) => node.id));
+  const nonViewIds = new Set(model.nodes.map((node) => node.id));
   const graphEdges = model.connections.filter((connection) => connection.type !== 'view' && nonViewIds.has(connection.source) && nonViewIds.has(connection.target));
 
   // Relax edges instead of requiring a strict DAG. This gives a stable left-to-right
@@ -517,10 +551,6 @@ function calculateSchemeLevels(model: SchemeModel): Map<string, number> {
       }
     }
     if (!changed) break;
-  }
-
-  for (const edge of model.connections.filter((connection) => connection.type === 'view')) {
-    levels.set(edge.target, (levels.get(edge.source) ?? 0) + 1);
   }
 
   return levels;

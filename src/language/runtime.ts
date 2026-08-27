@@ -14,13 +14,27 @@ export interface SchemeParameter {
   value: string;
 }
 
+export type ViewKind = SignalKind | 'parameter';
+
+export interface ParameterViewState {
+  signal: string;
+  label: string;
+  value: string;
+  base: string;
+}
+
+export interface SchemeEmbeddedView {
+  signal: string;
+  signalKind: SignalKind;
+  port: string;
+}
+
 export interface SchemeNode {
   id: string;
   label: string;
-  kind: 'module' | 'view';
+  kind: 'module';
   parameters: SchemeParameter[];
-  signal?: string;
-  signalKind?: SignalKind;
+  views?: SchemeEmbeddedView[];
 }
 
 export interface SchemeConnection {
@@ -30,7 +44,7 @@ export interface SchemeConnection {
   targetPort?: string;
   type: SignalKind | 'view';
   amount?: number;
-  signalKind?: SignalKind;
+  signalKind?: ViewKind;
 }
 
 export interface SchemeModel {
@@ -78,6 +92,8 @@ interface ClockDefinition {
 }
 
 export class SonusRuntime {
+  private parameterViews: ParameterViewState[] = [];
+
   private scheme: SchemeModel = {
     nodes: [{ id: 'Main', label: 'MAIN', kind: 'module', parameters: [] }],
     connections: [],
@@ -85,11 +101,16 @@ export class SonusRuntime {
 
   constructor(private readonly audio: AudioEngine) {}
 
+  getParameterViews(): ParameterViewState[] {
+    return this.parameterViews.map((view) => ({ ...view }));
+  }
+
   getSchemeModel(): SchemeModel {
     return {
       nodes: this.scheme.nodes.map((node) => ({
         ...node,
         parameters: node.parameters.map((parameter) => ({ ...parameter })),
+        views: node.views?.map((view) => ({ ...view })),
       })),
       connections: this.scheme.connections.map((connection) => ({ ...connection })),
     };
@@ -102,7 +123,8 @@ export class SonusRuntime {
     const routes = new Map<string, RouteDefinition>();
     const clockSources = new Map<string, ClockDefinition>();
     let clockBpm = 0;
-    const views = new Map<string, SignalKind>();
+    const views = new Map<string, ViewKind>();
+    const parameterViews = new Map<string, ParameterViewState>();
     const results: EvaluationResult[] = [];
     const diagnostics: SonusDiagnostic[] = [];
 
@@ -310,6 +332,36 @@ export class SonusRuntime {
         continue;
       }
 
+      match = line.match(/^([A-Za-z_]\w*)\.(freq|harmo|timbre|morph|model|level)\.view\(\s*\)\s*$/);
+      if (match) {
+        const [, name, parameter] = match;
+        const oscillator = oscillators.get(name);
+        const voice = voices.get(name);
+        const gain = gains.get(name);
+        let value: string | null = null;
+
+        if (parameter === 'freq') {
+          if (oscillator) value = `${formatNumber(oscillator.frequency)} HZ`;
+          else if (voice) value = `${formatNumber(voice.frequency)} HZ`;
+        } else if (parameter === 'model' && voice) {
+          value = formatVoiceModel(voice.model);
+        } else if ((parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph') && voice) {
+          value = `${formatNumber(voice[parameter])}%`;
+        } else if (parameter === 'level' && gain) {
+          value = `${formatNumber(gain.level)}%`;
+        }
+
+        if (value === null) {
+          diagnostics.push({ line: lineNumber, message: `parameter ${parameter} is not available on ${name}` });
+          continue;
+        }
+
+        const signal = `${name}.${parameter}`;
+        views.set(signal, 'parameter');
+        results.push({ message: `${signal} view` });
+        continue;
+      }
+
       if (/^Main(?:\.out)?\.view\(\s*\)\s*$/.test(line)) {
         views.set('Main.out', 'signal');
         results.push({ message: 'Main.out view' });
@@ -382,9 +434,56 @@ export class SonusRuntime {
 
     if (diagnostics.length > 0) throw new SonusEvaluationError(diagnostics);
 
+    // Parameter views are declarative like the rest of the source. Resolve their
+    // values only after every parameter statement has been applied, so the view
+    // reflects the final document state regardless of where .view() appears.
+    for (const [signal, kind] of views.entries()) {
+      if (kind !== 'parameter') continue;
+
+      const [name, parameter] = signal.split('.');
+      const oscillator = oscillators.get(name);
+      const voice = voices.get(name);
+      const gain = gains.get(name);
+      let value: string | null = null;
+
+      if (parameter === 'freq') {
+        if (oscillator) value = `${formatNumber(oscillator.frequency)} HZ`;
+        else if (voice) value = `${formatNumber(voice.frequency)} HZ`;
+      } else if (parameter === 'model' && voice) {
+        value = formatVoiceModel(voice.model);
+      } else if ((parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph') && voice) {
+        value = `${formatNumber(voice[parameter])}%`;
+      } else if (parameter === 'level' && gain) {
+        value = `${formatNumber(gain.level)}%`;
+      }
+
+      if (value !== null) {
+        parameterViews.set(signal, {
+          signal,
+          label: signal.toUpperCase(),
+          value,
+          base: value,
+        });
+      }
+    }
+
+    const embeddedViews = new Map<string, SchemeEmbeddedView[]>();
+    for (const [signal, signalKind] of views) {
+      if (signalKind === 'parameter') continue;
+      const owner = signal === 'Main.out'
+        ? 'Main'
+        : signal === 'Clock.out'
+          ? 'Clock'
+          : signal.replace(/\.(out|aux)$/, '');
+      const port = signal.endsWith('.aux') ? 'AUX' : 'OUT';
+      const ownerViews = embeddedViews.get(owner) ?? [];
+      ownerViews.push({ signal, signalKind, port });
+      embeddedViews.set(owner, ownerViews);
+    }
+
     const schemeNodes: SchemeNode[] = [
-      { id: 'Clock', label: 'CLOCK', kind: 'module' as const, parameters: clockBpm > 0 ? [{ name: 'BPM', value: formatNumber(clockBpm) }] : [] },
-      ...[...clockSources.entries()].map(([name, definition]) => ({ id: name, label: `${name.toUpperCase()} : CLOCK`, kind: 'module' as const, parameters: [...definition.parameters.entries()].map(([parameterName, value]) => ({ name: parameterName, value })) })),
+      { id: 'Clock', label: 'CLOCK', kind: 'module' as const, parameters: clockBpm > 0 ? [{ name: 'BPM', value: formatNumber(clockBpm) }] : [], views: embeddedViews.get('Clock') },
+      ...[...clockSources.entries()].map(([name, definition]) => ({ id: name, label: `${name.toUpperCase()} : CLOCK`, kind: 'module' as const, parameters: [...definition.parameters.entries()].map(([parameterName, value]) => ({ name: parameterName, value })), views: embeddedViews.get(name) })),
       ...[...oscillators.entries()].map(([name, definition]) => ({
         id: name,
         label: `${name.toUpperCase()} : OSC`,
@@ -393,6 +492,7 @@ export class SonusRuntime {
           name: parameterName,
           value,
         })),
+        views: embeddedViews.get(name),
       })),
       ...[...voices.entries()].map(([name, definition]) => ({
         id: name,
@@ -402,6 +502,7 @@ export class SonusRuntime {
           name: parameterName,
           value,
         })),
+        views: embeddedViews.get(name),
       })),
       ...[...gains.entries()].map(([name, definition]) => ({
         id: name,
@@ -411,16 +512,9 @@ export class SonusRuntime {
           name: parameterName,
           value,
         })),
+        views: embeddedViews.get(name),
       })),
-      { id: 'Main', label: 'MAIN', kind: 'module' as const, parameters: [] },
-      ...[...views.entries()].map(([signal, signalKind]) => ({
-        id: `view:${signal}`,
-        label: `VIEW : ${signal.toUpperCase()}`,
-        kind: 'view' as const,
-        parameters: [],
-        signal,
-        signalKind,
-      })),
+      { id: 'Main', label: 'MAIN', kind: 'module' as const, parameters: [], views: embeddedViews.get('Main') },
     ];
 
     const schemeConnections: SchemeConnection[] = [
@@ -432,16 +526,6 @@ export class SonusRuntime {
         type: route.kind,
         amount: route.amount,
       })),
-      ...[...views.entries()].map(([signal, signalKind]) => {
-        const source = signal === 'Main.out' ? 'Main' : signal === 'Clock.out' ? 'Clock' : signal.replace(/\.(out|aux)$/, '');
-        return {
-          source,
-          target: `view:${signal}`,
-          sourcePort: signal.endsWith('.aux') ? 'AUX' : 'OUT',
-          type: 'view' as const,
-          signalKind,
-        };
-      }),
     ];
 
     this.scheme = { nodes: schemeNodes, connections: schemeConnections };
@@ -470,9 +554,12 @@ export class SonusRuntime {
         destination: route.target,
         amount: route.amount,
       })),
-      views: [...views.entries()].map(([signal, kind]) => ({ signal, kind })),
+      views: [...views.entries()]
+        .filter(([, kind]) => kind !== 'parameter')
+        .map(([signal, kind]) => ({ signal, kind: kind as SignalKind })),
     };
 
+    this.parameterViews = [...parameterViews.values()];
     this.audio.applyProgram(program);
     return results.length > 0 ? results : [{ message: 'ok' }];
   }
@@ -577,7 +664,7 @@ function applyOscillatorCall(
   objectName: string,
   oscillator: OscillatorDefinition,
   call: ChainedCall,
-  views: Map<string, SignalKind>,
+  views: Map<string, ViewKind>,
 ): string | null {
   switch (call.name) {
     case 'freq': {
@@ -613,7 +700,7 @@ function applyGainCall(
   objectName: string,
   gain: GainDefinition,
   call: ChainedCall,
-  views: Map<string, SignalKind>,
+  views: Map<string, ViewKind>,
 ): string | null {
   switch (call.name) {
     case 'level': {
@@ -644,7 +731,7 @@ function applyVoiceCall(
   objectName: string,
   voice: VoiceDefinition,
   call: ChainedCall,
-  views: Map<string, SignalKind>,
+  views: Map<string, ViewKind>,
 ): string | null {
   switch (call.name) {
     case 'model': {
