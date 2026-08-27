@@ -44,7 +44,9 @@ app.innerHTML = `
         <div class="system-copy muted">ESC  RETURN TO LIVE</div>
       </div>
 
-      <div id="phosphor-layer" class="phosphor-layer" aria-hidden="true"></div>
+      <div id="phosphor-layer" class="phosphor-layer" aria-hidden="true">
+        <span id="block-caret" class="block-caret hidden"></span>
+      </div>
       <div id="message" class="message" aria-live="polite"></div>
     </section>
 
@@ -63,6 +65,7 @@ const configScreen = must<HTMLElement>('config-screen');
 const helpScreen = must<HTMLElement>('help-screen');
 const phosphorLayer = must<HTMLElement>('phosphor-layer');
 const message = must<HTMLElement>('message');
+const blockCaret = must<HTMLElement>('block-caret');
 
 let screen: Screen = 'live';
 let commandMode = false;
@@ -86,6 +89,7 @@ function showScreen(next: Screen): void {
   configScreen.setAttribute('aria-hidden', String(next !== 'config'));
   helpScreen.setAttribute('aria-hidden', String(next !== 'help'));
   if (next === 'live') editor.focus();
+  requestAnimationFrame(positionBlockCaret);
 }
 
 function enterCommandMode(): void {
@@ -94,6 +98,7 @@ function enterCommandMode(): void {
   commandbar.classList.remove('hidden');
   command.value = '';
   command.focus();
+  positionBlockCaret();
 }
 
 function leaveCommandMode(): void {
@@ -101,6 +106,7 @@ function leaveCommandMode(): void {
   commandbar.classList.add('hidden');
   command.value = '';
   editor.focus();
+  requestAnimationFrame(positionBlockCaret);
 }
 
 function notify(text: string): void {
@@ -129,20 +135,90 @@ function placeCaretAtEnd(element: HTMLElement): void {
   selection.addRange(range);
 }
 
+function caretRect(): DOMRect | null {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0 || !editor.contains(selection.anchorNode)) return null;
+
+  const range = selection.getRangeAt(0).cloneRange();
+  if (!range.collapsed) range.collapse(false);
+
+  const direct = range.getClientRects()[0];
+  if (direct && direct.height > 0) return direct;
+
+  const node = range.startContainer;
+  const offset = range.startOffset;
+  const lineHeight = Number.parseFloat(getComputedStyle(editor).lineHeight) || 24;
+
+  if (node.nodeType === Node.TEXT_NODE && offset > 0) {
+    const previous = document.createRange();
+    previous.setStart(node, offset - 1);
+    previous.setEnd(node, offset);
+    const rect = previous.getBoundingClientRect();
+    if (rect.height > 0) {
+      return new DOMRect(rect.right, rect.top, 0, rect.height);
+    }
+  }
+
+  // Chromium commonly places the caret inside a fresh DIV after Enter.
+  // Use that line container instead of falling back to the editor origin.
+  if (node.nodeType === Node.ELEMENT_NODE && node !== editor) {
+    const elementRect = (node as Element).getBoundingClientRect();
+    if (elementRect.height > 0) {
+      return new DOMRect(elementRect.left, elementRect.top, 0, lineHeight);
+    }
+  }
+
+  if (node === editor && offset > 0) {
+    const previousNode = editor.childNodes[offset - 1];
+    if (previousNode instanceof Element) {
+      const previousRect = previousNode.getBoundingClientRect();
+      if (previousRect.height > 0) {
+        return new DOMRect(previousRect.left, previousRect.bottom, 0, lineHeight);
+      }
+    }
+  }
+
+  const editorRect = editor.getBoundingClientRect();
+  return new DOMRect(editorRect.left, editorRect.top, 0, lineHeight);
+}
+
+function positionBlockCaret(): void {
+  if (screen !== 'live' || commandMode || document.activeElement !== editor) {
+    blockCaret.classList.add('hidden');
+    return;
+  }
+
+  const rect = caretRect();
+  if (!rect) {
+    blockCaret.classList.add('hidden');
+    return;
+  }
+
+  const host = phosphorLayer.getBoundingClientRect();
+  const editorStyle = getComputedStyle(editor);
+  const fontSize = Number.parseFloat(editorStyle.fontSize) || 20;
+  blockCaret.style.fontSize = `${fontSize}px`;
+  blockCaret.style.left = `${rect.left - host.left}px`;
+  const caretHeight = fontSize * 0.78;
+  blockCaret.style.top = `${rect.top - host.top + Math.max(0, (rect.height - caretHeight) * 0.5)}px`;
+  blockCaret.classList.remove('hidden');
+}
+
 function flashAtCaret(text: string): void {
   if (!text || text === '\n') return;
-  const selection = window.getSelection();
-  if (!selection || selection.rangeCount === 0) return;
-  const rect = selection.getRangeAt(0).getBoundingClientRect();
+  const rect = caretRect();
+  if (!rect) return;
+
   const host = phosphorLayer.getBoundingClientRect();
-  if (!rect.width && !rect.height) return;
-  const ghost = document.createElement('span');
-  ghost.className = 'phosphor-ghost';
-  ghost.textContent = text.slice(-1);
-  ghost.style.left = `${rect.left - host.left}px`;
-  ghost.style.top = `${rect.top - host.top}px`;
-  phosphorLayer.appendChild(ghost);
-  window.setTimeout(() => ghost.remove(), 420);
+  const editorStyle = getComputedStyle(editor);
+  const fontSize = Number.parseFloat(editorStyle.fontSize) || 20;
+  const pulse = document.createElement('span');
+  pulse.className = 'phosphor-pulse';
+  pulse.style.fontSize = `${fontSize}px`;
+  pulse.style.left = `${rect.left - host.left}px`;
+  pulse.style.top = `${rect.top - host.top + Math.max(0, (rect.height - fontSize * 0.82) * 0.5)}px`;
+  phosphorLayer.appendChild(pulse);
+  window.setTimeout(() => pulse.remove(), 320);
 }
 
 async function runCommand(raw: string): Promise<void> {
@@ -187,7 +263,7 @@ async function runCommand(raw: string): Promise<void> {
 
 async function saveSource(fileName?: string): Promise<void> {
   const text = sourceText();
-  const suggested = fileName?.endsWith('.su') ? fileName : `${fileName || 'untitled'}.su`;
+  const suggested = fileName?.endsWith('.sum') ? fileName : `${fileName || 'untitled'}.sum`;
 
   try {
     const picker = (window as Window & {
@@ -197,7 +273,7 @@ async function saveSource(fileName?: string): Promise<void> {
     if (picker) {
       const handle = await picker({
         suggestedName: suggested,
-        types: [{ description: 'Sonus Umbrae source', accept: { 'text/plain': ['.su'] } }],
+        types: [{ description: 'Sonus Umbrae source', accept: { 'text/plain': ['.sum'] } }],
       });
       const writable = await handle.createWritable();
       await writable.write(text);
@@ -222,7 +298,7 @@ async function saveSource(fileName?: string): Promise<void> {
 async function loadSource(): Promise<void> {
   const input = document.createElement('input');
   input.type = 'file';
-  input.accept = '.su,text/plain';
+  input.accept = '.sum,text/plain';
   input.addEventListener('change', async () => {
     const file = input.files?.[0];
     if (!file) return;
@@ -231,6 +307,13 @@ async function loadSource(): Promise<void> {
   }, { once: true });
   input.click();
 }
+
+document.addEventListener('selectionchange', () => requestAnimationFrame(positionBlockCaret));
+editor.addEventListener('input', () => requestAnimationFrame(positionBlockCaret));
+editor.addEventListener('keyup', () => requestAnimationFrame(positionBlockCaret));
+editor.addEventListener('pointerup', () => requestAnimationFrame(positionBlockCaret));
+liveScreen.addEventListener('scroll', () => requestAnimationFrame(positionBlockCaret));
+window.addEventListener('resize', () => requestAnimationFrame(positionBlockCaret));
 
 editor.addEventListener('beforeinput', (event) => {
   const input = event as InputEvent;
@@ -274,4 +357,5 @@ window.addEventListener('pointerdown', (event) => {
   if (screen !== 'live' || commandMode) return;
   if (event.target === editor || editor.contains(event.target as Node)) return;
   editor.focus();
+  requestAnimationFrame(positionBlockCaret);
 });
