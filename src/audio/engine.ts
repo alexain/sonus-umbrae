@@ -25,6 +25,17 @@ export interface AudioProgram {
     timbre: number;
     morph: number;
   }>;
+  swells: Array<{
+    name: string;
+    frequency: number;
+    slope: number;
+    shape: number;
+    smooth: number;
+    shift: number;
+    mode: number;
+    outputMode: number;
+    range: number;
+  }>;
   gains: Array<{
     name: string;
     level: number;
@@ -60,11 +71,26 @@ interface GainVoice {
 interface MacroVoice {
   node: AudioWorkletNode;
   vOctInput: GainNode;
+  harmoInput: GainNode;
+  timbreInput: GainNode;
+  morphInput: GainNode;
   model: number;
   frequency: number;
   harmo: number;
   timbre: number;
   morph: number;
+}
+
+interface SwellVoice {
+  node: AudioWorkletNode;
+  frequency: number;
+  slope: number;
+  shape: number;
+  smooth: number;
+  shift: number;
+  mode: number;
+  outputMode: number;
+  range: number;
 }
 
 interface SignalSource {
@@ -110,18 +136,22 @@ export class AudioEngine {
   private oscillators = new Map<string, OscillatorVoice>();
   private gains = new Map<string, GainVoice>();
   private voices = new Map<string, MacroVoice>();
+  private swells = new Map<string, SwellVoice>();
   private clocks = new Map<string, ClockSource>();
   private clockTriggerListeners = new Map<string, Set<() => void>>();
   private masterClockBpm = 0;
   private clockTransportRunning = true;
   private voiceWasmBytes: ArrayBuffer | null = null;
+  private swellWasmBytes: ArrayBuffer | null = null;
   private voiceWorkletLoaded = false;
+  private swellWorkletLoaded = false;
   private clockWorkletLoaded = false;
   private pendingProgram: AudioProgram | null = null;
   private routes = new Map<string, AudioRoute>();
   private views = new Map<string, ViewTap>();
   private controlMonitors = new Map<string, AnalyserNode>();
   private listeners = new Set<AudioEngineListener>();
+  private slowScopeHistory = new Map<string, { values: number[]; lastSampleAt: number }>();
 
   snapshot(): AudioEngineSnapshot {
     return {
@@ -132,7 +162,7 @@ export class AudioEngine {
           : 'suspended',
       sampleRate: this.context?.sampleRate ?? null,
       testFrequency: this.testOscillator?.frequency.value ?? null,
-      objectCount: this.oscillators.size + this.gains.size + this.voices.size + this.clocks.size,
+      objectCount: this.oscillators.size + this.gains.size + this.voices.size + this.swells.size + this.clocks.size,
       routeCount: this.routes.size,
     };
   }
@@ -146,6 +176,7 @@ export class AudioEngine {
   async start(): Promise<void> {
     const context = this.ensureContext();
     await this.ensureVoiceRuntime();
+    await this.ensureSwellRuntime();
     await this.ensureClockRuntime();
     if (context.state !== 'running') await context.resume();
     if (this.pendingProgram) {
@@ -164,7 +195,8 @@ export class AudioEngine {
   }
 
   applyProgram(program: AudioProgram): void {
-    if (program.voices.length > 0 && !this.voiceWorkletLoaded) {
+    if ((program.voices.length > 0 && !this.voiceWorkletLoaded) ||
+        (program.swells.length > 0 && !this.swellWorkletLoaded)) {
       this.pendingProgram = program;
       return;
     }
@@ -173,6 +205,7 @@ export class AudioEngine {
     const desiredClockSources = new Map(program.clockSources.map((definition) => [definition.name, definition]));
     const desiredOscillators = new Map(program.oscillators.map((definition) => [definition.name, definition]));
     const desiredVoices = new Map(program.voices.map((definition) => [definition.name, definition]));
+    const desiredSwells = new Map(program.swells.map((definition) => [definition.name, definition]));
     const desiredGains = new Map(program.gains.map((definition) => [definition.name, definition]));
     const desiredRoutes = new Map(program.routes.map((route) => [`${route.source}->${route.destination}`, route]));
     const desiredViews = new Map(program.monitorViews.map((view) => [view.signal, view]));
@@ -201,6 +234,10 @@ export class AudioEngine {
       if (!desiredVoices.has(name)) this.removeVoice(name);
     }
 
+    for (const [name] of this.swells) {
+      if (!desiredSwells.has(name)) this.removeSwell(name);
+    }
+
     for (const definition of program.clockSources) this.createOrUpdateClock(definition.name, definition.rate);
     this.updateAllClocks();
 
@@ -212,6 +249,11 @@ export class AudioEngine {
     for (const definition of program.voices) {
       this.createVoice(definition);
       this.updateVoice(definition);
+    }
+
+    for (const definition of program.swells) {
+      this.createSwell(definition);
+      this.updateSwell(definition);
     }
 
     for (const definition of program.gains) {
@@ -257,18 +299,30 @@ export class AudioEngine {
     const context = this.ensureContext();
     const wasmBytes = this.voiceWasmBytes.slice(0);
     const node = new AudioWorkletNode(context, 'sonus-voice', {
-      numberOfInputs: 2,
+      numberOfInputs: 5,
       numberOfOutputs: 2,
       outputChannelCount: [1, 1],
       processorOptions: { wasmBytes },
     });
     const vOctInput = context.createGain();
+    const harmoInput = context.createGain();
+    const timbreInput = context.createGain();
+    const morphInput = context.createGain();
     vOctInput.gain.value = 1;
+    harmoInput.gain.value = 1;
+    timbreInput.gain.value = 1;
+    morphInput.gain.value = 1;
     vOctInput.connect(node, 0, 1);
+    harmoInput.connect(node, 0, 2);
+    timbreInput.connect(node, 0, 3);
+    morphInput.connect(node, 0, 4);
 
     this.voices.set(definition.name, {
       node,
       vOctInput,
+      harmoInput,
+      timbreInput,
+      morphInput,
       model: definition.model,
       frequency: definition.frequency,
       harmo: definition.harmo,
@@ -292,6 +346,55 @@ export class AudioEngine {
       harmo: definition.harmo / 100,
       timbre: definition.timbre / 100,
       morph: definition.morph / 100,
+    });
+  }
+
+  private createSwell(definition: AudioProgram['swells'][number]): void {
+    if (this.swells.has(definition.name)) return;
+    if (!this.swellWorkletLoaded || !this.swellWasmBytes) {
+      throw new Error('Swell DSP is not ready; run :start after building the DSP');
+    }
+    const context = this.ensureContext();
+    const node = new AudioWorkletNode(context, 'sonus-swell', {
+      numberOfInputs: 3,
+      numberOfOutputs: 4,
+      outputChannelCount: [1, 1, 1, 1],
+      processorOptions: { wasmBytes: this.swellWasmBytes.slice(0), sampleRate: context.sampleRate },
+    });
+    this.swells.set(definition.name, {
+      node,
+      frequency: definition.frequency,
+      slope: definition.slope,
+      shape: definition.shape,
+      smooth: definition.smooth,
+      shift: definition.shift,
+      mode: definition.mode,
+      outputMode: definition.outputMode,
+      range: definition.range,
+    });
+  }
+
+  private updateSwell(definition: AudioProgram['swells'][number]): void {
+    const swell = this.swells.get(definition.name);
+    if (!swell) return;
+    swell.frequency = definition.frequency;
+    swell.slope = definition.slope;
+    swell.shape = definition.shape;
+    swell.smooth = definition.smooth;
+    swell.shift = definition.shift;
+    swell.mode = definition.mode;
+    swell.outputMode = definition.outputMode;
+    swell.range = definition.range;
+    swell.node.port.postMessage({
+      type: 'params',
+      frequency: definition.frequency,
+      slope: definition.slope / 100,
+      shape: definition.shape / 100,
+      smooth: definition.smooth / 100,
+      shift: definition.shift / 100,
+      mode: definition.mode,
+      outputMode: definition.outputMode,
+      range: definition.range,
     });
   }
 
@@ -371,7 +474,43 @@ export class AudioEngine {
   readOscilloscope(signal: string, target: Float32Array<ArrayBuffer>): boolean {
     const view = this.views.get(signal);
     if (!view) return false;
-    view.analyser.getFloatTimeDomainData(target);
+
+    const swellMatch = signal.match(/^([A-Za-z_]\w*)\.out[1-4]$/);
+    const swell = swellMatch ? this.swells.get(swellMatch[1]) : undefined;
+    if (!swell) {
+      view.analyser.getFloatTimeDomainData(target);
+      return true;
+    }
+
+    if (swell.frequency >= 12) {
+      view.analyser.getFloatTimeDomainData(target);
+      for (let i = 0; i < target.length; i += 1) target[i] /= 5;
+      return true;
+    }
+
+    // LFO/function-generator scopes need seconds of history rather than the
+    // few milliseconds available in an AnalyserNode FFT buffer.
+    const probe = new Float32Array(32);
+    view.analyser.getFloatTimeDomainData(probe);
+    const now = performance.now() / 1000;
+    const seconds = Math.min(20, Math.max(2, 2 / Math.max(0.05, swell.frequency)));
+    const interval = seconds / Math.max(1, target.length - 1);
+    let history = this.slowScopeHistory.get(signal);
+    if (!history) {
+      history = { values: [], lastSampleAt: now - interval };
+      this.slowScopeHistory.set(signal, history);
+    }
+
+    if (now - history.lastSampleAt >= interval) {
+      history.values.push((probe[probe.length - 1] ?? 0) / 5);
+      history.lastSampleAt = now;
+      if (history.values.length > target.length) history.values.splice(0, history.values.length - target.length);
+    }
+
+    const fill = history.values[0] ?? (probe[probe.length - 1] ?? 0) / 5;
+    target.fill(fill);
+    const offset = target.length - history.values.length;
+    for (let i = 0; i < history.values.length; i += 1) target[offset + i] = history.values[i];
     return true;
   }
 
@@ -399,6 +538,7 @@ export class AudioEngine {
     }
     view.analyser.disconnect();
     this.views.delete(signal);
+    this.slowScopeHistory.delete(signal);
   }
 
   private sourceForSignal(signal: string): SignalSource {
@@ -413,10 +553,17 @@ export class AudioEngine {
       return { node: this.clocks.get(derivedClock[1])!.node, output: 0 };
     }
 
-    if (signal === 'Main.out') {
+    if (signal === 'Audio.out') {
       this.ensureContext();
       if (!this.master) throw new Error('audio engine unavailable');
       return { node: this.master, output: 0 };
+    }
+
+    const swellOutput = signal.match(/^([A-Za-z_]\w*)\.out([1-4])$/);
+    if (swellOutput) {
+      const swell = this.swells.get(swellOutput[1]);
+      if (!swell) throw new Error(`unknown Swell object: ${swellOutput[1]}`);
+      return { node: swell.node, output: Number(swellOutput[2]) - 1 };
     }
 
     const match = signal.match(/^([A-Za-z_]\w*)\.(out|aux)$/);
@@ -435,7 +582,7 @@ export class AudioEngine {
   }
 
   private destinationForPort(port: string): SignalDestination {
-    if (port === 'Main.in') {
+    if (port === 'Audio.out') {
       this.ensureContext();
       if (!this.master) throw new Error('audio engine unavailable');
       return { node: this.master, input: 0 };
@@ -444,15 +591,38 @@ export class AudioEngine {
     const trigger = port.match(/^([A-Za-z_]\w*)\.trig$/);
     if (trigger) {
       const voice = this.voices.get(trigger[1]);
-      if (!voice) throw new Error(`unknown Voice trigger input: ${trigger[1]}`);
-      return { node: voice.node, input: 0 };
+      if (voice) return { node: voice.node, input: 0 };
+      const swell = this.swells.get(trigger[1]);
+      if (swell) return { node: swell.node, input: 0 };
+      throw new Error(`unknown trigger input: ${trigger[1]}`);
+    }
+
+    const clock = port.match(/^([A-Za-z_]\w*)\.clock$/);
+    if (clock) {
+      const swell = this.swells.get(clock[1]);
+      if (!swell) throw new Error(`clock input is only available on Swell objects: ${clock[1]}`);
+      return { node: swell.node, input: 1 };
     }
 
     const vOct = port.match(/^([A-Za-z_]\w*)\.v_oct$/);
     if (vOct) {
       const voice = this.voices.get(vOct[1]);
-      if (!voice) throw new Error(`unknown Voice v_oct input: ${vOct[1]}`);
-      return { node: voice.vOctInput, input: 0 };
+      if (voice) return { node: voice.vOctInput, input: 0 };
+      const swell = this.swells.get(vOct[1]);
+      if (swell) return { node: swell.node, input: 2 };
+      throw new Error(`unknown v_oct input: ${vOct[1]}`);
+    }
+
+    const parameter = port.match(/^([A-Za-z_]\w*)\.(harmo|timbre|morph)$/);
+    if (parameter) {
+      const voice = this.voices.get(parameter[1]);
+      if (!voice) throw new Error(`unknown Voice parameter input: ${parameter[1]}`);
+      const input = parameter[2] === 'harmo'
+        ? voice.harmoInput
+        : parameter[2] === 'timbre'
+          ? voice.timbreInput
+          : voice.morphInput;
+      return { node: input, input: 0 };
     }
 
     const match = port.match(/^([A-Za-z_]\w*)\.in$/);
@@ -708,6 +878,17 @@ export class AudioEngine {
     this.oscillators.delete(name);
   }
 
+  private removeSwell(name: string): void {
+    const swell = this.swells.get(name);
+    if (!swell) return;
+    try { swell.node.disconnect(); } catch {}
+    swell.node.port.close();
+    this.swells.delete(name);
+    for (const signal of [...this.slowScopeHistory.keys()]) {
+      if (signal.startsWith(`${name}.`)) this.slowScopeHistory.delete(signal);
+    }
+  }
+
   private removeVoice(name: string): void {
     const voice = this.voices.get(name);
     if (!voice) return;
@@ -745,6 +926,18 @@ export class AudioEngine {
     return voice;
   }
 
+
+  private async ensureSwellRuntime(): Promise<void> {
+    if (this.swellWorkletLoaded && this.swellWasmBytes) return;
+    const context = this.ensureContext();
+    const response = await fetch('/dsp/swell.wasm');
+    if (!response.ok) {
+      throw new Error('Swell DSP missing. Run npm run dsp:setup and npm run dsp:build.');
+    }
+    this.swellWasmBytes = await response.arrayBuffer();
+    await context.audioWorklet.addModule('/worklets/swell-processor.js');
+    this.swellWorkletLoaded = true;
+  }
 
   private async ensureClockRuntime(): Promise<void> {
     if (this.clockWorkletLoaded) return;

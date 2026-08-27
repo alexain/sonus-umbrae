@@ -275,6 +275,7 @@ function evaluateLiveSource(): boolean {
 function syncViews(): void {
   const signalViews = new Map(audioEngine.getViewSignals().map((view) => [view.signal, view.kind]));
   const explicitSignals = new Set(runtime.getExplicitSignalViews().map((view) => view.signal));
+  const moduleViews = new Set(runtime.getModuleViews());
   const parameterViews = new Map(runtime.getParameterViews().map((view) => [view.signal, view]));
   const variables = runtime.getVariableViews();
   const scheme = runtime.getSchemeModel();
@@ -283,12 +284,12 @@ function syncViews(): void {
 
   panels.push(buildVariablesPanel(variables));
 
-  const main = nodes.get('Main');
+  const audio = nodes.get('Audio');
   panels.push(buildModuleMonitorPanel({
-    id: 'Main',
-    title: 'MAIN.OUT',
-    parameters: main?.parameters ?? [],
-    signals: signalViews.has('Main.out') ? [{ signal: 'Main.out', kind: 'signal', label: 'OUT' }] : [],
+    id: 'Audio',
+    title: 'AUDIO OUT',
+    parameters: audio?.parameters ?? [],
+    signals: signalViews.has('Audio.out') ? [{ signal: 'Audio.out', kind: 'signal', label: 'OUT' }] : [],
     defaultCollapsed: false,
   }));
 
@@ -307,7 +308,7 @@ function syncViews(): void {
   }));
 
   for (const node of scheme.nodes) {
-    if (node.id === 'Main' || node.id === 'Clock') continue;
+    if (node.id === 'Audio' || node.id === 'Clock') continue;
     const isDerivedClock = / : CLOCK$/i.test(node.label);
     const primarySignal = `${node.id}.out`;
     const explicitPrimary = explicitSignals.has(primarySignal);
@@ -315,7 +316,7 @@ function syncViews(): void {
 
     const signals: Array<{ signal: string; kind: string; label: string }> = [];
     const primaryKind = signalViews.get(primarySignal);
-    if (primaryKind && (!isDerivedClock || explicitPrimary)) {
+    if (primaryKind && explicitPrimary) {
       signals.push({ signal: primarySignal, kind: primaryKind, label: 'OUT' });
     }
 
@@ -328,17 +329,25 @@ function syncViews(): void {
     }
 
     const details = [...parameterViews.values()].filter((view) => view.signal.startsWith(`${node.id}.`));
+    const compositeSignals = moduleViews.has(node.id)
+      ? / : SWELL$/i.test(node.label)
+        ? [1, 2, 3, 4].map((port) => `${node.id}.out${port}`)
+        : / : VOICE$/i.test(node.label)
+          ? [`${node.id}.out`, `${node.id}.aux`]
+          : []
+      : [];
 
     // User-created modules exist in VARIABLES and SCHEME automatically, but a
     // LIVE monitor panel is created only by an explicit .view(). Merely
     // creating or changing a module must not consume monitor space.
-    if (signals.length === 0 && details.length === 0) continue;
+    if (signals.length === 0 && details.length === 0 && compositeSignals.length === 0) continue;
 
     panels.push(buildModuleMonitorPanel({
       id: node.id,
       title: node.label,
       parameters: node.parameters,
       signals,
+      compositeSignals,
       parameterDetails: details,
       defaultCollapsed: false,
     }));
@@ -388,12 +397,28 @@ function buildModuleMonitorPanel(options: {
   title: string;
   parameters: Array<{ name: string; value: string; liveSignal?: string }>;
   signals: Array<{ signal: string; kind: string; label: string }>;
+  compositeSignals?: string[];
   parameterDetails?: ParameterViewState[];
   defaultCollapsed: boolean;
 }): HTMLElement {
   const card = createMonitorCard(options.id, options.title, options.defaultCollapsed);
   const body = card.querySelector<HTMLElement>('.monitor-body');
   if (!body) return card;
+
+  if ((options.compositeSignals?.length ?? 0) > 0) {
+    const section = document.createElement('div');
+    section.className = 'monitor-signal monitor-composite';
+    const label = document.createElement('div');
+    label.className = 'monitor-section-label';
+    label.textContent = options.compositeSignals!.length === 2 ? 'OUT / AUX' : 'OUT 1-4';
+    const canvas = document.createElement('canvas');
+    canvas.className = 'scope-canvas view-signal composite-scope';
+    canvas.dataset.signals = options.compositeSignals!.join(',');
+    canvas.dataset.kind = 'multi-signal';
+    canvas.setAttribute('aria-label', `${options.title} four-channel signal monitor`);
+    section.append(label, canvas);
+    body.append(section);
+  }
 
   for (const signal of options.signals) {
     const section = document.createElement('div');
@@ -567,7 +592,8 @@ function drawScopes(): void {
   const phosphor = getComputedStyle(document.documentElement).getPropertyValue('--phosphor-hot').trim() || '#ffe783';
   for (const canvas of canvases) {
     const signal = canvas.dataset.signal;
-    if (!signal) continue;
+    const compositeSignals = canvas.dataset.signals?.split(',').filter(Boolean) ?? [];
+    if (!signal && compositeSignals.length === 0) continue;
 
     const width = Math.max(1, Math.floor(canvas.clientWidth * window.devicePixelRatio));
     const height = Math.max(1, Math.floor(canvas.clientHeight * window.devicePixelRatio));
@@ -586,13 +612,37 @@ function drawScopes(): void {
     ctx.shadowColor = phosphor;
     ctx.shadowBlur = 3 * window.devicePixelRatio;
     const kind = canvas.dataset.kind ?? 'signal';
+    if (kind === 'multi-signal') {
+      const styles = getComputedStyle(document.documentElement);
+      const traceColors = [
+        styles.getPropertyValue('--scope-trace-1').trim() || phosphor,
+        styles.getPropertyValue('--scope-trace-2').trim() || phosphor,
+        styles.getPropertyValue('--scope-trace-3').trim() || phosphor,
+        styles.getPropertyValue('--scope-trace-4').trim() || phosphor,
+      ];
+      compositeSignals.forEach((traceSignal, traceIndex) => {
+        const data = new Float32Array(512);
+        if (!audioEngine.readOscilloscope(traceSignal, data)) return;
+        const traceColor = traceColors[traceIndex % traceColors.length];
+        ctx.strokeStyle = traceColor;
+        ctx.shadowColor = traceColor;
+        ctx.beginPath();
+        for (let i = 0; i < data.length; i += 1) {
+          const x = (i / (data.length - 1)) * width;
+          const y = height * 0.5 - data[i] * height * 0.38;
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      });
+      continue;
+    }
     if (kind === 'trigger') {
-      drawTriggerPhase(ctx, width, height, signal, phosphor);
+      drawTriggerPhase(ctx, width, height, signal!, phosphor);
       continue;
     }
 
     const data = new Float32Array(512);
-    if (!audioEngine.readOscilloscope(signal, data)) continue;
+    if (!signal || !audioEngine.readOscilloscope(signal, data)) continue;
     if (kind === 'gate') {
       ctx.beginPath();
       for (let i = 0; i < data.length; i += 1) {
@@ -746,7 +796,13 @@ function buildSchemeNode(node: SchemeNode): HTMLElement {
     const canvas = document.createElement('canvas');
     canvas.className = `scope-canvas scheme-scope view-${view.signalKind}`;
     canvas.dataset.signal = view.signal;
-    canvas.dataset.kind = view.signalKind;
+    if (view.signals?.length) {
+      canvas.dataset.signals = view.signals.join(',');
+      canvas.dataset.kind = 'multi-signal';
+      canvas.classList.add('composite-scope');
+    } else {
+      canvas.dataset.kind = view.signalKind;
+    }
     canvas.setAttribute('aria-label', `${view.signal} ${view.signalKind} monitor`);
     embedded.append(label, canvas);
     element.append(embedded);
@@ -917,9 +973,13 @@ function showDiagnostics(items: Array<{ line: number; message: string }>): void 
     errorOverlays.append(line);
   }
 
+  const labels = statementLabels(editor.value);
   const summary = items
     .slice(0, 4)
-    .map((item) => `! LINE ${item.line}: ${item.message}`)
+    .map((item) => {
+      const statement = statementNumberForPhysicalLine(labels, item.line);
+      return `! ${statement === null ? `LINE ${item.line}` : `STATEMENT ${statement}`}: ${item.message}`;
+    })
     .join('\n');
   const remaining = items.length - 4;
   diagnostic.textContent = (remaining > 0 ? `${summary}\n! +${remaining} MORE ERROR${remaining === 1 ? '' : 'S'}` : summary).toUpperCase();
@@ -1092,6 +1152,15 @@ function statementLabels(source: string): string[] {
   return labels;
 }
 
+function statementNumberForPhysicalLine(labels: string[], physicalLine: number): number | null {
+  if (physicalLine < 1 || physicalLine > labels.length) return null;
+  for (let index = physicalLine - 1; index >= 0; index -= 1) {
+    const label = labels[index];
+    if (label) return Number(label);
+  }
+  return null;
+}
+
 function statementCompleteBeforeCaret(source: string): boolean {
   let quote: '"' | "'" | null = null;
   let escaped = false;
@@ -1139,6 +1208,13 @@ function statementCompleteBeforeCaret(source: string): boolean {
 
 function renderSyntaxLayer(): void {
   const source = editor.value;
+  const editorStyle = getComputedStyle(editor);
+  syntaxLayer.style.width = `${editor.clientWidth}px`;
+  syntaxLayer.style.fontFamily = editorStyle.fontFamily;
+  syntaxLayer.style.fontSize = editorStyle.fontSize;
+  syntaxLayer.style.fontWeight = editorStyle.fontWeight;
+  syntaxLayer.style.lineHeight = editorStyle.lineHeight;
+  syntaxLayer.style.letterSpacing = editorStyle.letterSpacing;
   syntaxLayer.replaceChildren();
   const lines = source.split('\n');
   lines.forEach((line, index) => {

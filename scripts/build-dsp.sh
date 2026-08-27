@@ -3,7 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VENDOR="$ROOT/vendor/eurorack"
-OUTPUT="$ROOT/public/dsp/voice.wasm"
+VOICE_OUTPUT="$ROOT/public/dsp/voice.wasm"
+SWELL_OUTPUT="$ROOT/public/dsp/swell.wasm"
 
 if ! command -v em++ >/dev/null 2>&1; then
   echo "em++ not found. Install/activate Emscripten (emsdk) before building the DSP." >&2
@@ -15,7 +16,7 @@ if [[ ! -d "$VENDOR/plaits" ]]; then
   exit 1
 fi
 
-mkdir -p "$(dirname "$OUTPUT")"
+mkdir -p "$(dirname "$VOICE_OUTPUT")"
 PLAITS_DSP=()
 while IFS= read -r source; do
   PLAITS_DSP+=("$source")
@@ -38,6 +39,25 @@ em++ \
   -s FILESYSTEM=0 \
   -s EXPORTED_FUNCTIONS='["_su_voice_create","_su_voice_destroy","_su_voice_set_model","_su_voice_set_frequency","_su_voice_set_harmo","_su_voice_set_timbre","_su_voice_set_morph","_su_voice_set_v_oct","_su_voice_set_trigger","_su_voice_process","_su_voice_out","_su_voice_aux"]' \
   -Wl,--no-entry \
-  -o "$OUTPUT"
+  -o "$VOICE_OUTPUT"
 
-echo "Built $OUTPUT"
+echo "Built $VOICE_OUTPUT"
+
+em++ \
+  -std=c++17 \
+  -O3 \
+  -DTEST \
+  -I"$VENDOR" \
+  "$ROOT/dsp/swell_bridge.cc" \
+  "$VENDOR/tides2/poly_slope_generator.cc" \
+  "$VENDOR/tides2/ramp/ramp_extractor.cc" \
+  "$VENDOR/tides2/resources.cc" \
+  -s STANDALONE_WASM=1 \
+  -s ALLOW_MEMORY_GROWTH=0 \
+  -s INITIAL_MEMORY=16777216 \
+  -s FILESYSTEM=0 \
+  -s EXPORTED_FUNCTIONS='["_su_swell_create","_su_swell_destroy","_su_swell_set_sample_rate","_su_swell_set_frequency","_su_swell_set_slope","_su_swell_set_shape","_su_swell_set_smooth","_su_swell_set_shift","_su_swell_set_mode","_su_swell_set_output_mode","_su_swell_set_range","_su_swell_set_trigger_patched","_su_swell_set_clock_patched","_su_swell_trigger","_su_swell_clock","_su_swell_v_oct","_su_swell_process","_su_swell_out1","_su_swell_out2","_su_swell_out3","_su_swell_out4"]' \
+  -Wl,--no-entry \
+  -o "$SWELL_OUTPUT"
+
+echo "Built $SWELL_OUTPUT"

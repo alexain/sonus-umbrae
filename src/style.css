@@ -11,6 +11,11 @@
   --phosphor-hot: #ffe783;
   --bg: #050605;
   --line: rgba(215, 169, 46, 0.35);
+
+  --scope-trace-1: #ffe783;
+  --scope-trace-2: #7fd7ff;
+  --scope-trace-3: #ff9fb8;
+  --scope-trace-4: #a9e68f;
 }
 
 * { box-sizing: border-box; }
@@ -608,10 +613,16 @@ button, input, textarea { font: inherit; }
   will-change: transform;
 }
 
-.syntax-line { min-height: 1.08em; }
+.syntax-line {
+  min-height: 1.08em;
+  line-height: inherit;
+}
 .syntax-comment {
+  display: inline-block;
   color: var(--phosphor-dim);
-  font-style: italic;
+  font-style: normal;
+  transform: skewX(-9deg);
+  transform-origin: left bottom;
   text-shadow: 0 0 4px rgba(215, 169, 46, 0.10);
 }
 
@@ -732,3 +743,5 @@ button, input, textarea { font: inherit; }
   color: var(--phosphor-dim);
   font-size: 14px;
 }
+
+.composite-scope { min-height: 112px; }

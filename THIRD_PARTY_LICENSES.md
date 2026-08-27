@@ -51,3 +51,12 @@ Consult `package-lock.json` and the corresponding upstream projects for authorit
 The current UI prefers Departure Mono when it is available on the system. The font binary is not distributed by this repository.
 
 If Sonus Umbrae later bundles fonts or additional DSP engines, their license notices should be added to this file before distribution.
+
+
+## Mutable Instruments Tides 2018 DSP
+
+`Swell()` uses DSP source code from the `tides2` directory of the Mutable Instruments Eurorack repository.
+
+The Tides 2018 firmware source is released under the MIT License. Sonus Umbrae uses the name **Swell** for its integration and does not use Mutable Instruments or Tides as product branding.
+
+The upstream source is downloaded by the DSP setup process and is not authored by the Sonus Umbrae project.

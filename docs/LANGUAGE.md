@@ -34,22 +34,22 @@ Comments currently begin with `#`.
 
 ## Built-in objects
 
-### Main
+### Audio
 
-`Main` is a built-in singleton representing the system audio interface / master audio endpoint.
+`Audio` is a built-in singleton representing the system audio interface / master audio endpoint.
 
 Send audio to the master input with:
 
 ```text
-a.out -> Main.in
+a.out -> Audio.out
 ```
 
-`Main` cannot be reassigned.
+`Audio` cannot be reassigned.
 
 The master output can be observed with:
 
 ```text
-Main.view()
+Audio.view()
 ```
 
 which is currently equivalent to viewing the main output signal.
@@ -151,8 +151,8 @@ a.aux
 For example:
 
 ```text
-a.out(70) -> Main.in
-a.aux(20) -> Main.in
+a.out(70) -> Audio.out
+a.aux(20) -> Audio.out
 ```
 
 ### Trigger input
@@ -174,7 +174,7 @@ source.port -> destination.port
 Example:
 
 ```text
-a.out -> Main.in
+a.out -> Audio.out
 ```
 
 ### Connection attenuation / inversion
@@ -182,7 +182,7 @@ a.out -> Main.in
 An optional amount on the source endpoint belongs to that specific connection:
 
 ```text
-a.out(50) -> Main.in
+a.out(50) -> Audio.out
 ```
 
 This applies a gain of 50% to that connection.
@@ -315,7 +315,7 @@ The following concepts are being explored but should not yet be treated as imple
 - additional parameter modulation semantics;
 - more synthesis and processing engines;
 - additional signal views such as spectra;
-- multi-channel `Main` I/O;
+- multi-channel `Audio` I/O;
 - richer clock generation, probability, division and multiplication.
 
 The goal is to keep these features compatible with the same declarative, live-reconciled object and routing model.
@@ -348,3 +348,127 @@ Available chaos engines currently include `logistic`, `cubic`, and `henon`.
 `slew(value, amount)` smooths changes at a call-site. `amount` is 0..100, where larger values respond more slowly.
 
 `seed(n);` sets the deterministic random seed used by `rnd`, `choose`, `coin`, `prob`, `walk`, and chaos initialization. Reusing the same seed makes generative behavior reproducible after evaluation.
+
+
+## Swell
+
+`Swell()` is Sonus Umbrae's modulation/function-generator module based on the MIT-licensed DSP from Mutable Instruments Tides 2018.
+
+```text
+mod = Swell()
+    .freq(0.25)
+    .slope(50)
+    .shape(50)
+    .smooth(50)
+    .shift(50);
+```
+
+The initial implementation runs in looping mode and exposes four related signal outputs:
+
+```text
+mod.out1
+mod.out2
+mod.out3
+mod.out4
+```
+
+`mod.view()` is an alias for `mod.out1.view()`. Other outputs are viewed explicitly:
+
+```text
+mod.out2.view();
+```
+
+Swell can modulate Voice parameters directly. Route gain acts as an attenuverter:
+
+```text
+voice = Voice()
+    .timbre(40)
+    .morph(50);
+
+mod = Swell().freq(0.2);
+
+mod.out1(30) -> voice.timbre;
+mod.out2(-20) -> voice.morph;
+```
+
+Audio and CV remain the same `SIGNAL` concept in the language; these connections therefore use the normal routing syntax.
+
+
+### Swell modes and inputs
+
+`Swell()` exposes the main operating modes of the Tides 2018 DSP:
+
+```text
+motion = Swell()
+    .freq(0.25)
+    .mode("loop")
+    .output("phase")
+    .range("control")
+    .slope(50)
+    .shape(50)
+    .smooth(50)
+    .shift(50);
+```
+
+Ramp modes are `"ad"`, `"loop"`, and `"ar"`. Output relationships are `"different"`, `"amplitude"`, `"phase"`, and `"frequency"`. `range("control")` selects the control-rate behavior; `range("audio")` selects the audio-rate behavior. `low`/`medium` are accepted aliases for control and `high` for audio.
+
+Swell has three inputs in addition to its four outputs:
+
+```text
+Clock.out -> motion.trig;
+Clock.out -> motion.clock;
+pitch.out -> motion.v_oct;
+```
+
+`trig` follows the Tides ramp-mode semantics: AD trigger, looping reset, or AR gate. `clock` locks the generator 1:1 to an incoming clock using the original Tides ramp extractor. `v_oct` transposes free-running frequency at 1V/oct.
+
+Low-frequency Swell views automatically use a longer oscilloscope history so LFO and envelope motion remains visible.
+
+
+### Audio I/O
+
+`Audio` is the built-in singleton representing the physical/system audio interface.
+
+The default output route is written from the point of view of the physical destination:
+
+```text
+plaits.out(70) -> Audio.out;
+```
+
+`Audio.out` currently refers to the configured/default system output. The syntax is intentionally designed so future multi-channel interfaces can expose `Audio.out(n)` and physical inputs as `Audio.in(n)` without changing the routing model.
+
+`Audio.out` has an automatic master scope.
+
+### Module views and port views
+
+A `.view()` on a module asks for the module-specific visualizer. A `.view()` on a port asks for the generic visualizer for that individual signal.
+
+For Swell:
+
+```text
+motion.view();
+```
+
+opens one four-channel scope containing `out1`, `out2`, `out3`, and `out4`.
+
+```text
+motion.out1.view();
+```
+
+opens the normal single-signal scope for `out1`.
+
+Both can be active at the same time. The same distinction is intended for future modules such as Pattern, where the object-level view can use a purpose-built visualization while individual ports keep generic signal/gate/trigger views.
+
+
+For `Voice`, the object-level view compares both Plaits outputs in one scope:
+
+```text
+plaits.view();
+```
+
+This overlays `OUT` and `AUX` with separate traces. Individual port views remain available:
+
+```text
+plaits.out.view();
+plaits.aux.view();
+```

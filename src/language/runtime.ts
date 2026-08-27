@@ -4,10 +4,11 @@ import { evaluateExpression, ExpressionError, type ScalarValue } from './express
 
 const RESERVED_IDENTIFIERS = new Set([
   // Built-in objects and constructors.
-  'main',
+  'audio',
   'clock',
   'midi',
   'voice',
+  'swell',
   'pattern',
   'scale',
   'osc',
@@ -76,6 +77,7 @@ export interface VariableViewState {
 
 export interface SchemeEmbeddedView {
   signal: string;
+  signals?: string[];
   signalKind: SignalKind;
   port: string;
 }
@@ -129,6 +131,18 @@ interface VoiceDefinition {
   parameters: Map<string, string>;
 }
 
+interface SwellDefinition {
+  frequency: number;
+  slope: number;
+  shape: number;
+  smooth: number;
+  shift: number;
+  mode: number;
+  outputMode: number;
+  range: number;
+  parameters: Map<string, string>;
+}
+
 interface RouteDefinition {
   source: string;
   target: string;
@@ -146,9 +160,10 @@ export class SonusRuntime {
   private parameterViews: ParameterViewState[] = [];
   private variableViews: VariableViewState[] = [];
   private explicitSignalViews: Array<{ signal: string; kind: SignalKind }> = [];
+  private moduleViews = new Set<string>();
 
   private scheme: SchemeModel = {
-    nodes: [{ id: 'Main', label: 'MAIN', kind: 'module', parameters: [] }],
+    nodes: [{ id: 'Audio', label: 'AUDIO OUT', kind: 'module', parameters: [] }],
     connections: [],
   };
 
@@ -168,6 +183,10 @@ export class SonusRuntime {
     return this.explicitSignalViews.map((view) => ({ ...view }));
   }
 
+  getModuleViews(): string[] {
+    return [...this.moduleViews];
+  }
+
   getSchemeModel(): SchemeModel {
     return {
       nodes: this.scheme.nodes.map((node) => ({
@@ -183,10 +202,12 @@ export class SonusRuntime {
     const oscillators = new Map<string, OscillatorDefinition>();
     const gains = new Map<string, GainDefinition>();
     const voices = new Map<string, VoiceDefinition>();
+    const swells = new Map<string, SwellDefinition>();
     const routes = new Map<string, RouteDefinition>();
     const clockSources = new Map<string, ClockDefinition>();
     let clockBpm = 0;
     const views = new Map<string, ViewKind>();
+    const moduleViews = new Set<string>();
     const parameterViews = new Map<string, ParameterViewState>();
     const variableViewRequests: Array<{ name: string; line: number }> = [];
     const variables = new Map<string, ScalarValue>();
@@ -236,7 +257,7 @@ export class SonusRuntime {
       const oscillatorDeclaration = parseOscillatorDeclaration(line);
       if (oscillatorDeclaration) {
         const { name, calls } = oscillatorDeclaration;
-        if (reservedOrDuplicate(name, oscillators, gains, voices, diagnostics, lineNumber)) continue;
+        if (swells.has(name) || reservedOrDuplicate(name, oscillators, gains, voices, diagnostics, lineNumber)) { if (swells.has(name)) diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue; }
 
         const definition: OscillatorDefinition = { frequency: 440, parameters: new Map() };
         oscillators.set(name, definition);
@@ -248,7 +269,7 @@ export class SonusRuntime {
       const gainDeclaration = parseGainDeclaration(line);
       if (gainDeclaration) {
         const { name, calls } = gainDeclaration;
-        if (reservedOrDuplicate(name, oscillators, gains, voices, diagnostics, lineNumber)) continue;
+        if (swells.has(name) || reservedOrDuplicate(name, oscillators, gains, voices, diagnostics, lineNumber)) { if (swells.has(name)) diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue; }
 
         const definition: GainDefinition = { level: 100, parameters: new Map() };
         gains.set(name, definition);
@@ -260,7 +281,7 @@ export class SonusRuntime {
       const voiceDeclaration = parseVoiceDeclaration(line);
       if (voiceDeclaration) {
         const { name, calls } = voiceDeclaration;
-        if (reservedOrDuplicate(name, oscillators, gains, voices, diagnostics, lineNumber)) continue;
+        if (swells.has(name) || reservedOrDuplicate(name, oscillators, gains, voices, diagnostics, lineNumber)) { if (swells.has(name)) diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue; }
 
         const definition: VoiceDefinition = {
           model: 1,
@@ -275,6 +296,33 @@ export class SonusRuntime {
         results.push({ message: `${name} = Voice` });
         continue;
       }
+
+      const swellDeclaration = parseSwellDeclaration(line);
+      if (swellDeclaration) {
+        const { name } = swellDeclaration;
+        const reservationError = identifierReservationError(name);
+        if (reservationError) {
+          diagnostics.push({ line: lineNumber, message: reservationError });
+          continue;
+        }
+        if (objectExists(name, oscillators, gains, voices) || swells.has(name) || clockSources.has(name)) {
+          diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` });
+          continue;
+        }
+        swells.set(name, {
+          frequency: 0.25,
+          slope: 50,
+          shape: 50,
+          smooth: 50,
+          shift: 50,
+          mode: 1,
+          outputMode: 2,
+          range: 0,
+          parameters: new Map(),
+        });
+        results.push({ message: `${name} = Swell` });
+        continue;
+      }
     }
 
     const resolveMember = (path: string[]): ScalarValue | undefined => {
@@ -285,10 +333,12 @@ export class SonusRuntime {
       const oscillator = oscillators.get(name);
       const voice = voices.get(name);
       const gain = gains.get(name);
-      if (parameter === 'freq') return oscillator?.frequency ?? voice?.frequency;
+      const swell = swells.get(name);
+      if (parameter === 'freq') return oscillator?.frequency ?? voice?.frequency ?? swell?.frequency;
       if (parameter === 'level') return gain?.level;
       if (parameter === 'model') return voice?.model;
       if (voice && (parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph')) return voice[parameter];
+      if (swell && (parameter === 'slope' || parameter === 'shape' || parameter === 'smooth' || parameter === 'shift')) return swell[parameter];
       return undefined;
     };
 
@@ -455,7 +505,16 @@ export class SonusRuntime {
       if (voiceDeclaration) {
         const definition = voices.get(voiceDeclaration.name)!;
         for (const call of voiceDeclaration.calls) {
-          const error = applyVoiceCall(voiceDeclaration.name, definition, call, views, (expr) => evalValue(expr, lineNumber));
+          const error = applyVoiceCall(voiceDeclaration.name, definition, call, moduleViews, (expr) => evalValue(expr, lineNumber));
+          if (error) diagnostics.push({ line: lineNumber, message: error });
+        }
+        continue;
+      }
+      const swellDeclaration = parseSwellDeclaration(line);
+      if (swellDeclaration) {
+        const definition = swells.get(swellDeclaration.name)!;
+        for (const call of swellDeclaration.calls) {
+          const error = applySwellCall(swellDeclaration.name, definition, call, moduleViews, (expr) => evalValue(expr, lineNumber));
           if (error) diagnostics.push({ line: lineNumber, message: error });
         }
         continue;
@@ -621,26 +680,37 @@ export class SonusRuntime {
         const [, name, rawFrequency] = match;
         const oscillator = oscillators.get(name);
         const voice = voices.get(name);
-        if (!oscillator && !voice) {
+        const swell = swells.get(name);
+        if (!oscillator && !voice && !swell) {
           diagnostics.push({ line: lineNumber, message: `unknown frequency-capable object: ${name}` });
           continue;
         }
 
         const frequency = evalNumber(rawFrequency, lineNumber, 'freq');
         if (frequency === undefined) continue;
-        const error = frequencyError(frequency);
-        if (error) {
-          diagnostics.push({ line: lineNumber, message: error });
-          continue;
-        }
 
-        if (oscillator) {
-          oscillator.frequency = frequency;
-          oscillator.parameters.delete('NOTE');
-          oscillator.parameters.set('FREQ', `${formatNumber(frequency)} HZ`);
-        } else if (voice) {
-          voice.frequency = frequency;
-          voice.parameters.set('FREQ', `${formatNumber(frequency)} HZ`);
+        if (swell) {
+          if (!Number.isFinite(frequency) || frequency <= 0 || frequency > 10000) {
+            diagnostics.push({ line: lineNumber, message: 'Swell.freq expects > 0 and <= 10000 Hz' });
+            continue;
+          }
+          swell.frequency = frequency;
+          swell.parameters.set('FREQ', `${formatNumber(frequency)} HZ`);
+        } else {
+          const error = frequencyError(frequency);
+          if (error) {
+            diagnostics.push({ line: lineNumber, message: error });
+            continue;
+          }
+
+          if (oscillator) {
+            oscillator.frequency = frequency;
+            oscillator.parameters.delete('NOTE');
+            oscillator.parameters.set('FREQ', `${formatNumber(frequency)} HZ`);
+          } else if (voice) {
+            voice.frequency = frequency;
+            voice.parameters.set('FREQ', `${formatNumber(frequency)} HZ`);
+          }
         }
         results.push({ message: `${name}.freq ${formatNumber(frequency)} hz` });
         continue;
@@ -735,23 +805,45 @@ export class SonusRuntime {
         continue;
       }
 
-      match = line.match(/^([A-Za-z_]\w*)\.(freq|harmo|timbre|morph|model|level)\.view\(\s*\)\s*$/);
+      match = line.match(/^([A-Za-z_]\w*)\.(slope|shape|smooth|shift)\(\s*(.+)\s*\)\s*$/);
+      if (match) {
+        const [, name, parameter, rawValue] = match;
+        const swell = swells.get(name);
+        if (!swell) {
+          diagnostics.push({ line: lineNumber, message: `unknown Swell object: ${name}` });
+          continue;
+        }
+        const value = evalNumber(rawValue, lineNumber, parameter);
+        if (value === undefined) continue;
+        const error = percentError(value, parameter);
+        if (error) { diagnostics.push({ line: lineNumber, message: error }); continue; }
+        swell[parameter as 'slope' | 'shape' | 'smooth' | 'shift'] = value;
+        swell.parameters.set(parameter.toUpperCase(), `${formatNumber(value)}%`);
+        results.push({ message: `${name}.${parameter} ${formatNumber(value)}%` });
+        continue;
+      }
+
+      match = line.match(/^([A-Za-z_]\w*)\.(freq|harmo|timbre|morph|model|level|slope|shape|smooth|shift)\.view\(\s*\)\s*$/);
       if (match) {
         const [, name, parameter] = match;
         const oscillator = oscillators.get(name);
         const voice = voices.get(name);
         const gain = gains.get(name);
+        const swell = swells.get(name);
         let value: string | null = null;
 
         if (parameter === 'freq') {
           if (oscillator) value = `${formatNumber(oscillator.frequency)} HZ`;
           else if (voice) value = `${formatNumber(voice.frequency)} HZ`;
+          else if (swell) value = `${formatNumber(swell.frequency)} HZ`;
         } else if (parameter === 'model' && voice) {
           value = formatVoiceModel(voice.model);
         } else if ((parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph') && voice) {
           value = `${formatNumber(voice[parameter])}%`;
         } else if (parameter === 'level' && gain) {
           value = `${formatNumber(gain.level)}%`;
+        } else if (swell && (parameter === 'slope' || parameter === 'shape' || parameter === 'smooth' || parameter === 'shift')) {
+          value = `${formatNumber(swell[parameter])}%`;
         }
 
         if (value === null) {
@@ -765,14 +857,40 @@ export class SonusRuntime {
         continue;
       }
 
-      if (/^Main(?:\.out)?\.view\(\s*\)\s*$/.test(line)) {
-        views.set('Main.out', 'signal');
-        results.push({ message: 'Main.out view' });
+      if (/^Audio(?:\.out)?\.view\(\s*\)\s*$/.test(line)) {
+        views.set('Audio.out', 'signal');
+        results.push({ message: 'Audio.out view' });
         continue;
       }
 
       match = line.match(/^([A-Za-z_]\w*)\.view\(\s*\)\s*$/);
       if (match && clockSources.has(match[1])) { views.set(`${match[1]}.out`, 'trigger'); results.push({ message: `${match[1]}.out view` }); continue; }
+
+      match = line.match(/^([A-Za-z_]\w*)\.out([1-4])\.view\(\s*\)\s*$/);
+      if (match) {
+        const [, name, port] = match;
+        if (!swells.has(name)) {
+          diagnostics.push({ line: lineNumber, message: `out${port} is only available on Swell objects: ${name}` });
+          continue;
+        }
+        views.set(`${name}.out${port}`, 'signal');
+        results.push({ message: `${name}.out${port} view` });
+        continue;
+      }
+
+      match = line.match(/^([A-Za-z_]\w*)\.view\(\s*\)\s*$/);
+      if (match && swells.has(match[1])) {
+        moduleViews.add(match[1]);
+        results.push({ message: `${match[1]} module view` });
+        continue;
+      }
+
+      match = line.match(/^([A-Za-z_]\w*)\.view\(\s*\)\s*$/);
+      if (match && voices.has(match[1])) {
+        moduleViews.add(match[1]);
+        results.push({ message: `${match[1]} module view` });
+        continue;
+      }
 
       match = line.match(/^([A-Za-z_]\w*)\.aux\.view\(\s*\)\s*$/);
       if (match) {
@@ -786,10 +904,14 @@ export class SonusRuntime {
         continue;
       }
 
-      match = line.match(/^([A-Za-z_]\w*)(?:\.out)?\.view\(\s*\)\s*$/);
+      match = line.match(/^([A-Za-z_]\w*)(\.out)?\.view\(\s*\)\s*$/);
       if (match) {
         const name = match[1];
-        if (objectExists(name, oscillators, gains, voices)) {
+        const explicitOut = Boolean(match[2]);
+        if (voices.has(name) && explicitOut) {
+          views.set(`${name}.out`, 'signal');
+          results.push({ message: `${name}.out view` });
+        } else if (oscillators.has(name) || gains.has(name)) {
           views.set(`${name}.out`, 'signal');
           results.push({ message: `${name}.out view` });
         } else {
@@ -804,7 +926,7 @@ export class SonusRuntime {
       const parsedRoute = parseRouteLine(line);
       if (parsedRoute) {
         const { sourceName, sourcePort, amountExpression, targetName, targetPort } = parsedRoute;
-        if (sourceName !== 'Clock' && !clockSources.has(sourceName) && !objectExists(sourceName, oscillators, gains, voices)) {
+        if (sourceName !== 'Clock' && !clockSources.has(sourceName) && !objectExists(sourceName, oscillators, gains, voices) && !swells.has(sourceName)) {
           diagnostics.push({ line: lineNumber, message: `unknown source object: ${sourceName}` });
           continue;
         }
@@ -812,11 +934,19 @@ export class SonusRuntime {
           diagnostics.push({ line: lineNumber, message: `aux output is only available on Voice objects: ${sourceName}` });
           continue;
         }
+        if (/^out[1-4]$/.test(sourcePort) && !swells.has(sourceName)) {
+          diagnostics.push({ line: lineNumber, message: `${sourcePort} is only available on Swell objects: ${sourceName}` });
+          continue;
+        }
         if (targetPort === 'trig') {
-          if (!voices.has(targetName)) { diagnostics.push({ line: lineNumber, message: `trigger input is only available on Voice objects: ${targetName}` }); continue; }
+          if (!voices.has(targetName) && !swells.has(targetName)) { diagnostics.push({ line: lineNumber, message: `trigger input is only available on Voice or Swell objects: ${targetName}` }); continue; }
+        } else if (targetPort === 'clock') {
+          if (!swells.has(targetName)) { diagnostics.push({ line: lineNumber, message: `clock input is only available on Swell objects: ${targetName}` }); continue; }
         } else if (targetPort === 'v_oct') {
-          if (!voices.has(targetName)) { diagnostics.push({ line: lineNumber, message: `v_oct input is only available on Voice objects: ${targetName}` }); continue; }
-        } else if (targetName !== 'Main' && !gains.has(targetName)) {
+          if (!voices.has(targetName) && !swells.has(targetName)) { diagnostics.push({ line: lineNumber, message: `v_oct input is only available on Voice or Swell objects: ${targetName}` }); continue; }
+        } else if (targetPort === 'harmo' || targetPort === 'timbre' || targetPort === 'morph') {
+          if (!voices.has(targetName)) { diagnostics.push({ line: lineNumber, message: `${targetPort} input is only available on Voice objects: ${targetName}` }); continue; }
+        } else if (!(targetName === 'Audio' && targetPort === 'out') && !gains.has(targetName)) {
           diagnostics.push({ line: lineNumber, message: `unknown or non-input object: ${targetName}` });
           continue;
         }
@@ -941,9 +1071,10 @@ export class SonusRuntime {
 
     // VARIABLES is the runtime symbol table for user-created names. Scalars
     // show their current value, while object references show their object type.
-    // Built-in singletons such as Main and Clock are intentionally omitted.
+    // Built-in singletons such as Audio and Clock are intentionally omitted.
     variableViews.length = 0;
     for (const [name] of voices) variableViews.push({ name, value: 'Voice' });
+    for (const [name] of swells) variableViews.push({ name, value: 'Swell' });
     for (const [name] of clockSources) variableViews.push({ name, value: 'Clock' });
     for (const [name] of oscillators) variableViews.push({ name, value: 'Osc' });
     for (const [name] of gains) variableViews.push({ name, value: 'Gain' });
@@ -959,17 +1090,21 @@ export class SonusRuntime {
       const oscillator = oscillators.get(name);
       const voice = voices.get(name);
       const gain = gains.get(name);
+      const swell = swells.get(name);
       let value: string | null = null;
 
       if (parameter === 'freq') {
         if (oscillator) value = `${formatNumber(oscillator.frequency)} HZ`;
         else if (voice) value = `${formatNumber(voice.frequency)} HZ`;
+        else if (swell) value = `${formatNumber(swell.frequency)} HZ`;
       } else if (parameter === 'model' && voice) {
         value = formatVoiceModel(voice.model);
       } else if ((parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph') && voice) {
         value = `${formatNumber(voice[parameter])}%`;
       } else if (parameter === 'level' && gain) {
         value = `${formatNumber(gain.level)}%`;
+      } else if (swell && (parameter === 'slope' || parameter === 'shape' || parameter === 'smooth' || parameter === 'shift')) {
+        value = `${formatNumber(swell[parameter])}%`;
       }
 
       if (value !== null) {
@@ -984,12 +1119,13 @@ export class SonusRuntime {
 
     const embeddedViews = new Map<string, SchemeEmbeddedView[]>();
     const addEmbeddedView = (signal: string, signalKind: SignalKind): void => {
-      const owner = signal === 'Main.out'
-        ? 'Main'
+      const owner = signal === 'Audio.out'
+        ? 'Audio'
         : signal === 'Clock.out'
           ? 'Clock'
-          : signal.replace(/\.(out|aux)$/, '');
-      const port = signal.endsWith('.aux') ? 'AUX' : 'OUT';
+          : signal.replace(/\.(out|aux|out[1-4])$/, '');
+      const portMatch = signal.match(/\.(out|aux|out[1-4])$/);
+      const port = portMatch ? portMatch[1].toUpperCase() : 'OUT';
       const ownerViews = embeddedViews.get(owner) ?? [];
       if (!ownerViews.some((view) => view.signal === signal)) {
         ownerViews.push({ signal, signalKind, port });
@@ -999,12 +1135,34 @@ export class SonusRuntime {
 
     // Keep Scheme compact: only structural/global monitors are automatic.
     // Module outputs, secondary ports and derived clocks require .view().
-    addEmbeddedView('Main.out', 'signal');
+    addEmbeddedView('Audio.out', 'signal');
     addEmbeddedView('Clock.out', 'trigger');
 
     for (const [signal, signalKind] of views) {
       if (signalKind === 'parameter') continue;
       addEmbeddedView(signal, signalKind as SignalKind);
+    }
+
+    for (const name of moduleViews) {
+      const ownerViews = embeddedViews.get(name) ?? [];
+      if (swells.has(name)) {
+        ownerViews.push({
+          signal: `${name}.out1`,
+          signals: [1, 2, 3, 4].map((port) => `${name}.out${port}`),
+          signalKind: 'signal',
+          port: 'OUT 1-4',
+        });
+      } else if (voices.has(name)) {
+        ownerViews.push({
+          signal: `${name}.out`,
+          signals: [`${name}.out`, `${name}.aux`],
+          signalKind: 'signal',
+          port: 'OUT / AUX',
+        });
+      } else {
+        continue;
+      }
+      embeddedViews.set(name, ownerViews);
     }
 
     const schemeNodes: SchemeNode[] = [
@@ -1035,6 +1193,13 @@ export class SonusRuntime {
         ],
         views: embeddedViews.get(name),
       })),
+      ...[...swells.entries()].map(([name, definition]) => ({
+        id: name,
+        label: `${name.toUpperCase()} : SWELL`,
+        kind: 'module' as const,
+        parameters: [...definition.parameters.entries()].map(([parameterName, value]) => ({ name: parameterName, value })),
+        views: embeddedViews.get(name),
+      })),
       ...[...gains.entries()].map(([name, definition]) => ({
         id: name,
         label: `${name.toUpperCase()} : GAIN`,
@@ -1045,15 +1210,25 @@ export class SonusRuntime {
         })),
         views: embeddedViews.get(name),
       })),
-      { id: 'Main', label: 'MAIN', kind: 'module' as const, parameters: [], views: embeddedViews.get('Main') },
+      { id: 'Audio', label: 'AUDIO OUT', kind: 'module' as const, parameters: [], views: embeddedViews.get('Audio') },
     ];
 
     const schemeConnections: SchemeConnection[] = [
       ...[...routes.values()].map((route) => ({
-        source: route.source.replace(/\.(out|aux)$/, ''),
-        target: route.target.startsWith('Main.') ? 'Main' : route.target.replace(/\.(in|trig|v_oct)$/, ''),
-        sourcePort: route.source.endsWith('.aux') ? 'AUX' : 'OUT',
-        targetPort: route.target.endsWith('.trig') ? 'TRIG' : route.target.endsWith('.v_oct') ? 'V/OCT' : 'IN',
+        source: route.source.replace(/\.(out|aux|out[1-4])$/, ''),
+        target: route.target.startsWith('Audio.')
+          ? 'Audio'
+          : route.target.replace(/\.(in|trig|clock|v_oct|harmo|timbre|morph)$/, ''),
+        sourcePort: (route.source.match(/\.(out|aux|out[1-4])$/)?.[1] ?? 'out').toUpperCase(),
+        targetPort: route.target.endsWith('.trig')
+          ? 'TRIG'
+          : route.target.endsWith('.clock')
+            ? 'CLOCK'
+            : route.target.endsWith('.v_oct')
+              ? 'V/OCT'
+              : route.target.endsWith('.out')
+                ? 'OUT'
+                : route.target.match(/\.(harmo|timbre|morph)$/)?.[1].toUpperCase() ?? 'IN',
         type: route.kind,
         amount: route.amount,
       })),
@@ -1080,6 +1255,17 @@ export class SonusRuntime {
         timbre: definition.timbre,
         morph: definition.morph,
       })),
+      swells: [...swells.entries()].map(([name, definition]) => ({
+        name,
+        frequency: definition.frequency,
+        slope: definition.slope,
+        shape: definition.shape,
+        smooth: definition.smooth,
+        shift: definition.shift,
+        mode: definition.mode,
+        outputMode: definition.outputMode,
+        range: definition.range,
+      })),
       gains: [...gains.entries()].map(([name, definition]) => ({
         name,
         level: definition.level,
@@ -1094,10 +1280,18 @@ export class SonusRuntime {
         .map(([signal, kind]) => ({ signal, kind: kind as SignalKind })),
       monitorViews: (() => {
         const monitors = new Map<string, SignalKind>();
-        monitors.set('Main.out', 'signal');
+        monitors.set('Audio.out', 'signal');
         monitors.set('Clock.out', 'trigger');
         for (const [signal, kind] of views) {
           if (kind !== 'parameter') monitors.set(signal, kind as SignalKind);
+        }
+        for (const name of moduleViews) {
+          if (swells.has(name)) {
+            for (let port = 1; port <= 4; port += 1) monitors.set(`${name}.out${port}`, 'signal');
+          } else if (voices.has(name)) {
+            monitors.set(`${name}.out`, 'signal');
+            monitors.set(`${name}.aux`, 'signal');
+          }
         }
         return [...monitors].map(([signal, kind]) => ({ signal, kind }));
       })(),
@@ -1108,6 +1302,7 @@ export class SonusRuntime {
     this.explicitSignalViews = [...views.entries()]
       .filter(([, kind]) => kind !== 'parameter')
       .map(([signal, kind]) => ({ signal, kind: kind as SignalKind }));
+    this.moduleViews = new Set(moduleViews);
     for (const unsubscribe of this.whenUnsubscribers) unsubscribe();
     this.whenUnsubscribers = [];
 
@@ -1437,6 +1632,10 @@ function parseVoiceDeclaration(line: string): ObjectDeclaration | null {
   return parseDeclaration(line, 'Voice');
 }
 
+function parseSwellDeclaration(line: string): ObjectDeclaration | null {
+  return parseDeclaration(line, 'Swell');
+}
+
 function parseDeclaration(line: string, constructorName: string): ObjectDeclaration | null {
   const match = line.match(new RegExp(`^([A-Za-z_]\\w*)\\s*=\\s*${constructorName}\\(\\s*\\)(.*)$`));
   if (!match) return null;
@@ -1484,10 +1683,10 @@ function parseChainedCalls(tail: string): ChainedCall[] | null {
 
 interface ParsedRoute {
   sourceName: string;
-  sourcePort: 'out' | 'aux';
+  sourcePort: 'out' | 'aux' | 'out1' | 'out2' | 'out3' | 'out4';
   amountExpression: string | null;
   targetName: string;
-  targetPort: 'in' | 'trig' | 'v_oct';
+  targetPort: 'out' | 'in' | 'trig' | 'clock' | 'v_oct' | 'harmo' | 'timbre' | 'morph';
 }
 
 function parseRouteLine(line: string): ParsedRoute | null {
@@ -1495,9 +1694,9 @@ function parseRouteLine(line: string): ParsedRoute | null {
   if (arrow < 0 || line.indexOf('->', arrow + 2) >= 0) return null;
   const left = line.slice(0, arrow).trim();
   const right = line.slice(arrow + 2).trim();
-  const target = right.match(/^([A-Za-z_]\w*)\.(in|trig|v_oct)$/);
+  const target = right.match(/^([A-Za-z_]\w*)\.(out|in|trig|clock|v_oct|harmo|timbre|morph)$/);
   if (!target) return null;
-  const source = left.match(/^([A-Za-z_]\w*)\.(out|aux)(.*)$/);
+  const source = left.match(/^([A-Za-z_]\w*)\.(out1|out2|out3|out4|out|aux)(.*)$/);
   if (!source) return null;
   const suffix = source[3].trim();
   let amountExpression: string | null = null;
@@ -1508,10 +1707,10 @@ function parseRouteLine(line: string): ParsedRoute | null {
   }
   return {
     sourceName: source[1],
-    sourcePort: source[2] as 'out' | 'aux',
+    sourcePort: source[2] as ParsedRoute['sourcePort'],
     amountExpression,
     targetName: target[1],
-    targetPort: target[2] as 'in' | 'trig' | 'v_oct',
+    targetPort: target[2] as ParsedRoute['targetPort'],
   };
 }
 
@@ -1552,6 +1751,89 @@ function objectExists(
   voices: Map<string, VoiceDefinition>,
 ): boolean {
   return oscillators.has(name) || gains.has(name) || voices.has(name);
+}
+
+function applySwellCall(
+  objectName: string,
+  swell: SwellDefinition,
+  call: ChainedCall,
+  moduleViews: Set<string>,
+  evaluate: (expression: string) => ScalarValue | undefined,
+): string | null {
+  switch (call.name) {
+    case 'freq': {
+      const value = evaluate(call.argument);
+      if (value === undefined) return null;
+      if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > 10000) return 'freq expects > 0 and <= 10000 Hz';
+      swell.frequency = value;
+      swell.parameters.set('FREQ', `${formatNumber(value)} HZ`);
+      return null;
+    }
+    case 'slope':
+    case 'shape':
+    case 'smooth':
+    case 'shift': {
+      const value = evaluate(call.argument);
+      if (value === undefined) return null;
+      if (typeof value !== 'number') return `${call.name} expects one numeric expression`;
+      const error = percentError(value, call.name);
+      if (error) return error;
+      swell[call.name] = value;
+      swell.parameters.set(call.name.toUpperCase(), `${formatNumber(value)}%`);
+      return null;
+    }
+    case 'mode': {
+      const value = evaluate(call.argument);
+      if (typeof value !== 'string') return 'mode expects "ad", "loop", or "ar"';
+      const normalized = value.toLowerCase();
+      const modes: Record<string, number> = { ad: 0, loop: 1, looping: 1, ar: 2 };
+      const mode = modes[normalized];
+      if (mode === undefined) return 'mode expects "ad", "loop", or "ar"';
+      swell.mode = mode;
+      swell.parameters.set('MODE', normalized === 'looping' ? 'LOOP' : normalized.toUpperCase());
+      return null;
+    }
+    case 'output': {
+      const value = evaluate(call.argument);
+      if (typeof value !== 'string') return 'output expects "different", "amplitude", "phase", or "frequency"';
+      const normalized = value.toLowerCase();
+      const modes: Record<string, number> = {
+        different: 0,
+        shapes: 0,
+        amplitude: 1,
+        phase: 2,
+        time: 2,
+        frequency: 3,
+      };
+      const outputMode = modes[normalized];
+      if (outputMode === undefined) return 'output expects "different", "amplitude", "phase", or "frequency"';
+      swell.outputMode = outputMode;
+      swell.parameters.set('OUTPUT', normalized.toUpperCase());
+      return null;
+    }
+    case 'range': {
+      const value = evaluate(call.argument);
+      if (typeof value !== 'string') return 'range expects "control" or "audio"';
+      const normalized = value.toLowerCase();
+      if (normalized === 'control' || normalized === 'low' || normalized === 'medium') {
+        swell.range = 0;
+        swell.parameters.set('RANGE', normalized === 'control' ? 'CONTROL' : normalized.toUpperCase());
+        return null;
+      }
+      if (normalized === 'audio' || normalized === 'high') {
+        swell.range = 1;
+        swell.parameters.set('RANGE', normalized === 'high' ? 'HIGH' : 'AUDIO');
+        return null;
+      }
+      return 'range expects "control" or "audio"';
+    }
+    case 'view':
+      if (call.argument) return 'view expects no arguments';
+      moduleViews.add(objectName);
+      return null;
+    default:
+      return `unknown Swell method: ${call.name}`;
+  }
 }
 
 function applyOscillatorCall(
@@ -1630,7 +1912,7 @@ function applyVoiceCall(
   objectName: string,
   voice: VoiceDefinition,
   call: ChainedCall,
-  views: Map<string, ViewKind>,
+  moduleViews: Set<string>,
   evaluate: (expression: string) => ScalarValue | undefined,
 ): string | null {
   switch (call.name) {
@@ -1667,7 +1949,7 @@ function applyVoiceCall(
     }
     case 'view':
       if (call.argument.length > 0) return 'view does not accept parameters yet';
-      views.set(`${objectName}.out`, 'signal');
+      moduleViews.add(objectName);
       return null;
     default:
       return `unknown Voice method: ${call.name}`;

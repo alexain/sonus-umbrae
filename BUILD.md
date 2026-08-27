@@ -98,6 +98,7 @@ The generated WASM artifact is written to:
 
 ```text
 public/dsp/voice.wasm
+public/dsp/swell.wasm
 ```
 
 Generated WASM files are ignored by Git and should be rebuilt locally.

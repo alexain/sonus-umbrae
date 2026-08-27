@@ -25,6 +25,11 @@ if [[ ! -f "$VENDOR/stmlib/utils/random.cc" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$VENDOR/tides2/poly_slope_generator.h" ]]; then
+  echo "Tides 2018 DSP sources are incomplete: $VENDOR/tides2 is missing" >&2
+  exit 1
+fi
+
 cat <<'MSG'
 DSP sources ready.
 

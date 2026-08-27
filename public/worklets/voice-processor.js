@@ -19,15 +19,18 @@ class SonusVoiceProcessor extends AudioWorkletProcessor {
     this.handle = this.call('su_voice_create');
     this.outPtr = this.call('su_voice_out', this.handle);
     this.auxPtr = this.call('su_voice_aux', this.handle);
+    this.baseHarmo = 0.5;
+    this.baseTimbre = 0.5;
+    this.baseMorph = 0.5;
 
     this.port.onmessage = (event) => {
       const message = event.data;
       if (!message || message.type !== 'params') return;
       if (message.model !== undefined) this.call('su_voice_set_model', this.handle, message.model);
       if (message.frequency !== undefined) this.call('su_voice_set_frequency', this.handle, message.frequency);
-      if (message.harmo !== undefined) this.call('su_voice_set_harmo', this.handle, message.harmo);
-      if (message.timbre !== undefined) this.call('su_voice_set_timbre', this.handle, message.timbre);
-      if (message.morph !== undefined) this.call('su_voice_set_morph', this.handle, message.morph);
+      if (message.harmo !== undefined) this.baseHarmo = message.harmo;
+      if (message.timbre !== undefined) this.baseTimbre = message.timbre;
+      if (message.morph !== undefined) this.baseMorph = message.morph;
     };
   }
 
@@ -48,6 +51,14 @@ class SonusVoiceProcessor extends AudioWorkletProcessor {
     const vOctInput = inputs[1]?.[0];
     const vOct = vOctInput && vOctInput.length > 0 ? vOctInput[0] : 0;
     this.call('su_voice_set_v_oct', this.handle, vOct);
+
+    const latest = (input) => input && input.length > 0 ? input[input.length - 1] : 0;
+    // Modulation inputs use Eurorack-style logical volts. ±5V spans the
+    // full normalized parameter range before the route attenuverter.
+    const cv = (input) => latest(input) / 5;
+    this.call('su_voice_set_harmo', this.handle, Math.max(0, Math.min(1, this.baseHarmo + cv(inputs[2]?.[0]))));
+    this.call('su_voice_set_timbre', this.handle, Math.max(0, Math.min(1, this.baseTimbre + cv(inputs[3]?.[0]))));
+    this.call('su_voice_set_morph', this.handle, Math.max(0, Math.min(1, this.baseMorph + cv(inputs[4]?.[0]))));
 
     const frames = outputs[0]?.[0]?.length ?? 128;
     this.call('su_voice_process', this.handle, frames);

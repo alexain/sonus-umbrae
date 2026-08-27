@@ -13,7 +13,7 @@ Sonus Umbrae is currently an early prototype. The language, runtime and APIs are
 - Web Audio engine with AudioWorklet processing.
 - WebAssembly DSP support compiled from C/C++ with Emscripten.
 - `Voice()` synthesis engine based on the MIT-licensed Mutable Instruments Plaits DSP.
-- Built-in `Main` audio interface singleton.
+- Built-in `Audio` audio interface singleton.
 - Built-in `Clock` master clock and derived clock rates.
 - Signal routing with per-connection attenuation and inversion.
 - Live signal, trigger and parameter views.
@@ -30,17 +30,17 @@ a = Voice().model(2).freq(220)
 Clock.out -> a.trig
 
 a.timbre(55)
-a.out(70) -> Main.in
+a.out(70) -> Audio.out
 
 a.out.view()
 a.timbre.view()
-Main.view()
+Audio.view()
 ```
 
 Connection gain is part of the route itself:
 
 ```text
-a.out(50) -> Main.in
+a.out(50) -> Audio.out
 ```
 
 A negative value acts as an attenuverter:
