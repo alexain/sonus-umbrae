@@ -108,18 +108,25 @@ button, input, textarea { font: inherit; }
 .live-screen { padding: 18px 18px 60px; }
 
 .editor {
+  display: block;
+  width: 100%;
   min-height: 100%;
+  resize: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
   outline: none;
+  overflow: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  color: inherit;
+  background: transparent;
   caret-color: transparent;
-  caret-shape: block;
+  font: inherit;
   font-size: 22px;
   line-height: 1.08;
-}
-
-.editor:empty::before {
-  content: "";
+  letter-spacing: inherit;
+  text-shadow: inherit;
 }
 
 .system-screen {
@@ -172,6 +179,17 @@ button, input, textarea { font: inherit; }
     0 0 8px rgba(215, 169, 46, 0.38);
 }
 
+.caret-probe {
+  display: inline-block;
+  width: 0;
+  height: 1em;
+  padding: 0;
+  margin: 0;
+  overflow: hidden;
+  vertical-align: baseline;
+  pointer-events: none;
+}
+
 .phosphor-layer {
   position: absolute;
   inset: 0;
@@ -189,6 +207,42 @@ button, input, textarea { font: inherit; }
     0 0 3px rgba(255, 231, 131, 0.72),
     0 0 9px rgba(215, 169, 46, 0.32);
   animation: phosphor-decay 300ms ease-out forwards;
+}
+
+
+.error-line {
+  position: absolute;
+  border-bottom: 1px solid rgba(255, 231, 131, 0.58);
+  background: rgba(215, 169, 46, 0.075);
+  box-shadow: 0 0 8px rgba(215, 169, 46, 0.08);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.error-marker {
+  position: absolute;
+  color: var(--phosphor-hot);
+  line-height: 1.08;
+  text-shadow:
+    0 0 2px rgba(255, 231, 131, 0.9),
+    0 0 7px rgba(215, 169, 46, 0.32);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.diagnostic {
+  position: absolute;
+  left: 18px;
+  bottom: 12px;
+  z-index: 4;
+  max-width: calc(100% - 36px);
+  overflow: hidden;
+  color: var(--phosphor-hot);
+  font-size: 15px;
+  line-height: 1;
+  white-space: pre-line;
+  text-overflow: ellipsis;
+  pointer-events: none;
 }
 
 .block-caret {

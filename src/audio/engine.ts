@@ -4,15 +4,42 @@ export interface AudioEngineSnapshot {
   state: AudioEngineState;
   sampleRate: number | null;
   testFrequency: number | null;
+  objectCount: number;
+  routeCount: number;
+}
+
+export interface AudioProgram {
+  oscillators: Array<{
+    name: string;
+    frequency: number;
+  }>;
+  routes: Array<{
+    source: string;
+    destination: 'out.main';
+    amount: number;
+  }>;
 }
 
 export type AudioEngineListener = (snapshot: AudioEngineSnapshot) => void;
+
+interface OscillatorVoice {
+  oscillator: OscillatorNode;
+  output: GainNode;
+  frequency: number;
+}
+
+interface AudioRoute {
+  gain: GainNode;
+  amount: number;
+}
 
 export class AudioEngine {
   private context: AudioContext | null = null;
   private master: GainNode | null = null;
   private testOscillator: OscillatorNode | null = null;
   private testGain: GainNode | null = null;
+  private oscillators = new Map<string, OscillatorVoice>();
+  private routes = new Map<string, AudioRoute>();
   private listeners = new Set<AudioEngineListener>();
 
   snapshot(): AudioEngineSnapshot {
@@ -24,6 +51,8 @@ export class AudioEngine {
           : 'suspended',
       sampleRate: this.context?.sampleRate ?? null,
       testFrequency: this.testOscillator?.frequency.value ?? null,
+      objectCount: this.oscillators.size,
+      routeCount: this.routes.size,
     };
   }
 
@@ -44,6 +73,101 @@ export class AudioEngine {
     this.stopTestTone();
     if (this.context.state === 'running') await this.context.suspend();
     this.emit();
+  }
+
+  applyProgram(program: AudioProgram): void {
+    const desiredOscillators = new Map(program.oscillators.map((definition) => [definition.name, definition]));
+    const desiredRoutes = new Map(program.routes.map((route) => [`${route.source}.out->${route.destination}`, route]));
+
+    // Remove routes first so an oscillator can be safely retired afterwards.
+    for (const [key] of this.routes) {
+      if (!desiredRoutes.has(key)) this.removeRoute(key);
+    }
+
+    for (const [name] of this.oscillators) {
+      if (!desiredOscillators.has(name)) this.removeOscillator(name);
+    }
+
+    for (const definition of program.oscillators) {
+      this.createOscillator(definition.name);
+      this.setOscillatorFrequency(definition.name, definition.frequency, false);
+    }
+
+    for (const route of program.routes) {
+      this.connectToMain(route.source, route.amount, false);
+    }
+
+    this.emit();
+  }
+
+  createOscillator(name: string): void {
+    if (this.oscillators.has(name)) return;
+
+    const context = this.ensureContext();
+    const oscillator = context.createOscillator();
+    const output = context.createGain();
+
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(440, context.currentTime);
+    output.gain.value = 1;
+    oscillator.connect(output);
+    oscillator.start();
+
+    this.oscillators.set(name, {
+      oscillator,
+      output,
+      frequency: 440,
+    });
+  }
+
+  setOscillatorFrequency(name: string, frequency: number, emit = true): void {
+    if (!Number.isFinite(frequency) || frequency < 20 || frequency > 20000) {
+      throw new RangeError('frequency must be between 20 and 20000 Hz');
+    }
+
+    const voice = this.requireOscillator(name);
+    const context = this.ensureContext();
+    voice.frequency = frequency;
+    voice.oscillator.frequency.setTargetAtTime(frequency, context.currentTime, 0.008);
+    if (emit) this.emit();
+  }
+
+  setOscillatorNote(name: string, midiNote: number): void {
+    if (!Number.isFinite(midiNote) || midiNote < 0 || midiNote > 127) {
+      throw new RangeError('note must be between 0 and 127');
+    }
+
+    const frequency = 440 * 2 ** ((midiNote - 69) / 12);
+    this.setOscillatorFrequency(name, frequency);
+  }
+
+  connectToMain(name: string, amount = 100, emit = true): void {
+    if (!Number.isFinite(amount) || amount < 0 || amount > 100) {
+      throw new RangeError('route amount must be between 0 and 100');
+    }
+
+    const voice = this.requireOscillator(name);
+    const context = this.ensureContext();
+    const master = this.master;
+    if (!master) throw new Error('audio engine unavailable');
+
+    const routeKey = `${name}.out->out.main`;
+    const existing = this.routes.get(routeKey);
+    const normalized = amount / 100;
+
+    if (existing) {
+      existing.amount = amount;
+      existing.gain.gain.setTargetAtTime(normalized, context.currentTime, 0.008);
+      if (emit) this.emit();
+      return;
+    }
+
+    const gain = context.createGain();
+    gain.gain.value = normalized;
+    voice.output.connect(gain);
+    gain.connect(master);
+    this.routes.set(routeKey, { gain, amount });
+    if (emit) this.emit();
   }
 
   async testTone(frequency = 440): Promise<void> {
@@ -115,12 +239,58 @@ export class AudioEngine {
     this.emit();
   }
 
+  private removeRoute(key: string): void {
+    const route = this.routes.get(key);
+    if (!route) return;
+
+    const context = this.context;
+    if (context) {
+      const now = context.currentTime;
+      route.gain.gain.cancelScheduledValues(now);
+      route.gain.gain.setValueAtTime(route.gain.gain.value, now);
+      route.gain.gain.linearRampToValueAtTime(0, now + 0.01);
+      window.setTimeout(() => route.gain.disconnect(), 15);
+    } else {
+      route.gain.disconnect();
+    }
+
+    this.routes.delete(key);
+  }
+
+  private removeOscillator(name: string): void {
+    const voice = this.oscillators.get(name);
+    if (!voice) return;
+
+    const context = this.context;
+    if (context) {
+      const now = context.currentTime;
+      voice.output.gain.cancelScheduledValues(now);
+      voice.output.gain.setValueAtTime(voice.output.gain.value, now);
+      voice.output.gain.linearRampToValueAtTime(0, now + 0.01);
+      voice.oscillator.stop(now + 0.015);
+    } else {
+      voice.oscillator.stop();
+    }
+
+    voice.oscillator.addEventListener('ended', () => {
+      voice.oscillator.disconnect();
+      voice.output.disconnect();
+    }, { once: true });
+    this.oscillators.delete(name);
+  }
+
+  private requireOscillator(name: string): OscillatorVoice {
+    const voice = this.oscillators.get(name);
+    if (!voice) throw new Error(`unknown object: ${name}`);
+    return voice;
+  }
+
   private ensureContext(): AudioContext {
     if (this.context && this.master) return this.context;
 
     const context = new AudioContext({ latencyHint: 'interactive' });
     const master = context.createGain();
-    master.gain.value = 1;
+    master.gain.value = 0.12;
     master.connect(context.destination);
 
     context.addEventListener('statechange', () => this.emit());

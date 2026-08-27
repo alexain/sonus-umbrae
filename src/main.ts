@@ -1,9 +1,10 @@
 import './style.css';
 import { AudioEngine } from './audio/engine';
+import { SonusEvaluationError, SonusRuntime } from './language/runtime';
 
 type Screen = 'live' | 'config' | 'help';
 
-const VERSION = '0.0.2';
+const VERSION = '0.0.3';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Missing #app');
@@ -19,7 +20,7 @@ app.innerHTML = `
 
     <section id="surface" class="surface">
       <div id="live-screen" class="screen live-screen">
-        <div id="editor" class="editor" contenteditable="true" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Live coding editor"></div>
+        <textarea id="editor" class="editor" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Live coding editor"></textarea>
       </div>
 
       <div id="config-screen" class="screen system-screen hidden" aria-hidden="true">
@@ -44,13 +45,18 @@ app.innerHTML = `
           <span>:TEST 440</span><span>PLAY DIAGNOSTIC SINE TONE</span>
           <span>:TEST STOP</span><span>STOP DIAGNOSTIC TONE</span>
           <span>:PANIC</span><span>STOP CURRENT AUDIO IMMEDIATELY</span>
+          <span>ENTER</span><span>EVALUATE SOURCE AND INSERT NEW LINE</span>
+          <span>SHIFT+ENTER</span><span>INSERT NEW LINE WITHOUT EVALUATING</span>
+          <span>CMD+ENTER</span><span>EVALUATE ENTIRE SOURCE</span>
         </div>
         <div class="system-copy muted">ESC  RETURN TO LIVE</div>
       </div>
 
       <div id="phosphor-layer" class="phosphor-layer" aria-hidden="true">
+        <span id="error-overlays" class="error-overlays"></span>
         <span id="block-caret" class="block-caret hidden"></span>
       </div>
+      <div id="diagnostic" class="diagnostic hidden" aria-live="polite"></div>
       <div id="message" class="message" aria-live="polite"></div>
     </section>
 
@@ -61,7 +67,7 @@ app.innerHTML = `
   </main>
 `;
 
-const editor = must<HTMLDivElement>('editor');
+const editor = must<HTMLTextAreaElement>('editor');
 const commandbar = must<HTMLElement>('commandbar');
 const command = must<HTMLInputElement>('command');
 const liveScreen = must<HTMLElement>('live-screen');
@@ -70,15 +76,18 @@ const helpScreen = must<HTMLElement>('help-screen');
 const phosphorLayer = must<HTMLElement>('phosphor-layer');
 const message = must<HTMLElement>('message');
 const blockCaret = must<HTMLElement>('block-caret');
+const errorOverlays = must<HTMLElement>('error-overlays');
+const diagnostic = must<HTMLElement>('diagnostic');
 const liveDot = must<HTMLElement>('live-dot');
 const dspStatus = must<HTMLElement>('dsp-status');
 
 const audioEngine = new AudioEngine();
+const runtime = new SonusRuntime(audioEngine);
 
 let screen: Screen = 'live';
 let commandMode = false;
 let messageTimer = 0;
-let savedEditorRange: Range | null = null;
+let savedEditorSelection: { start: number; end: number; direction: 'forward' | 'backward' | 'none' } | null = null;
 
 audioEngine.subscribe((snapshot) => {
   const isRunning = snapshot.state === 'running';
@@ -89,7 +98,7 @@ audioEngine.subscribe((snapshot) => {
   dspStatus.classList.toggle('disabled', snapshot.sampleRate === null);
 });
 
-editor.textContent = '';
+editor.value = '';
 editor.focus();
 
 function must<T extends HTMLElement>(id: string): T {
@@ -129,28 +138,28 @@ function leaveCommandMode(): void {
 }
 
 function saveEditorSelection(): void {
-  const selection = window.getSelection();
-  if (!selection || selection.rangeCount === 0) return;
-
-  const range = selection.getRangeAt(0);
-  if (!editor.contains(range.startContainer) || !editor.contains(range.endContainer)) return;
-  savedEditorRange = range.cloneRange();
+  savedEditorSelection = {
+    start: editor.selectionStart,
+    end: editor.selectionEnd,
+    direction: editor.selectionDirection ?? 'none',
+  };
 }
 
 function restoreEditorSelection(): void {
   editor.focus();
 
-  const selection = window.getSelection();
-  if (!selection) return;
-
-  if (savedEditorRange && editor.contains(savedEditorRange.startContainer) && editor.contains(savedEditorRange.endContainer)) {
-    selection.removeAllRanges();
-    selection.addRange(savedEditorRange);
+  if (savedEditorSelection) {
+    const max = editor.value.length;
+    editor.setSelectionRange(
+      Math.min(savedEditorSelection.start, max),
+      Math.min(savedEditorSelection.end, max),
+      savedEditorSelection.direction,
+    );
   } else {
     placeCaretAtEnd(editor);
   }
 
-  savedEditorRange = null;
+  savedEditorSelection = null;
 }
 
 function notify(text: string): void {
@@ -161,70 +170,187 @@ function notify(text: string): void {
 }
 
 function sourceText(): string {
-  return editor.innerText.replace(/\u00a0/g, ' ');
+  return editor.value.replace(/\r\n/g, '\n');
+}
+
+function evaluateLiveSource(): void {
+  try {
+    clearDiagnostic();
+    const source = sourceText();
+    if (!source.trim()) {
+      runtime.evaluate('');
+      notify('ok');
+      return;
+    }
+
+    const results = runtime.evaluate(source);
+    const last = results.at(-1);
+    notify(last?.message ?? 'ok');
+  } catch (error) {
+    if (error instanceof SonusEvaluationError) {
+      showDiagnostics(error.diagnostics);
+      return;
+    }
+
+    notify(error instanceof Error ? error.message : 'evaluation failed');
+  }
+}
+
+
+function clearDiagnostic(): void {
+  errorOverlays.replaceChildren();
+  diagnostic.classList.add('hidden');
+  diagnostic.textContent = '';
+}
+
+function showDiagnostics(items: Array<{ line: number; message: string }>): void {
+  errorOverlays.replaceChildren();
+  const host = phosphorLayer.getBoundingClientRect();
+  const style = getComputedStyle(editor);
+  const fontSize = Number.parseFloat(style.fontSize) || 20;
+
+  for (const item of items) {
+    const rect = lineRect(item.line);
+    if (!rect) continue;
+
+    const line = document.createElement('span');
+    line.className = 'error-line';
+    line.style.left = `${rect.left - host.left - 4}px`;
+    line.style.top = `${rect.top - host.top}px`;
+    line.style.width = `${Math.max(24, rect.width + 8)}px`;
+    line.style.height = `${rect.height}px`;
+    errorOverlays.append(line);
+
+    const marker = document.createElement('span');
+    marker.className = 'error-marker';
+    marker.textContent = '!';
+    marker.style.fontSize = `${fontSize}px`;
+    marker.style.left = `${Math.max(2, rect.left - host.left - fontSize * 0.9)}px`;
+    marker.style.top = `${rect.top - host.top}px`;
+    errorOverlays.append(marker);
+  }
+
+  const summary = items
+    .slice(0, 4)
+    .map((item) => `! LINE ${item.line}: ${item.message}`)
+    .join('\n');
+  const remaining = items.length - 4;
+  diagnostic.textContent = (remaining > 0 ? `${summary}\n! +${remaining} MORE ERROR${remaining === 1 ? '' : 'S'}` : summary).toUpperCase();
+  diagnostic.classList.remove('hidden');
+}
+
+function lineRect(lineNumber: number): DOMRect | null {
+  const lines = editor.value.split('\n');
+  if (lineNumber < 1 || lineNumber > lines.length) return null;
+
+  let offset = 0;
+  for (let index = 0; index < lineNumber - 1; index += 1) offset += lines[index].length + 1;
+
+  const editorRect = editor.getBoundingClientRect();
+  const style = getComputedStyle(editor);
+  const mirror = document.createElement('div');
+  mirror.setAttribute('aria-hidden', 'true');
+  mirror.style.position = 'fixed';
+  mirror.style.visibility = 'hidden';
+  mirror.style.pointerEvents = 'none';
+  mirror.style.left = `${editorRect.left}px`;
+  mirror.style.top = `${editorRect.top}px`;
+  mirror.style.width = `${editor.clientWidth}px`;
+  mirror.style.margin = '0';
+  mirror.style.padding = style.padding;
+  mirror.style.border = style.border;
+  mirror.style.boxSizing = style.boxSizing;
+  mirror.style.whiteSpace = 'pre-wrap';
+  mirror.style.overflowWrap = style.overflowWrap;
+  mirror.style.wordBreak = style.wordBreak;
+  mirror.style.fontFamily = style.fontFamily;
+  mirror.style.fontSize = style.fontSize;
+  mirror.style.fontWeight = style.fontWeight;
+  mirror.style.fontStyle = style.fontStyle;
+  mirror.style.fontVariant = style.fontVariant;
+  mirror.style.lineHeight = style.lineHeight;
+  mirror.style.letterSpacing = style.letterSpacing;
+
+  mirror.append(document.createTextNode(editor.value.slice(0, offset)));
+  const marker = document.createElement('span');
+  marker.style.display = 'inline-block';
+  marker.style.height = style.lineHeight;
+  marker.textContent = lines[lineNumber - 1] || '\u200b';
+  mirror.append(marker);
+  document.body.append(mirror);
+
+  const markerRect = marker.getBoundingClientRect();
+  mirror.remove();
+
+  return new DOMRect(
+    markerRect.left - editor.scrollLeft,
+    markerRect.top - editor.scrollTop,
+    markerRect.width,
+    markerRect.height || Number.parseFloat(style.lineHeight) || 24,
+  );
 }
 
 function setSourceText(text: string): void {
-  savedEditorRange = null;
-  editor.textContent = text.replace(/\r\n/g, '\n');
+  clearDiagnostic();
+  savedEditorSelection = null;
+  editor.value = text.replace(/\r\n/g, '\n');
   placeCaretAtEnd(editor);
 }
 
-function placeCaretAtEnd(element: HTMLElement): void {
-  const selection = window.getSelection();
-  if (!selection) return;
-  const range = document.createRange();
-  range.selectNodeContents(element);
-  range.collapse(false);
-  selection.removeAllRanges();
-  selection.addRange(range);
+function placeCaretAtEnd(element: HTMLTextAreaElement): void {
+  const end = element.value.length;
+  element.focus();
+  element.setSelectionRange(end, end);
+}
+
+function editorCaretOffset(): number {
+  return editor.selectionStart;
 }
 
 function caretRect(): DOMRect | null {
-  const selection = window.getSelection();
-  if (!selection || selection.rangeCount === 0 || !editor.contains(selection.anchorNode)) return null;
-
-  const range = selection.getRangeAt(0).cloneRange();
-  if (!range.collapsed) range.collapse(false);
-
-  const direct = range.getClientRects()[0];
-  if (direct && direct.height > 0) return direct;
-
-  const node = range.startContainer;
-  const offset = range.startOffset;
-  const lineHeight = Number.parseFloat(getComputedStyle(editor).lineHeight) || 24;
-
-  if (node.nodeType === Node.TEXT_NODE && offset > 0) {
-    const previous = document.createRange();
-    previous.setStart(node, offset - 1);
-    previous.setEnd(node, offset);
-    const rect = previous.getBoundingClientRect();
-    if (rect.height > 0) {
-      return new DOMRect(rect.right, rect.top, 0, rect.height);
-    }
-  }
-
-  // Chromium commonly places the caret inside a fresh DIV after Enter.
-  // Use that line container instead of falling back to the editor origin.
-  if (node.nodeType === Node.ELEMENT_NODE && node !== editor) {
-    const elementRect = (node as Element).getBoundingClientRect();
-    if (elementRect.height > 0) {
-      return new DOMRect(elementRect.left, elementRect.top, 0, lineHeight);
-    }
-  }
-
-  if (node === editor && offset > 0) {
-    const previousNode = editor.childNodes[offset - 1];
-    if (previousNode instanceof Element) {
-      const previousRect = previousNode.getBoundingClientRect();
-      if (previousRect.height > 0) {
-        return new DOMRect(previousRect.left, previousRect.bottom, 0, lineHeight);
-      }
-    }
-  }
-
+  const offset = editorCaretOffset();
   const editorRect = editor.getBoundingClientRect();
-  return new DOMRect(editorRect.left, editorRect.top, 0, lineHeight);
+  const style = getComputedStyle(editor);
+  const mirror = document.createElement('div');
+  mirror.setAttribute('aria-hidden', 'true');
+  mirror.style.position = 'fixed';
+  mirror.style.visibility = 'hidden';
+  mirror.style.pointerEvents = 'none';
+  mirror.style.left = `${editorRect.left}px`;
+  mirror.style.top = `${editorRect.top}px`;
+  mirror.style.width = `${editor.clientWidth}px`;
+  mirror.style.height = 'auto';
+  mirror.style.margin = '0';
+  mirror.style.padding = style.padding;
+  mirror.style.border = style.border;
+  mirror.style.boxSizing = style.boxSizing;
+  mirror.style.whiteSpace = 'pre-wrap';
+  mirror.style.overflowWrap = style.overflowWrap;
+  mirror.style.wordBreak = style.wordBreak;
+  mirror.style.fontFamily = style.fontFamily;
+  mirror.style.fontSize = style.fontSize;
+  mirror.style.fontWeight = style.fontWeight;
+  mirror.style.fontStyle = style.fontStyle;
+  mirror.style.fontVariant = style.fontVariant;
+  mirror.style.lineHeight = style.lineHeight;
+  mirror.style.letterSpacing = style.letterSpacing;
+  mirror.style.textTransform = style.textTransform;
+
+  mirror.append(document.createTextNode(editor.value.slice(0, offset)));
+  const marker = document.createElement('span');
+  marker.style.display = 'inline-block';
+  marker.style.width = '0';
+  marker.style.height = '1em';
+  marker.textContent = '\u200b';
+  mirror.append(marker);
+  document.body.append(mirror);
+
+  const markerRect = marker.getBoundingClientRect();
+  mirror.remove();
+
+  const left = markerRect.left - editor.scrollLeft;
+  const top = markerRect.top - editor.scrollTop;
+  return new DOMRect(left, top, 0, markerRect.height || Number.parseFloat(style.lineHeight) || 24);
 }
 
 function positionBlockCaret(): void {
@@ -392,7 +518,10 @@ document.addEventListener('selectionchange', () => requestAnimationFrame(positio
 editor.addEventListener('input', () => requestAnimationFrame(positionBlockCaret));
 editor.addEventListener('keyup', () => requestAnimationFrame(positionBlockCaret));
 editor.addEventListener('pointerup', () => requestAnimationFrame(positionBlockCaret));
-liveScreen.addEventListener('scroll', () => requestAnimationFrame(positionBlockCaret));
+liveScreen.addEventListener('scroll', () => {
+  clearDiagnostic();
+  requestAnimationFrame(positionBlockCaret);
+});
 window.addEventListener('resize', () => requestAnimationFrame(positionBlockCaret));
 
 editor.addEventListener('beforeinput', (event) => {
@@ -404,11 +533,35 @@ editor.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
     event.preventDefault();
     enterCommandMode();
+    return;
+  }
+
+  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault();
+    evaluateLiveSource();
+    requestAnimationFrame(positionBlockCaret);
+    return;
+  }
+
+  if (event.key === 'Enter') {
+    event.preventDefault();
+
+    const start = editor.selectionStart;
+    const end = editor.selectionEnd;
+    editor.setRangeText('\n', start, end, 'end');
+
+    if (!event.shiftKey) evaluateLiveSource();
+
+    requestAnimationFrame(positionBlockCaret);
+    return;
   }
 
   if (event.key === 'Tab') {
     event.preventDefault();
-    document.execCommand('insertText', false, '  ');
+    const start = editor.selectionStart;
+    const end = editor.selectionEnd;
+    editor.setRangeText('  ', start, end, 'end');
+    requestAnimationFrame(positionBlockCaret);
   }
 });
 
