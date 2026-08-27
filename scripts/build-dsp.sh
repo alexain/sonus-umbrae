@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VENDOR="$ROOT/vendor/eurorack"
 VOICE_OUTPUT="$ROOT/public/dsp/voice.wasm"
 SWELL_OUTPUT="$ROOT/public/dsp/swell.wasm"
+DICES_OUTPUT="$ROOT/public/dsp/dices.wasm"
 
 if ! command -v em++ >/dev/null 2>&1; then
   echo "em++ not found. Install/activate Emscripten (emsdk) before building the DSP." >&2
@@ -61,3 +62,30 @@ em++ \
   -o "$SWELL_OUTPUT"
 
 echo "Built $SWELL_OUTPUT"
+
+
+MARBLES_DSP=()
+while IFS= read -r source; do
+  MARBLES_DSP+=("$source")
+done < <(find "$VENDOR/marbles/random" "$VENDOR/marbles/ramp" -name '*.cc' -type f | sort)
+
+em++ \
+  -std=c++17 \
+  -O3 \
+  -DTEST \
+  -I"$VENDOR" \
+  "$ROOT/dsp/dices_bridge.cc" \
+  "$VENDOR/stmlib/utils/random.cc" \
+  "$VENDOR/stmlib/dsp/atan.cc" \
+  "$VENDOR/stmlib/dsp/units.cc" \
+  "${MARBLES_DSP[@]}" \
+  "$VENDOR/marbles/resources.cc" \
+  -s STANDALONE_WASM=1 \
+  -s ALLOW_MEMORY_GROWTH=0 \
+  -s INITIAL_MEMORY=16777216 \
+  -s FILESYSTEM=0 \
+  -s EXPORTED_FUNCTIONS='["_su_dices_create","_su_dices_destroy","_su_dices_set_sample_rate","_su_dices_set_rate","_su_dices_set_jitter","_su_dices_set_gate_bias","_su_dices_set_gate_length","_su_dices_set_gate_jitter","_su_dices_set_spread","_su_dices_set_bias","_su_dices_set_steps","_su_dices_set_deja","_su_dices_set_length","_su_dices_set_scale","_su_dices_set_clock_patched","_su_dices_clock","_su_dices_process","_su_dices_t1","_su_dices_t2","_su_dices_t3","_su_dices_x1","_su_dices_x2","_su_dices_x3","_su_dices_y"]' \
+  -Wl,--no-entry \
+  -o "$DICES_OUTPUT"
+
+echo "Built $DICES_OUTPUT"

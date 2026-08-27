@@ -36,6 +36,20 @@ export interface AudioProgram {
     outputMode: number;
     range: number;
   }>;
+  dices: Array<{
+    name: string;
+    rate: number;
+    jitter: number;
+    gateBias: number;
+    gateLength: number;
+    gateJitter: number;
+    spread: number;
+    bias: number;
+    steps: number;
+    deja: number;
+    length: number;
+    scale: number;
+  }>;
   gains: Array<{
     name: string;
     level: number;
@@ -93,6 +107,21 @@ interface SwellVoice {
   range: number;
 }
 
+interface DicesVoice {
+  node: AudioWorkletNode;
+  rate: number;
+  jitter: number;
+  gateBias: number;
+  gateLength: number;
+  gateJitter: number;
+  spread: number;
+  bias: number;
+  steps: number;
+  deja: number;
+  length: number;
+  scale: number;
+}
+
 interface SignalSource {
   node: AudioNode;
   output: number;
@@ -137,14 +166,17 @@ export class AudioEngine {
   private gains = new Map<string, GainVoice>();
   private voices = new Map<string, MacroVoice>();
   private swells = new Map<string, SwellVoice>();
+  private dices = new Map<string, DicesVoice>();
   private clocks = new Map<string, ClockSource>();
   private clockTriggerListeners = new Map<string, Set<() => void>>();
   private masterClockBpm = 0;
   private clockTransportRunning = true;
   private voiceWasmBytes: ArrayBuffer | null = null;
   private swellWasmBytes: ArrayBuffer | null = null;
+  private dicesWasmBytes: ArrayBuffer | null = null;
   private voiceWorkletLoaded = false;
   private swellWorkletLoaded = false;
+  private dicesWorkletLoaded = false;
   private clockWorkletLoaded = false;
   private pendingProgram: AudioProgram | null = null;
   private routes = new Map<string, AudioRoute>();
@@ -162,7 +194,7 @@ export class AudioEngine {
           : 'suspended',
       sampleRate: this.context?.sampleRate ?? null,
       testFrequency: this.testOscillator?.frequency.value ?? null,
-      objectCount: this.oscillators.size + this.gains.size + this.voices.size + this.swells.size + this.clocks.size,
+      objectCount: this.oscillators.size + this.gains.size + this.voices.size + this.swells.size + this.dices.size + this.clocks.size,
       routeCount: this.routes.size,
     };
   }
@@ -177,6 +209,7 @@ export class AudioEngine {
     const context = this.ensureContext();
     await this.ensureVoiceRuntime();
     await this.ensureSwellRuntime();
+    await this.ensureDicesRuntime();
     await this.ensureClockRuntime();
     if (context.state !== 'running') await context.resume();
     if (this.pendingProgram) {
@@ -196,7 +229,8 @@ export class AudioEngine {
 
   applyProgram(program: AudioProgram): void {
     if ((program.voices.length > 0 && !this.voiceWorkletLoaded) ||
-        (program.swells.length > 0 && !this.swellWorkletLoaded)) {
+        (program.swells.length > 0 && !this.swellWorkletLoaded) ||
+        (program.dices.length > 0 && !this.dicesWorkletLoaded)) {
       this.pendingProgram = program;
       return;
     }
@@ -206,6 +240,7 @@ export class AudioEngine {
     const desiredOscillators = new Map(program.oscillators.map((definition) => [definition.name, definition]));
     const desiredVoices = new Map(program.voices.map((definition) => [definition.name, definition]));
     const desiredSwells = new Map(program.swells.map((definition) => [definition.name, definition]));
+    const desiredDices = new Map(program.dices.map((definition) => [definition.name, definition]));
     const desiredGains = new Map(program.gains.map((definition) => [definition.name, definition]));
     const desiredRoutes = new Map(program.routes.map((route) => [`${route.source}->${route.destination}`, route]));
     const desiredViews = new Map(program.monitorViews.map((view) => [view.signal, view]));
@@ -238,6 +273,10 @@ export class AudioEngine {
       if (!desiredSwells.has(name)) this.removeSwell(name);
     }
 
+    for (const [name] of this.dices) {
+      if (!desiredDices.has(name)) this.removeDices(name);
+    }
+
     for (const definition of program.clockSources) this.createOrUpdateClock(definition.name, definition.rate);
     this.updateAllClocks();
 
@@ -254,6 +293,11 @@ export class AudioEngine {
     for (const definition of program.swells) {
       this.createSwell(definition);
       this.updateSwell(definition);
+    }
+
+    for (const definition of program.dices) {
+      this.createDices(definition);
+      this.updateDices(definition);
     }
 
     for (const definition of program.gains) {
@@ -398,6 +442,64 @@ export class AudioEngine {
     });
   }
 
+  private createDices(definition: AudioProgram['dices'][number]): void {
+    if (this.dices.has(definition.name)) return;
+    if (!this.dicesWorkletLoaded || !this.dicesWasmBytes) {
+      throw new Error('Dices DSP is not ready; run :start after building the DSP');
+    }
+    const context = this.ensureContext();
+    const node = new AudioWorkletNode(context, 'sonus-dices', {
+      numberOfInputs: 1,
+      numberOfOutputs: 7,
+      outputChannelCount: [1, 1, 1, 1, 1, 1, 1],
+      processorOptions: { wasmBytes: this.dicesWasmBytes.slice(0) },
+    });
+    this.dices.set(definition.name, {
+      node,
+      rate: definition.rate,
+      jitter: definition.jitter,
+      gateBias: definition.gateBias,
+      gateLength: definition.gateLength,
+      gateJitter: definition.gateJitter,
+      spread: definition.spread,
+      bias: definition.bias,
+      steps: definition.steps,
+      deja: definition.deja,
+      length: definition.length,
+      scale: definition.scale,
+    });
+  }
+
+  private updateDices(definition: AudioProgram['dices'][number]): void {
+    const dices = this.dices.get(definition.name);
+    if (!dices) return;
+    dices.rate = definition.rate;
+    dices.jitter = definition.jitter;
+    dices.gateBias = definition.gateBias;
+    dices.gateLength = definition.gateLength;
+    dices.gateJitter = definition.gateJitter;
+    dices.spread = definition.spread;
+    dices.bias = definition.bias;
+    dices.steps = definition.steps;
+    dices.deja = definition.deja;
+    dices.length = definition.length;
+    dices.scale = definition.scale;
+    dices.node.port.postMessage({
+      type: 'params',
+      rate: definition.rate / 100,
+      jitter: definition.jitter / 100,
+      gateBias: definition.gateBias / 100,
+      gateLength: definition.gateLength / 100,
+      gateJitter: definition.gateJitter / 100,
+      spread: definition.spread / 100,
+      bias: definition.bias / 100,
+      steps: definition.steps / 100,
+      deja: definition.deja / 100,
+      length: definition.length,
+      scale: definition.scale,
+    });
+  }
+
   createGain(name: string): void {
     if (this.gains.has(name)) return;
     const context = this.ensureContext();
@@ -467,6 +569,14 @@ export class AudioEngine {
     if (emit) this.emit();
   }
 
+  readLatestSignal(signal: string): number | null {
+    const view = this.views.get(signal);
+    if (!view) return null;
+    const data = new Float32Array(32);
+    view.analyser.getFloatTimeDomainData(data);
+    return data[data.length - 1] ?? 0;
+  }
+
   getViewSignals(): Array<{ signal: string; kind: SignalKind }> {
     return [...this.views.entries()].map(([signal, view]) => ({ signal, kind: view.kind }));
   }
@@ -477,23 +587,26 @@ export class AudioEngine {
 
     const swellMatch = signal.match(/^([A-Za-z_]\w*)\.out[1-4]$/);
     const swell = swellMatch ? this.swells.get(swellMatch[1]) : undefined;
-    if (!swell) {
+    const dicesMatch = signal.match(/^([A-Za-z_]\w*)\.y$/);
+    const dicesY = dicesMatch ? this.dices.get(dicesMatch[1]) : undefined;
+
+    if (!swell && !dicesY) {
       view.analyser.getFloatTimeDomainData(target);
       return true;
     }
 
-    if (swell.frequency >= 12) {
+    if (swell && swell.frequency >= 12) {
       view.analyser.getFloatTimeDomainData(target);
       for (let i = 0; i < target.length; i += 1) target[i] /= 5;
       return true;
     }
 
-    // LFO/function-generator scopes need seconds of history rather than the
-    // few milliseconds available in an AnalyserNode FFT buffer.
     const probe = new Float32Array(32);
     view.analyser.getFloatTimeDomainData(probe);
     const now = performance.now() / 1000;
-    const seconds = Math.min(20, Math.max(2, 2 / Math.max(0.05, swell.frequency)));
+    const seconds = dicesY
+      ? 12
+      : Math.min(20, Math.max(2, 2 / Math.max(0.05, swell!.frequency)));
     const interval = seconds / Math.max(1, target.length - 1);
     let history = this.slowScopeHistory.get(signal);
     if (!history) {
@@ -502,12 +615,16 @@ export class AudioEngine {
     }
 
     if (now - history.lastSampleAt >= interval) {
-      history.values.push((probe[probe.length - 1] ?? 0) / 5);
+      const raw = probe[probe.length - 1] ?? 0;
+      // Swell and Dices.Y are Eurorack-style CV signals. Keep routing values
+      // in volts, but map +/-5V to the oscilloscope's normalized +/-1 domain.
+      history.values.push(raw / 5);
       history.lastSampleAt = now;
       if (history.values.length > target.length) history.values.splice(0, history.values.length - target.length);
     }
 
-    const fill = history.values[0] ?? (probe[probe.length - 1] ?? 0) / 5;
+    const rawFill = probe[probe.length - 1] ?? 0;
+    const fill = history.values[0] ?? rawFill / 5;
     target.fill(fill);
     const offset = target.length - history.values.length;
     for (let i = 0; i < history.values.length; i += 1) target[offset + i] = history.values[i];
@@ -566,6 +683,19 @@ export class AudioEngine {
       return { node: swell.node, output: Number(swellOutput[2]) - 1 };
     }
 
+    const dicesOutput = signal.match(/^([A-Za-z_]\w*)\.(t[1-3]|x[1-3]|y)$/);
+    if (dicesOutput) {
+      const dices = this.dices.get(dicesOutput[1]);
+      if (!dices) throw new Error(`unknown Dices object: ${dicesOutput[1]}`);
+      const port = dicesOutput[2];
+      const outputs: Record<string, number> = {
+        t1: 0, t2: 1, t3: 2,
+        x1: 3, x2: 4, x3: 5,
+        y: 6,
+      };
+      return { node: dices.node, output: outputs[port] };
+    }
+
     const match = signal.match(/^([A-Za-z_]\w*)\.(out|aux)$/);
     if (!match) throw new Error(`unknown signal: ${signal}`);
     const [, name, port] = match;
@@ -600,8 +730,10 @@ export class AudioEngine {
     const clock = port.match(/^([A-Za-z_]\w*)\.clock$/);
     if (clock) {
       const swell = this.swells.get(clock[1]);
-      if (!swell) throw new Error(`clock input is only available on Swell objects: ${clock[1]}`);
-      return { node: swell.node, input: 1 };
+      if (swell) return { node: swell.node, input: 1 };
+      const dices = this.dices.get(clock[1]);
+      if (dices) return { node: dices.node, input: 0 };
+      throw new Error(`clock input is only available on Swell or Dices objects: ${clock[1]}`);
     }
 
     const vOct = port.match(/^([A-Za-z_]\w*)\.v_oct$/);
@@ -889,6 +1021,17 @@ export class AudioEngine {
     }
   }
 
+  private removeDices(name: string): void {
+    const dices = this.dices.get(name);
+    if (!dices) return;
+    try { dices.node.disconnect(); } catch {}
+    dices.node.port.close();
+    this.dices.delete(name);
+    for (const signal of [...this.views.keys()]) {
+      if (signal.startsWith(`${name}.`)) this.removeView(signal);
+    }
+  }
+
   private removeVoice(name: string): void {
     const voice = this.voices.get(name);
     if (!voice) return;
@@ -937,6 +1080,18 @@ export class AudioEngine {
     this.swellWasmBytes = await response.arrayBuffer();
     await context.audioWorklet.addModule('/worklets/swell-processor.js');
     this.swellWorkletLoaded = true;
+  }
+
+  private async ensureDicesRuntime(): Promise<void> {
+    if (this.dicesWorkletLoaded && this.dicesWasmBytes) return;
+    const context = this.ensureContext();
+    const response = await fetch('/dsp/dices.wasm');
+    if (!response.ok) {
+      throw new Error('Dices DSP missing. Run npm run dsp:setup and npm run dsp:build.');
+    }
+    this.dicesWasmBytes = await response.arrayBuffer();
+    await context.audioWorklet.addModule('/worklets/dices-processor.js');
+    this.dicesWorkletLoaded = true;
   }
 
   private async ensureClockRuntime(): Promise<void> {

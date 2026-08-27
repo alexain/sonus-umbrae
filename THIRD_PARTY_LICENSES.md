@@ -60,3 +60,12 @@ If Sonus Umbrae later bundles fonts or additional DSP engines, their license not
 The Tides 2018 firmware source is released under the MIT License. Sonus Umbrae uses the name **Swell** for its integration and does not use Mutable Instruments or Tides as product branding.
 
 The upstream source is downloaded by the DSP setup process and is not authored by the Sonus Umbrae project.
+
+
+## Mutable Instruments Marbles DSP
+
+`Dices()` uses DSP source code from the `marbles` directory of the Mutable Instruments Eurorack repository.
+
+Marbles is part of the STM32F code in that repository, which is published under the MIT License. Sonus Umbrae uses the name **Dices** for its integration and does not use Mutable Instruments or Marbles as product branding.
+
+The upstream source is downloaded by the DSP setup process and is not authored by the Sonus Umbrae project.

@@ -99,3 +99,6 @@ Sonus Umbrae's own source code is released under the MIT License. See [LICENSE](
 The project can download and compile third-party DSP code during development. Those components retain their own copyright and license terms. See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 
 The current `Voice()` implementation uses DSP code from the Mutable Instruments Eurorack repository. Mutable Instruments states that its STM32F project code, including Plaits, is distributed under the MIT License. Mutable Instruments is a registered trademark; Sonus Umbrae is an independent project and is not affiliated with or endorsed by Mutable Instruments.
+
+
+Additional modules include `Swell()` (Tides 2018 DSP) and `Dices()` (Marbles DSP). Both use Sonus Umbrae-specific names while retaining the applicable upstream MIT license notices.

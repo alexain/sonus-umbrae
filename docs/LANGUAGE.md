@@ -472,3 +472,65 @@ This overlays `OUT` and `AUX` with separate traces. Individual port views remain
 plaits.out.view();
 plaits.aux.view();
 ```
+
+
+## Dices
+
+`Dices()` is Sonus Umbrae's random gate and voltage generator built on the Mutable Instruments Marbles DSP.
+
+```text
+dice = Dices()
+    .rate(50)
+    .jitter(10)
+    .gate_bias(50)
+    .spread(60)
+    .bias(50)
+    .steps(80)
+    .deja(25)
+    .length(8)
+    .scale("minor");
+```
+
+The control values `rate`, `jitter`, `gate_bias`, `spread`, `bias`, `steps`, and `deja` use the 0..100 knob-style range. `length` is 1..16.
+
+Available scale names are `major`, `minor`, `pentatonic`, `chromatic`, `dorian`, and `fifths`.
+
+Outputs:
+
+- `t1`, `t2`, `t3`: gate streams.
+- `x1`, `x2`, `x3`: random/quantized CV outputs in logical Eurorack volts, suitable for `v_oct`.
+- `y`: slow random CV.
+
+Input:
+
+- `clock`: optional external clock. Without it, Dices uses Marbles' internal clock generator.
+
+Example:
+
+```text
+Clock.out -> dice.clock;
+dice.x1 -> plaits.v_oct;
+dice.t1 -> plaits.trig;
+plaits.out -> Audio.out;
+
+dice.view();
+```
+
+`dice.view()` opens a dedicated sequence monitor showing the latest T gate decisions and X notes. Individual outputs still support generic views such as `dice.x1.view()` or `dice.t1.view()`.
+
+
+Dices exposes the secondary Marbles gate-shape controls explicitly:
+
+```text
+dice.gate_length(45);
+dice.gate_jitter(30);
+```
+
+`gate_length()` sets the mean T1/T3 pulse width. `gate_jitter()` controls pulse-width randomization around that mean. They map directly to the Marbles T generator pulse-width controls.
+
+The dedicated Dices view displays `CLOCK INTERNAL` when free-running and `CLOCK EXTERNAL` when its clock input is patched. Its clock dot follows the effective T2 pulse, so timing jitter is visible rather than merely reflecting the upstream master clock.
+
+`Y` is treated as a slow modulation signal. Both the Y trace inside `dice.view()` and `dice.y.view()` use the long-history LFO scope.
+
+
+The Dices `Y` oscilloscope uses a fixed Eurorack display scale of ±5V. This affects visualization only: the signal itself remains in volts for routing and the numeric Y readout continues to show the actual voltage.

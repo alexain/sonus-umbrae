@@ -30,6 +30,11 @@ if [[ ! -f "$VENDOR/tides2/poly_slope_generator.h" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$VENDOR/marbles/random/t_generator.h" ]]; then
+  echo "Marbles DSP sources are incomplete: $VENDOR/marbles is missing" >&2
+  exit 1
+fi
+
 cat <<'MSG'
 DSP sources ready.
 

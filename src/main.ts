@@ -120,6 +120,11 @@ let screen: Screen = 'live';
 let commandMode = false;
 let messageTimer = 0;
 let scopeFrame = 0;
+const dicesHistories = new Map<string, {
+  previousT2: boolean;
+  t: [boolean[], boolean[], boolean[]];
+  x: [number[], number[], number[]];
+}>();
 let savedEditorSelection: { start: number; end: number; direction: 'forward' | 'backward' | 'none' } | null = null;
 let audioAutoStartPending = true;
 let diagnosticLines = new Set<number>();
@@ -329,6 +334,12 @@ function syncViews(): void {
     }
 
     const details = [...parameterViews.values()].filter((view) => view.signal.startsWith(`${node.id}.`));
+    const dicesModuleView = moduleViews.has(node.id) && / : DICES$/i.test(node.label);
+    const dicesClockSource = dicesModuleView
+      ? scheme.connections.some((connection) => connection.target === node.id && connection.targetPort === 'CLOCK')
+        ? 'EXTERNAL'
+        : 'INTERNAL'
+      : undefined;
     const compositeSignals = moduleViews.has(node.id)
       ? / : SWELL$/i.test(node.label)
         ? [1, 2, 3, 4].map((port) => `${node.id}.out${port}`)
@@ -340,7 +351,7 @@ function syncViews(): void {
     // User-created modules exist in VARIABLES and SCHEME automatically, but a
     // LIVE monitor panel is created only by an explicit .view(). Merely
     // creating or changing a module must not consume monitor space.
-    if (signals.length === 0 && details.length === 0 && compositeSignals.length === 0) continue;
+    if (signals.length === 0 && details.length === 0 && compositeSignals.length === 0 && !dicesModuleView) continue;
 
     panels.push(buildModuleMonitorPanel({
       id: node.id,
@@ -348,6 +359,8 @@ function syncViews(): void {
       parameters: node.parameters,
       signals,
       compositeSignals,
+      dicesModule: dicesModuleView,
+      dicesClockSource,
       parameterDetails: details,
       defaultCollapsed: false,
     }));
@@ -398,12 +411,56 @@ function buildModuleMonitorPanel(options: {
   parameters: Array<{ name: string; value: string; liveSignal?: string }>;
   signals: Array<{ signal: string; kind: string; label: string }>;
   compositeSignals?: string[];
+  dicesModule?: boolean;
+  dicesClockSource?: 'INTERNAL' | 'EXTERNAL';
   parameterDetails?: ParameterViewState[];
   defaultCollapsed: boolean;
 }): HTMLElement {
   const card = createMonitorCard(options.id, options.title, options.defaultCollapsed);
   const body = card.querySelector<HTMLElement>('.monitor-body');
   if (!body) return card;
+
+  if (options.dicesModule) {
+    const sequence = document.createElement('div');
+    sequence.className = 'dices-view';
+    sequence.dataset.module = options.id;
+    sequence.dataset.clockSource = options.dicesClockSource ?? 'INTERNAL';
+
+    const clock = document.createElement('div');
+    clock.className = 'dices-clock';
+    clock.innerHTML = `<span>CLOCK</span><span class="dices-clock-source">${options.dicesClockSource ?? 'INTERNAL'}</span><span class="dices-clock-dot">○</span>`;
+    sequence.append(clock);
+
+    for (const labelText of ['T1', 'T2', 'T3', 'X1', 'X2', 'X3']) {
+      const label = document.createElement('div');
+      label.className = 'dices-lane-label';
+      label.textContent = labelText;
+      sequence.append(label);
+
+      const lane = document.createElement('div');
+      lane.className = `dices-lane dices-lane-${labelText.toLowerCase()}`;
+      for (let step = 0; step < 8; step += 1) {
+        const cell = document.createElement('span');
+        cell.className = 'dices-step';
+        cell.textContent = labelText.startsWith('T') ? '·' : '--';
+        lane.append(cell);
+      }
+      sequence.append(lane);
+    }
+
+    const y = document.createElement('div');
+    y.className = 'dices-y';
+    const yHeader = document.createElement('div');
+    yHeader.className = 'dices-y-header';
+    yHeader.innerHTML = '<span>Y</span><span class="dices-y-value">--</span>';
+    const yCanvas = document.createElement('canvas');
+    yCanvas.className = 'scope-canvas view-signal dices-y-scope';
+    yCanvas.dataset.signal = `${options.id}.y`;
+    yCanvas.dataset.kind = 'signal';
+    y.append(yHeader, yCanvas);
+    sequence.append(y);
+    body.append(sequence);
+  }
 
   if ((options.compositeSignals?.length ?? 0) > 0) {
     const section = document.createElement('div');
@@ -582,9 +639,93 @@ function applySavedPanelOrder(): void {
   for (const card of cards) viewStack.append(card);
 }
 
+function voltageToNote(voltage: number): string {
+  const midi = Math.round(48 + voltage * 12);
+  const names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+  const note = names[((midi % 12) + 12) % 12];
+  const octave = Math.floor(midi / 12) - 1;
+  return `${note}${octave}`;
+}
+
+function updateDicesViews(): void {
+  const views = [...document.querySelectorAll<HTMLElement>('.dices-view[data-module]')];
+  for (const view of views) {
+    const name = view.dataset.module;
+    if (!name) continue;
+
+    let history = dicesHistories.get(name);
+    if (!history) {
+      history = {
+        previousT2: false,
+        t: [[], [], []],
+        x: [[], [], []],
+      };
+      dicesHistories.set(name, history);
+    }
+
+    const t = [1, 2, 3].map((port) => (audioEngine.readLatestSignal(`${name}.t${port}`) ?? 0) > 0.3);
+    const x = [1, 2, 3].map((port) => audioEngine.readLatestSignal(`${name}.x${port}`) ?? 0);
+    const t2Rising = t[1] && !history.previousT2;
+    history.previousT2 = t[1];
+
+    const dot = view.querySelector<HTMLElement>('.dices-clock-dot');
+    if (dot) {
+      dot.textContent = t[1] ? '●' : '○';
+      dot.classList.toggle('active', t[1]);
+    }
+
+    const clockSource = view.querySelector<HTMLElement>('.dices-clock-source');
+    if (clockSource) {
+      const source = view.dataset.clockSource;
+      if (source) {
+        clockSource.textContent = source;
+      } else {
+        const scheme = runtime.getSchemeModel();
+        clockSource.textContent = scheme.connections.some(
+          (connection) => connection.target === name && connection.targetPort === 'CLOCK',
+        ) ? 'EXTERNAL' : 'INTERNAL';
+      }
+    }
+
+    if (t2Rising) {
+      for (let lane = 0; lane < 3; lane += 1) {
+        history.t[lane].push(t[lane]);
+        history.x[lane].push(x[lane]);
+        if (history.t[lane].length > 8) history.t[lane].shift();
+        if (history.x[lane].length > 8) history.x[lane].shift();
+      }
+    }
+
+    for (let lane = 0; lane < 3; lane += 1) {
+      const tCells = [...view.querySelectorAll<HTMLElement>(`.dices-lane-t${lane + 1} .dices-step`)];
+      const xCells = [...view.querySelectorAll<HTMLElement>(`.dices-lane-x${lane + 1} .dices-step`)];
+      const visible = tCells.length;
+      const tValues = history.t[lane].slice(-visible);
+      const xValues = history.x[lane].slice(-visible);
+
+      tCells.forEach((cell, index) => {
+        const offset = visible - tValues.length;
+        const active = index >= offset ? tValues[index - offset] : false;
+        cell.textContent = active ? '●' : '·';
+        cell.classList.toggle('active', active);
+      });
+
+      xCells.forEach((cell, index) => {
+        const offset = visible - xValues.length;
+        cell.textContent = index >= offset ? voltageToNote(xValues[index - offset]) : '--';
+      });
+    }
+
+    const y = audioEngine.readLatestSignal(`${name}.y`);
+    const yValue = view.querySelector<HTMLElement>('.dices-y-value');
+    if (yValue && y !== null) yValue.textContent = `${y >= 0 ? '+' : ''}${y.toFixed(2)}V`;
+  }
+}
+
 function drawScopes(): void {
   scopeFrame = 0;
   updateSchemeLiveValues();
+  updateDicesViews();
   const canvases = [...document.querySelectorAll<HTMLCanvasElement>('canvas.scope-canvas')];
   const liveValues = document.querySelectorAll<HTMLElement>('.scheme-live-value');
   if (canvases.length === 0 && liveValues.length === 0) return;
@@ -786,6 +927,33 @@ function buildSchemeNode(node: SchemeNode): HTMLElement {
   }
 
   for (const view of node.views ?? []) {
+    if (/ : DICES$/i.test(node.label) && view.port === 'SEQUENCE') {
+      const dedicated = document.createElement('div');
+      dedicated.className = 'dices-view dices-view-scheme';
+      dedicated.dataset.module = node.id;
+      const clock = document.createElement('div');
+      clock.className = 'dices-clock';
+      clock.innerHTML = '<span>CLOCK</span><span class="dices-clock-source">--</span><span class="dices-clock-dot">○</span>';
+      dedicated.append(clock);
+      for (const labelText of ['T1', 'T2', 'T3', 'X1', 'X2', 'X3']) {
+        const label = document.createElement('div');
+        label.className = 'dices-lane-label';
+        label.textContent = labelText;
+        dedicated.append(label);
+        const lane = document.createElement('div');
+        lane.className = `dices-lane dices-lane-${labelText.toLowerCase()}`;
+        for (let step = 0; step < 4; step += 1) {
+          const cell = document.createElement('span');
+          cell.className = 'dices-step';
+          cell.textContent = labelText.startsWith('T') ? '·' : '--';
+          lane.append(cell);
+        }
+        dedicated.append(lane);
+      }
+      element.append(dedicated);
+      continue;
+    }
+
     const embedded = document.createElement('div');
     embedded.className = 'scheme-embedded-view';
 
