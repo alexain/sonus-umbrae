@@ -21,7 +21,8 @@ app.innerHTML = `
     <section id="surface" class="surface">
       <div id="live-screen" class="screen live-screen">
         <div class="editor-pane">
-          <textarea id="editor" class="editor" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Live coding editor"></textarea>
+          <div id="line-gutter" class="line-gutter" aria-hidden="true"><div id="line-gutter-content" class="line-gutter-content"></div></div>
+          <div class="editor-stack"><div id="syntax-layer" class="syntax-layer" aria-hidden="true"></div><textarea id="editor" class="editor" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Live coding editor"></textarea></div>
         </div>
         <aside id="view-panel" class="view-panel hidden" aria-label="Signal views">
           <div id="view-stack" class="view-stack"></div>
@@ -88,6 +89,9 @@ app.innerHTML = `
 `;
 
 const editor = must<HTMLTextAreaElement>('editor');
+const syntaxLayer = must<HTMLElement>('syntax-layer');
+const lineGutter = must<HTMLElement>('line-gutter');
+const lineGutterContent = must<HTMLElement>('line-gutter-content');
 const commandbar = must<HTMLElement>('commandbar');
 const command = must<HTMLInputElement>('command');
 const liveScreen = must<HTMLElement>('live-screen');
@@ -118,6 +122,7 @@ let messageTimer = 0;
 let scopeFrame = 0;
 let savedEditorSelection: { start: number; end: number; direction: 'forward' | 'backward' | 'none' } | null = null;
 let audioAutoStartPending = true;
+let diagnosticLines = new Set<number>();
 
 async function tryAutoStartAudio(): Promise<void> {
   if (!audioAutoStartPending) return;
@@ -254,11 +259,12 @@ function evaluateLiveSource(): void {
 function syncViews(): void {
   const signalViews = audioEngine.getViewSignals();
   const parameterViews = runtime.getParameterViews();
+  const variableViews = runtime.getVariableViews();
   const views = [
     ...signalViews.map((view) => ({ signal: view.signal, kind: view.kind as string, parameter: null as ParameterViewState | null })),
     ...parameterViews.map((view) => ({ signal: view.signal, kind: 'parameter', parameter: view })),
   ];
-  const hasViews = views.length > 0;
+  const hasViews = views.length > 0 || variableViews.length > 0;
   liveScreen.classList.toggle('with-views', hasViews);
   viewPanel.classList.toggle('hidden', !hasViews);
 
@@ -313,6 +319,56 @@ function syncViews(): void {
       card.append(title, canvas);
     }
     viewStack.append(card);
+  }
+
+  const variablesKey = '__variables__';
+  if (variableViews.length > 0) {
+    let card = existing.get(variablesKey);
+    if (!card) {
+      card = document.createElement('section');
+      card.className = 'view-card variables-card';
+      card.dataset.signal = variablesKey;
+
+      const title = document.createElement('div');
+      title.className = 'view-title';
+      title.textContent = 'VARIABLES';
+
+      const readout = document.createElement('div');
+      readout.className = 'variables-readout';
+      card.append(title, readout);
+      viewStack.append(card);
+    }
+
+    const readout = card.querySelector<HTMLElement>('.variables-readout');
+    if (readout) {
+      const rows = new Map(
+        [...readout.querySelectorAll<HTMLElement>('.variable-row')].map((row) => [row.dataset.name ?? '', row]),
+      );
+
+      for (const variable of variableViews) {
+        let row = rows.get(variable.name);
+        if (!row) {
+          row = document.createElement('div');
+          row.className = 'variable-row';
+          row.dataset.name = variable.name;
+
+          const name = document.createElement('span');
+          name.className = 'variable-name';
+          name.textContent = variable.name;
+
+          const value = document.createElement('span');
+          value.className = 'variable-value';
+          row.append(name, value);
+          readout.append(row);
+        }
+        const value = row.querySelector<HTMLElement>('.variable-value');
+        if (value) value.textContent = variable.value;
+        rows.delete(variable.name);
+      }
+
+      for (const row of rows.values()) row.remove();
+    }
+    existing.delete(variablesKey);
   }
 
   for (const card of existing.values()) card.remove();
@@ -629,6 +685,8 @@ function formatSchemeNumber(value: number): string {
 
 function clearDiagnostic(): void {
   errorOverlays.replaceChildren();
+  diagnosticLines = new Set<number>();
+  renderLineGutter();
   diagnostic.classList.add('hidden');
   diagnostic.textContent = '';
 }
@@ -636,8 +694,8 @@ function clearDiagnostic(): void {
 function showDiagnostics(items: Array<{ line: number; message: string }>): void {
   errorOverlays.replaceChildren();
   const host = phosphorLayer.getBoundingClientRect();
-  const style = getComputedStyle(editor);
-  const fontSize = Number.parseFloat(style.fontSize) || 20;
+  diagnosticLines = new Set(items.map((item) => item.line));
+  renderLineGutter();
 
   for (const item of items) {
     const rect = lineRect(item.line);
@@ -650,14 +708,6 @@ function showDiagnostics(items: Array<{ line: number; message: string }>): void 
     line.style.width = `${Math.max(24, rect.width + 8)}px`;
     line.style.height = `${rect.height}px`;
     errorOverlays.append(line);
-
-    const marker = document.createElement('span');
-    marker.className = 'error-marker';
-    marker.textContent = '!';
-    marker.style.fontSize = `${fontSize}px`;
-    marker.style.left = `${Math.max(2, rect.left - host.left - fontSize * 0.9)}px`;
-    marker.style.top = `${rect.top - host.top}px`;
-    errorOverlays.append(marker);
   }
 
   const summary = items
@@ -720,10 +770,171 @@ function lineRect(lineNumber: number): DOMRect | null {
   );
 }
 
+
+function renderLineGutter(): void {
+  const lines = editor.value.split('\n');
+  const style = getComputedStyle(editor);
+  const mirror = document.createElement('div');
+  mirror.setAttribute('aria-hidden', 'true');
+  mirror.style.position = 'fixed';
+  mirror.style.visibility = 'hidden';
+  mirror.style.pointerEvents = 'none';
+  mirror.style.width = `${editor.clientWidth}px`;
+  mirror.style.margin = '0';
+  mirror.style.padding = '0';
+  mirror.style.border = '0';
+  mirror.style.boxSizing = 'border-box';
+  mirror.style.whiteSpace = 'pre-wrap';
+  mirror.style.overflowWrap = style.overflowWrap;
+  mirror.style.wordBreak = style.wordBreak;
+  mirror.style.fontFamily = style.fontFamily;
+  mirror.style.fontSize = style.fontSize;
+  mirror.style.fontWeight = style.fontWeight;
+  mirror.style.fontStyle = style.fontStyle;
+  mirror.style.fontVariant = style.fontVariant;
+  mirror.style.lineHeight = style.lineHeight;
+  mirror.style.letterSpacing = style.letterSpacing;
+
+  const measured: HTMLElement[] = [];
+  for (const text of lines) {
+    const row = document.createElement('div');
+    row.style.minHeight = style.lineHeight;
+    row.textContent = text || '\u200b';
+    mirror.append(row);
+    measured.push(row);
+  }
+  document.body.append(mirror);
+
+  const labels = statementLabels(editor.value);
+  lineGutterContent.replaceChildren();
+  lines.forEach((_, index) => {
+    const physicalLine = index + 1;
+    const row = document.createElement('div');
+    row.className = diagnosticLines.has(physicalLine) ? 'line-number error' : 'line-number';
+    row.style.height = `${measured[index].getBoundingClientRect().height}px`;
+    const marker = document.createElement('span');
+    marker.className = 'line-number-marker';
+    marker.textContent = diagnosticLines.has(physicalLine) ? '!' : '';
+    const label = document.createElement('span');
+    label.textContent = labels[index] ?? '';
+    row.append(marker, label);
+    lineGutterContent.append(row);
+  });
+  mirror.remove();
+  syncLineGutter();
+}
+
+function statementLabels(source: string): string[] {
+  const lines = source.split('\n');
+  const labels = Array(lines.length).fill('') as string[];
+  let statement = 0;
+  let pending = false;
+  let quote: '"' | "'" | null = null;
+  let escaped = false;
+
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex];
+    let hasCode = false;
+    let terminates = false;
+    for (let i = 0; i < line.length; i += 1) {
+      const char = line[i];
+      const next = line[i + 1];
+      if (quote) {
+        hasCode = true;
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if (char === quote) quote = null;
+        continue;
+      }
+      if (char === '"' || char === "'") { quote = char; hasCode = true; continue; }
+      if (char === '/' && next === '/') break;
+      if (!/\s/.test(char)) hasCode = true;
+      if (char === ';') terminates = true;
+    }
+    if (hasCode && !pending) {
+      statement += 1;
+      labels[lineIndex] = String(statement);
+      pending = true;
+    }
+    if (terminates) pending = false;
+  }
+  return labels;
+}
+
+function statementCompleteBeforeCaret(source: string): boolean {
+  let quote: '"' | "'" | null = null;
+  let escaped = false;
+  let inComment = false;
+  let lastSignificant = '';
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i];
+    const next = source[i + 1];
+    if (inComment) { if (char === '\n') inComment = false; continue; }
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === quote) quote = null;
+      continue;
+    }
+    if (char === '"' || char === "'") { quote = char; lastSignificant = char; continue; }
+    if (char === '/' && next === '/') { inComment = true; i += 1; continue; }
+    if (!/\s/.test(char)) lastSignificant = char;
+  }
+  return lastSignificant === ';';
+}
+
+function renderSyntaxLayer(): void {
+  const source = editor.value;
+  syntaxLayer.replaceChildren();
+  const lines = source.split('\n');
+  lines.forEach((line, index) => {
+    const row = document.createElement('div');
+    row.className = 'syntax-line';
+    const commentAt = commentStart(line);
+    if (commentAt < 0) row.append(document.createTextNode(line || '\u200b'));
+    else {
+      row.append(document.createTextNode(line.slice(0, commentAt)));
+      const comment = document.createElement('span');
+      comment.className = 'syntax-comment';
+      comment.textContent = line.slice(commentAt);
+      row.append(comment);
+    }
+    syntaxLayer.append(row);
+  });
+  syncSyntaxLayer();
+}
+
+function commentStart(line: string): number {
+  let quote: '"' | "'" | null = null;
+  let escaped = false;
+  for (let i = 0; i < line.length - 1; i += 1) {
+    const char = line[i];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === quote) quote = null;
+      continue;
+    }
+    if (char === '"' || char === "'") { quote = char; continue; }
+    if (char === '/' && line[i + 1] === '/') return i;
+  }
+  return -1;
+}
+
+function syncSyntaxLayer(): void {
+  syntaxLayer.style.transform = `translate(${-editor.scrollLeft}px, ${-editor.scrollTop}px)`;
+}
+
+function syncLineGutter(): void {
+  lineGutterContent.style.transform = `translateY(${-editor.scrollTop}px)`;
+}
+
 function setSourceText(text: string): void {
   clearDiagnostic();
   savedEditorSelection = null;
   editor.value = text.replace(/\r\n/g, '\n');
+  renderSyntaxLayer();
+  renderLineGutter();
   placeCaretAtEnd(editor);
 }
 
@@ -958,7 +1169,11 @@ async function loadSource(): Promise<void> {
 }
 
 document.addEventListener('selectionchange', () => requestAnimationFrame(positionBlockCaret));
-editor.addEventListener('input', () => requestAnimationFrame(positionBlockCaret));
+editor.addEventListener('input', () => {
+  renderSyntaxLayer();
+  renderLineGutter();
+  requestAnimationFrame(positionBlockCaret);
+});
 editor.addEventListener('keyup', () => requestAnimationFrame(positionBlockCaret));
 editor.addEventListener('pointerup', () => requestAnimationFrame(positionBlockCaret));
 liveScreen.addEventListener('scroll', () => {
@@ -966,10 +1181,12 @@ liveScreen.addEventListener('scroll', () => {
   requestAnimationFrame(positionBlockCaret);
 });
 editor.addEventListener('scroll', () => {
-  clearDiagnostic();
+  syncLineGutter();
+  syncSyntaxLayer();
   requestAnimationFrame(positionBlockCaret);
 });
 window.addEventListener('resize', () => {
+  renderLineGutter();
   requestAnimationFrame(positionBlockCaret);
 });
 window.addEventListener('keydown', retryAutoStartFromGesture, { capture: true });
@@ -998,9 +1215,14 @@ editor.addEventListener('keydown', (event) => {
 
     const start = editor.selectionStart;
     const end = editor.selectionEnd;
-    editor.setRangeText('\n', start, end, 'end');
+    const before = editor.value.slice(0, start);
+    const complete = statementCompleteBeforeCaret(before);
+    const indentation = complete ? '' : '    ';
+    editor.setRangeText(`\n${indentation}`, start, end, 'end');
 
-    if (!event.shiftKey) evaluateLiveSource();
+    renderSyntaxLayer();
+    renderLineGutter();
+    if (!event.shiftKey && complete) evaluateLiveSource();
 
     requestAnimationFrame(positionBlockCaret);
     return;
@@ -1053,3 +1275,6 @@ window.addEventListener('pointerdown', (event) => {
   editor.focus();
   requestAnimationFrame(positionBlockCaret);
 });
+
+renderSyntaxLayer();
+requestAnimationFrame(renderLineGutter);

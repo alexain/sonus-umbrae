@@ -1,4 +1,5 @@
 import { AudioEngine, type AudioProgram, type SignalKind } from '../audio/engine';
+import { evaluateExpression, ExpressionError, type ScalarValue } from './expression';
 
 export interface EvaluationResult {
   message: string;
@@ -21,6 +22,11 @@ export interface ParameterViewState {
   label: string;
   value: string;
   base: string;
+}
+
+export interface VariableViewState {
+  name: string;
+  value: string;
 }
 
 export interface SchemeEmbeddedView {
@@ -93,6 +99,7 @@ interface ClockDefinition {
 
 export class SonusRuntime {
   private parameterViews: ParameterViewState[] = [];
+  private variableViews: VariableViewState[] = [];
 
   private scheme: SchemeModel = {
     nodes: [{ id: 'Main', label: 'MAIN', kind: 'module', parameters: [] }],
@@ -103,6 +110,10 @@ export class SonusRuntime {
 
   getParameterViews(): ParameterViewState[] {
     return this.parameterViews.map((view) => ({ ...view }));
+  }
+
+  getVariableViews(): VariableViewState[] {
+    return this.variableViews.map((view) => ({ ...view }));
   }
 
   getSchemeModel(): SchemeModel {
@@ -125,13 +136,12 @@ export class SonusRuntime {
     let clockBpm = 0;
     const views = new Map<string, ViewKind>();
     const parameterViews = new Map<string, ParameterViewState>();
+    const variableViewRequests: Array<{ name: string; line: number }> = [];
+    const variables = new Map<string, ScalarValue>();
     const results: EvaluationResult[] = [];
     const diagnostics: SonusDiagnostic[] = [];
 
-    const lines = source
-      .split(/\r?\n/)
-      .map((line, index) => ({ source: line.trim(), line: index + 1 }))
-      .filter(({ source: line }) => line.length > 0 && !line.startsWith('#'));
+    const lines = parseStatements(source);
 
     // Pass 1: declarations. Objects are collected before the remaining statements
     // so the source remains declarative rather than execution-order dependent.
@@ -160,10 +170,7 @@ export class SonusRuntime {
 
         const definition: OscillatorDefinition = { frequency: 440, parameters: new Map() };
         oscillators.set(name, definition);
-        for (const call of calls) {
-          const error = applyOscillatorCall(name, definition, call, views);
-          if (error) diagnostics.push({ line: lineNumber, message: error });
-        }
+        void calls;
         results.push({ message: `${name} = osc` });
         continue;
       }
@@ -175,11 +182,9 @@ export class SonusRuntime {
 
         const definition: GainDefinition = { level: 100, parameters: new Map() };
         gains.set(name, definition);
-        for (const call of calls) {
-          const error = applyGainCall(name, definition, call, views);
-          if (error) diagnostics.push({ line: lineNumber, message: error });
-        }
+        void calls;
         results.push({ message: `${name} = gain` });
+        continue;
       }
 
       const voiceDeclaration = parseVoiceDeclaration(line);
@@ -196,22 +201,210 @@ export class SonusRuntime {
           parameters: new Map(),
         };
         voices.set(name, definition);
-        for (const call of calls) {
-          const error = applyVoiceCall(name, definition, call, views);
-          if (error) diagnostics.push({ line: lineNumber, message: error });
-        }
+        void calls;
         results.push({ message: `${name} = Voice` });
+        continue;
       }
     }
 
-    // Pass 2: parameters, views and routes. Invalid lines do not stop validation
-    // of later lines. The audio program is applied only if the whole document is valid.
-    for (const { source: line, line: lineNumber } of lines) {
-      if (parseClockDeclaration(line) || parseOscillatorDeclaration(line) || parseGainDeclaration(line) || parseVoiceDeclaration(line)) continue;
+    const resolveMember = (path: string[]): ScalarValue | undefined => {
+      if (path.length < 2 || path.length > 3) return undefined;
+      const [name, parameter, qualifier] = path;
+      if (qualifier !== undefined && qualifier !== 'base') return undefined;
+      if (name === 'Clock' && parameter === 'bpm') return clockBpm;
+      const oscillator = oscillators.get(name);
+      const voice = voices.get(name);
+      const gain = gains.get(name);
+      if (parameter === 'freq') return oscillator?.frequency ?? voice?.frequency;
+      if (parameter === 'level') return gain?.level;
+      if (parameter === 'model') return voice?.model;
+      if (voice && (parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph')) return voice[parameter];
+      return undefined;
+    };
 
-      let match = line.match(/^Clock\.bpm\(\s*(-?\d+(?:\.\d+)?)\s*\)\s*$/);
+    const evalValue = (expression: string, lineNumber: number): ScalarValue | undefined => {
+      try {
+        return evaluateExpression(expression, {
+          resolveIdentifier: (name) => variables.get(name),
+          resolveMember,
+        });
+      } catch (error) {
+        const message = error instanceof ExpressionError ? error.message : String(error);
+        diagnostics.push({ line: lineNumber, message });
+        return undefined;
+      }
+    };
+
+    const evalNumber = (expression: string, lineNumber: number, label: string): number | undefined => {
+      const value = evalValue(expression, lineNumber);
+      if (value === undefined) return undefined;
+      if (typeof value !== 'number' || !Number.isFinite(value)) {
+        diagnostics.push({ line: lineNumber, message: `${label} expects a numeric expression` });
+        return undefined;
+      }
+      return value;
+    };
+
+    // Pass 2: scalar assignments, parameters, views and routes are evaluated in
+    // source order. All module declarations already exist, so references between
+    // modules are still independent from declaration order.
+    for (const { source: line, line: lineNumber } of lines) {
+      const oscillatorDeclaration = parseOscillatorDeclaration(line);
+      if (oscillatorDeclaration) {
+        const definition = oscillators.get(oscillatorDeclaration.name)!;
+        for (const call of oscillatorDeclaration.calls) {
+          const error = applyOscillatorCall(oscillatorDeclaration.name, definition, call, views, (expr) => evalValue(expr, lineNumber));
+          if (error) diagnostics.push({ line: lineNumber, message: error });
+        }
+        continue;
+      }
+      const gainDeclaration = parseGainDeclaration(line);
+      if (gainDeclaration) {
+        const definition = gains.get(gainDeclaration.name)!;
+        for (const call of gainDeclaration.calls) {
+          const error = applyGainCall(gainDeclaration.name, definition, call, views, (expr) => evalValue(expr, lineNumber));
+          if (error) diagnostics.push({ line: lineNumber, message: error });
+        }
+        continue;
+      }
+      const voiceDeclaration = parseVoiceDeclaration(line);
+      if (voiceDeclaration) {
+        const definition = voices.get(voiceDeclaration.name)!;
+        for (const call of voiceDeclaration.calls) {
+          const error = applyVoiceCall(voiceDeclaration.name, definition, call, views, (expr) => evalValue(expr, lineNumber));
+          if (error) diagnostics.push({ line: lineNumber, message: error });
+        }
+        continue;
+      }
+      if (parseClockDeclaration(line)) continue;
+
+      const setterAssignment = line.match(/^([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*)\.(freq|note|level|model|harmo|timbre|morph|bpm)\(\s*(.+)\s*\)$/);
+      if (setterAssignment) {
+        const [, variableName, objectName, parameter, rawValue] = setterAssignment;
+        if (variableName === 'Main' || variableName === 'Clock' || objectExists(variableName, oscillators, gains, voices) || clockSources.has(variableName)) {
+          diagnostics.push({ line: lineNumber, message: `cannot assign scalar value to object or reserved name: ${variableName}` });
+          continue;
+        }
+
+        let assignedValue: ScalarValue | undefined;
+
+        if (objectName === 'Clock' && parameter === 'bpm') {
+          const bpm = evalNumber(rawValue, lineNumber, 'Clock.bpm');
+          if (bpm === undefined) continue;
+          if (bpm < 0 || bpm > 300) {
+            diagnostics.push({ line: lineNumber, message: 'Clock.bpm expects 0..300' });
+            continue;
+          }
+          clockBpm = bpm;
+          assignedValue = bpm;
+          results.push({ message: `Clock ${formatNumber(bpm)} BPM` });
+        } else if (parameter === 'freq') {
+          const oscillator = oscillators.get(objectName);
+          const voice = voices.get(objectName);
+          if (!oscillator && !voice) {
+            diagnostics.push({ line: lineNumber, message: `unknown frequency-capable object: ${objectName}` });
+            continue;
+          }
+          const frequency = evalNumber(rawValue, lineNumber, 'freq');
+          if (frequency === undefined) continue;
+          const error = frequencyError(frequency);
+          if (error) { diagnostics.push({ line: lineNumber, message: error }); continue; }
+          if (oscillator) {
+            oscillator.frequency = frequency;
+            oscillator.parameters.delete('NOTE');
+            oscillator.parameters.set('FREQ', `${formatNumber(frequency)} HZ`);
+          } else if (voice) {
+            voice.frequency = frequency;
+            voice.parameters.set('FREQ', `${formatNumber(frequency)} HZ`);
+          }
+          assignedValue = frequency;
+        } else if (parameter === 'note') {
+          const oscillator = oscillators.get(objectName);
+          if (!oscillator) {
+            diagnostics.push({ line: lineNumber, message: `unknown osc object: ${objectName}` });
+            continue;
+          }
+          const note = evalNumber(rawValue, lineNumber, 'note');
+          if (note === undefined) continue;
+          const error = noteError(note);
+          if (error) { diagnostics.push({ line: lineNumber, message: error }); continue; }
+          oscillator.frequency = midiToFrequency(note);
+          oscillator.parameters.delete('FREQ');
+          oscillator.parameters.set('NOTE', formatNumber(note));
+          assignedValue = note;
+        } else if (parameter === 'level') {
+          const gain = gains.get(objectName);
+          if (!gain) {
+            diagnostics.push({ line: lineNumber, message: `unknown gain object: ${objectName}` });
+            continue;
+          }
+          const level = evalNumber(rawValue, lineNumber, 'level');
+          if (level === undefined) continue;
+          const error = gainLevelError(level);
+          if (error) { diagnostics.push({ line: lineNumber, message: error }); continue; }
+          gain.level = level;
+          gain.parameters.set('LEVEL', `${formatNumber(level)}%`);
+          assignedValue = level;
+        } else if (parameter === 'model') {
+          const voice = voices.get(objectName);
+          if (!voice) {
+            diagnostics.push({ line: lineNumber, message: `unknown Voice object: ${objectName}` });
+            continue;
+          }
+          const modelValue = evalValue(rawValue, lineNumber);
+          if (modelValue === undefined) continue;
+          const model = parseVoiceModelValue(modelValue);
+          if (model === null) {
+            diagnostics.push({ line: lineNumber, message: 'model expects 1..24 or a known model name' });
+            continue;
+          }
+          voice.model = model;
+          voice.parameters.set('MODEL', formatVoiceModel(model));
+          assignedValue = model;
+        } else if (parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph') {
+          const voice = voices.get(objectName);
+          if (!voice) {
+            diagnostics.push({ line: lineNumber, message: `unknown Voice object: ${objectName}` });
+            continue;
+          }
+          const value = evalNumber(rawValue, lineNumber, parameter);
+          if (value === undefined) continue;
+          const error = percentError(value, parameter);
+          if (error) { diagnostics.push({ line: lineNumber, message: error }); continue; }
+          voice[parameter] = value;
+          voice.parameters.set(parameter.toUpperCase(), `${formatNumber(value)}%`);
+          assignedValue = value;
+        } else {
+          diagnostics.push({ line: lineNumber, message: `parameter ${parameter} is not available on ${objectName}` });
+          continue;
+        }
+
+        if (assignedValue !== undefined) {
+          variables.set(variableName, assignedValue);
+          results.push({ message: `${variableName} = ${formatScalar(assignedValue)}` });
+        }
+        continue;
+      }
+
+      const scalarAssignment = line.match(/^([A-Za-z_]\w*)\s*=\s*(.+)$/);
+      if (scalarAssignment) {
+        const [, name, expression] = scalarAssignment;
+        if (name === 'Main' || name === 'Clock' || objectExists(name, oscillators, gains, voices) || clockSources.has(name)) {
+          diagnostics.push({ line: lineNumber, message: `cannot assign scalar value to object or reserved name: ${name}` });
+          continue;
+        }
+        const value = evalValue(expression, lineNumber);
+        if (value !== undefined) {
+          variables.set(name, value);
+          results.push({ message: `${name} = ${formatScalar(value)}` });
+        }
+        continue;
+      }
+
+      let match = line.match(/^Clock\.bpm\(\s*(.+)\s*\)\s*$/);
       if (match) {
-        const bpm = Number(match[1]);
+        const bpm = evalNumber(match[1], lineNumber, 'Clock.bpm');
+        if (bpm === undefined) continue;
         if (!Number.isFinite(bpm) || bpm < 0 || bpm > 300) diagnostics.push({ line: lineNumber, message: 'Clock.bpm expects 0..300' });
         else { clockBpm = bpm; results.push({ message: `Clock ${formatNumber(bpm)} BPM` }); }
         continue;
@@ -219,7 +412,7 @@ export class SonusRuntime {
 
       if (/^Clock(?:\.out)?\.view\(\s*\)\s*$/.test(line)) { views.set('Clock.out', 'trigger'); results.push({ message: 'Clock.out view' }); continue; }
 
-      match = line.match(/^([A-Za-z_]\w*)\.freq\(\s*(-?\d+(?:\.\d+)?)\s*\)\s*$/);
+      match = line.match(/^([A-Za-z_]\w*)\.freq\(\s*(.+)\s*\)\s*$/);
       if (match) {
         const [, name, rawFrequency] = match;
         const oscillator = oscillators.get(name);
@@ -229,7 +422,8 @@ export class SonusRuntime {
           continue;
         }
 
-        const frequency = Number(rawFrequency);
+        const frequency = evalNumber(rawFrequency, lineNumber, 'freq');
+        if (frequency === undefined) continue;
         const error = frequencyError(frequency);
         if (error) {
           diagnostics.push({ line: lineNumber, message: error });
@@ -248,7 +442,7 @@ export class SonusRuntime {
         continue;
       }
 
-      match = line.match(/^([A-Za-z_]\w*)\.note\(\s*(-?\d+(?:\.\d+)?)\s*\)\s*$/);
+      match = line.match(/^([A-Za-z_]\w*)\.note\(\s*(.+)\s*\)\s*$/);
       if (match) {
         const [, name, rawNote] = match;
         const oscillator = oscillators.get(name);
@@ -257,7 +451,8 @@ export class SonusRuntime {
           continue;
         }
 
-        const note = Number(rawNote);
+        const note = evalNumber(rawNote, lineNumber, 'note');
+        if (note === undefined) continue;
         const error = noteError(note);
         if (error) {
           diagnostics.push({ line: lineNumber, message: error });
@@ -271,7 +466,7 @@ export class SonusRuntime {
         continue;
       }
 
-      match = line.match(/^([A-Za-z_]\w*)\.level\(\s*(-?\d+(?:\.\d+)?)\s*\)\s*$/);
+      match = line.match(/^([A-Za-z_]\w*)\.level\(\s*(.+)\s*\)\s*$/);
       if (match) {
         const [, name, rawLevel] = match;
         const gain = gains.get(name);
@@ -280,7 +475,8 @@ export class SonusRuntime {
           continue;
         }
 
-        const level = Number(rawLevel);
+        const level = evalNumber(rawLevel, lineNumber, 'level');
+        if (level === undefined) continue;
         const error = gainLevelError(level);
         if (error) {
           diagnostics.push({ line: lineNumber, message: error });
@@ -301,7 +497,9 @@ export class SonusRuntime {
           diagnostics.push({ line: lineNumber, message: `unknown Voice object: ${name}` });
           continue;
         }
-        const model = parseVoiceModel(rawModel);
+        const modelValue = evalValue(rawModel, lineNumber);
+        if (modelValue === undefined) continue;
+        const model = parseVoiceModelValue(modelValue);
         if (model === null) {
           diagnostics.push({ line: lineNumber, message: 'model expects 1..24 or a known model name' });
           continue;
@@ -312,7 +510,7 @@ export class SonusRuntime {
         continue;
       }
 
-      match = line.match(/^([A-Za-z_]\w*)\.(harmo|timbre|morph)\(\s*(-?\d+(?:\.\d+)?)\s*\)\s*$/);
+      match = line.match(/^([A-Za-z_]\w*)\.(harmo|timbre|morph)\(\s*(.+)\s*\)\s*$/);
       if (match) {
         const [, name, parameter, rawValue] = match;
         const voice = voices.get(name);
@@ -320,7 +518,8 @@ export class SonusRuntime {
           diagnostics.push({ line: lineNumber, message: `unknown Voice object: ${name}` });
           continue;
         }
-        const value = Number(rawValue);
+        const value = evalNumber(rawValue, lineNumber, parameter);
+        if (value === undefined) continue;
         const error = percentError(value, parameter);
         if (error) {
           diagnostics.push({ line: lineNumber, message: error });
@@ -386,19 +585,21 @@ export class SonusRuntime {
       match = line.match(/^([A-Za-z_]\w*)(?:\.out)?\.view\(\s*\)\s*$/);
       if (match) {
         const name = match[1];
-        if (!objectExists(name, oscillators, gains, voices)) {
-          diagnostics.push({ line: lineNumber, message: `unknown object: ${name}` });
-          continue;
+        if (objectExists(name, oscillators, gains, voices)) {
+          views.set(`${name}.out`, 'signal');
+          results.push({ message: `${name}.out view` });
+        } else {
+          // A bare name.view() can observe a scalar variable. Resolve it after
+          // the complete source has been evaluated so the view can appear
+          // before or after the variable assignment in the document.
+          variableViewRequests.push({ name, line: lineNumber });
         }
-
-        views.set(`${name}.out`, 'signal');
-        results.push({ message: `${name}.out view` });
         continue;
       }
 
-      match = line.match(/^([A-Za-z_]\w*)\.(out|aux)(?:\(\s*(-?\d+(?:\.\d+)?)\s*\))?\s*->\s*([A-Za-z_]\w*)\.(in|trig)\s*$/);
-      if (match) {
-        const [, sourceName, sourcePort, rawAmount, targetName, targetPort] = match;
+      const parsedRoute = parseRouteLine(line);
+      if (parsedRoute) {
+        const { sourceName, sourcePort, amountExpression, targetName, targetPort } = parsedRoute;
         if (sourceName !== 'Clock' && !clockSources.has(sourceName) && !objectExists(sourceName, oscillators, gains, voices)) {
           diagnostics.push({ line: lineNumber, message: `unknown source object: ${sourceName}` });
           continue;
@@ -414,7 +615,8 @@ export class SonusRuntime {
           continue;
         }
 
-        const amount = rawAmount === undefined ? 100 : Number(rawAmount);
+        const amount = amountExpression === null ? 100 : evalNumber(amountExpression, lineNumber, 'route amount');
+        if (amount === undefined) continue;
         const error = routeAmountError(amount);
         if (error) {
           diagnostics.push({ line: lineNumber, message: error });
@@ -430,6 +632,20 @@ export class SonusRuntime {
       }
 
       diagnostics.push({ line: lineNumber, message: `cannot evaluate: ${line}` });
+    }
+
+    const variableViews: VariableViewState[] = [];
+    const seenVariableViews = new Set<string>();
+    for (const request of variableViewRequests) {
+      const value = variables.get(request.name);
+      if (value === undefined) {
+        diagnostics.push({ line: request.line, message: `unknown object or variable: ${request.name}` });
+        continue;
+      }
+      if (seenVariableViews.has(request.name)) continue;
+      seenVariableViews.add(request.name);
+      variableViews.push({ name: request.name, value: formatScalar(value) });
+      results.push({ message: `${request.name} view` });
     }
 
     if (diagnostics.length > 0) throw new SonusEvaluationError(diagnostics);
@@ -560,6 +776,7 @@ export class SonusRuntime {
     };
 
     this.parameterViews = [...parameterViews.values()];
+    this.variableViews = variableViews;
     this.audio.applyProgram(program);
     return results.length > 0 ? results : [{ message: 'ok' }];
   }
@@ -575,6 +792,73 @@ interface ObjectDeclaration {
   calls: ChainedCall[];
 }
 
+
+function parseStatements(source: string): Array<{ source: string; line: number }> {
+  const statements: Array<{ source: string; line: number }> = [];
+  let buffer = '';
+  let startLine = 1;
+  let quote: '"' | "'" | null = null;
+  let escaped = false;
+  let inComment = false;
+  let physicalLine = 1;
+
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i];
+    const next = source[i + 1];
+
+    if (inComment) {
+      if (char === '\n') {
+        inComment = false;
+        if (buffer.length > 0 && !buffer.endsWith(' ')) buffer += ' ';
+        physicalLine += 1;
+      }
+      continue;
+    }
+
+    if (quote) {
+      buffer += char;
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === quote) quote = null;
+      if (char === '\n') physicalLine += 1;
+      continue;
+    }
+
+    if ((char === '"' || char === "'")) {
+      quote = char;
+      buffer += char;
+      continue;
+    }
+
+    if (char === '/' && next === '/') {
+      inComment = true;
+      i += 1;
+      continue;
+    }
+
+    if (char === ';') {
+      const statement = buffer.trim();
+      if (statement.length > 0) statements.push({ source: statement, line: startLine });
+      buffer = '';
+      startLine = physicalLine;
+      continue;
+    }
+
+    if (char === '\n') {
+      if (buffer.trim().length === 0) startLine = physicalLine + 1;
+      else if (!buffer.endsWith(' ')) buffer += ' ';
+      physicalLine += 1;
+      continue;
+    }
+
+    if (buffer.length === 0 && !/\s/.test(char)) startLine = physicalLine;
+    buffer += char;
+  }
+
+  // An unterminated tail is deliberately ignored: while live-coding it is an
+  // incomplete statement, not a syntax error. The last valid program remains active.
+  return statements;
+}
 
 function parseClockDeclaration(line: string): (ObjectDeclaration & { rate: number; label: string }) | null {
   const match = line.match(/^([A-Za-z_]\w*)\s*=\s*Clock\.rate\(\s*["']([^"']+)["']\s*\)(.*)$/);
@@ -614,22 +898,79 @@ function parseVoiceDeclaration(line: string): ObjectDeclaration | null {
 function parseDeclaration(line: string, constructorName: string): ObjectDeclaration | null {
   const match = line.match(new RegExp(`^([A-Za-z_]\\w*)\\s*=\\s*${constructorName}\\(\\s*\\)(.*)$`));
   if (!match) return null;
+  const calls = parseChainedCalls(match[2].trim());
+  return calls === null ? null : { name: match[1], calls };
+}
 
-  const name = match[1];
-  const tail = match[2].trim();
-  if (!tail) return { name, calls: [] };
-
+function parseChainedCalls(tail: string): ChainedCall[] | null {
+  if (!tail) return [];
   const calls: ChainedCall[] = [];
-  let consumed = '';
-  const callPattern = /\.([A-Za-z_]\w*)\(\s*([^()]*)\s*\)/g;
-  let callMatch: RegExpExecArray | null;
-  while ((callMatch = callPattern.exec(tail)) !== null) {
-    if (callMatch.index !== consumed.length) return null;
-    consumed += callMatch[0];
-    calls.push({ name: callMatch[1], argument: callMatch[2].trim() });
+  let index = 0;
+  while (index < tail.length) {
+    if (tail[index] !== '.') return null;
+    index += 1;
+    const nameStart = index;
+    if (!/[A-Za-z_]/.test(tail[index] ?? '')) return null;
+    index += 1;
+    while (/[A-Za-z0-9_]/.test(tail[index] ?? '')) index += 1;
+    const name = tail.slice(nameStart, index);
+    while (/\s/.test(tail[index] ?? '')) index += 1;
+    if (tail[index] !== '(') return null;
+    const argumentStart = ++index;
+    let depth = 1;
+    let quote: string | null = null;
+    while (index < tail.length && depth > 0) {
+      const char = tail[index];
+      if (quote !== null) {
+        if (char === '\\') index += 2;
+        else if (char === quote) { quote = null; index += 1; }
+        else index += 1;
+        continue;
+      }
+      if (char === '"' || char === "'") { quote = char; index += 1; continue; }
+      if (char === '(') depth += 1;
+      else if (char === ')') depth -= 1;
+      index += 1;
+    }
+    if (depth !== 0) return null;
+    const argument = tail.slice(argumentStart, index - 1).trim();
+    calls.push({ name, argument });
+    while (/\s/.test(tail[index] ?? '')) index += 1;
   }
+  return calls;
+}
 
-  return consumed === tail ? { name, calls } : null;
+interface ParsedRoute {
+  sourceName: string;
+  sourcePort: 'out' | 'aux';
+  amountExpression: string | null;
+  targetName: string;
+  targetPort: 'in' | 'trig';
+}
+
+function parseRouteLine(line: string): ParsedRoute | null {
+  const arrow = line.indexOf('->');
+  if (arrow < 0 || line.indexOf('->', arrow + 2) >= 0) return null;
+  const left = line.slice(0, arrow).trim();
+  const right = line.slice(arrow + 2).trim();
+  const target = right.match(/^([A-Za-z_]\w*)\.(in|trig)$/);
+  if (!target) return null;
+  const source = left.match(/^([A-Za-z_]\w*)\.(out|aux)(.*)$/);
+  if (!source) return null;
+  const suffix = source[3].trim();
+  let amountExpression: string | null = null;
+  if (suffix) {
+    if (!suffix.startsWith('(') || !suffix.endsWith(')')) return null;
+    amountExpression = suffix.slice(1, -1).trim();
+    if (!amountExpression) return null;
+  }
+  return {
+    sourceName: source[1],
+    sourcePort: source[2] as 'out' | 'aux',
+    amountExpression,
+    targetName: target[1],
+    targetPort: target[2] as 'in' | 'trig',
+  };
 }
 
 function reservedOrDuplicate(
@@ -665,26 +1006,29 @@ function applyOscillatorCall(
   oscillator: OscillatorDefinition,
   call: ChainedCall,
   views: Map<string, ViewKind>,
+  evaluate: (expression: string) => ScalarValue | undefined,
 ): string | null {
   switch (call.name) {
     case 'freq': {
-      const frequency = parseSingleNumber(call.argument);
-      if (frequency === null) return 'freq expects one numeric value';
-      const error = frequencyError(frequency);
+      const value = evaluate(call.argument);
+      if (value === undefined) return null;
+      if (typeof value !== 'number') return 'freq expects one numeric expression';
+      const error = frequencyError(value);
       if (error) return error;
-      oscillator.frequency = frequency;
+      oscillator.frequency = value;
       oscillator.parameters.delete('NOTE');
-      oscillator.parameters.set('FREQ', `${formatNumber(frequency)} HZ`);
+      oscillator.parameters.set('FREQ', `${formatNumber(value)} HZ`);
       return null;
     }
     case 'note': {
-      const note = parseSingleNumber(call.argument);
-      if (note === null) return 'note expects one numeric value';
-      const error = noteError(note);
+      const value = evaluate(call.argument);
+      if (value === undefined) return null;
+      if (typeof value !== 'number') return 'note expects one numeric expression';
+      const error = noteError(value);
       if (error) return error;
-      oscillator.frequency = midiToFrequency(note);
+      oscillator.frequency = midiToFrequency(value);
       oscillator.parameters.delete('FREQ');
-      oscillator.parameters.set('NOTE', formatNumber(note));
+      oscillator.parameters.set('NOTE', formatNumber(value));
       return null;
     }
     case 'view':
@@ -701,15 +1045,17 @@ function applyGainCall(
   gain: GainDefinition,
   call: ChainedCall,
   views: Map<string, ViewKind>,
+  evaluate: (expression: string) => ScalarValue | undefined,
 ): string | null {
   switch (call.name) {
     case 'level': {
-      const level = parseSingleNumber(call.argument);
-      if (level === null) return 'level expects one numeric value';
-      const error = gainLevelError(level);
+      const value = evaluate(call.argument);
+      if (value === undefined) return null;
+      if (typeof value !== 'number') return 'level expects one numeric expression';
+      const error = gainLevelError(value);
       if (error) return error;
-      gain.level = level;
-      gain.parameters.set('LEVEL', `${formatNumber(level)}%`);
+      gain.level = value;
+      gain.parameters.set('LEVEL', `${formatNumber(value)}%`);
       return null;
     }
     case 'view':
@@ -732,29 +1078,34 @@ function applyVoiceCall(
   voice: VoiceDefinition,
   call: ChainedCall,
   views: Map<string, ViewKind>,
+  evaluate: (expression: string) => ScalarValue | undefined,
 ): string | null {
   switch (call.name) {
     case 'model': {
-      const model = parseVoiceModel(call.argument);
+      const value = evaluate(call.argument);
+      if (value === undefined) return null;
+      const model = parseVoiceModelValue(value);
       if (model === null) return 'model expects 1..24 or a known model name';
       voice.model = model;
       voice.parameters.set('MODEL', formatVoiceModel(model));
       return null;
     }
     case 'freq': {
-      const frequency = parseSingleNumber(call.argument);
-      if (frequency === null) return 'freq expects one numeric value';
-      const error = frequencyError(frequency);
+      const value = evaluate(call.argument);
+      if (value === undefined) return null;
+      if (typeof value !== 'number') return 'freq expects one numeric expression';
+      const error = frequencyError(value);
       if (error) return error;
-      voice.frequency = frequency;
-      voice.parameters.set('FREQ', `${formatNumber(frequency)} HZ`);
+      voice.frequency = value;
+      voice.parameters.set('FREQ', `${formatNumber(value)} HZ`);
       return null;
     }
     case 'harmo':
     case 'timbre':
     case 'morph': {
-      const value = parseSingleNumber(call.argument);
-      if (value === null) return `${call.name} expects one numeric value`;
+      const value = evaluate(call.argument);
+      if (value === undefined) return null;
+      if (typeof value !== 'number') return `${call.name} expects one numeric expression`;
       const error = percentError(value, call.name);
       if (error) return error;
       voice[call.name] = value;
@@ -770,12 +1121,10 @@ function applyVoiceCall(
   }
 }
 
-function parseVoiceModel(value: string): number | null {
-  const numeric = parseSingleNumber(value);
-  if (numeric !== null && Number.isInteger(numeric) && numeric >= 1 && numeric <= 24) return numeric;
-  const stringMatch = value.match(/^['\"]([^'\"]+)['\"]$/);
-  if (!stringMatch) return null;
-  const normalized = stringMatch[1].trim().toLowerCase();
+function parseVoiceModelValue(value: ScalarValue): number | null {
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 24) return value;
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().toLowerCase();
   const index = VOICE_MODEL_NAMES.indexOf(normalized as typeof VOICE_MODEL_NAMES[number]);
   return index >= 0 ? index + 1 : null;
 }
@@ -785,7 +1134,7 @@ function formatVoiceModel(model: number): string {
 }
 
 function percentError(value: number, name: string): string | null {
-  return !Number.isFinite(value) || value < -100 || value > 100
+  return !Number.isFinite(value) || value < 0 || value > 100
     ? `${name} must be between 0 and 100`
     : null;
 }
@@ -822,6 +1171,12 @@ function routeAmountError(value: number): string | null {
   return !Number.isFinite(value) || value < -100 || value > 100
     ? 'route amount must be between -100 and 100'
     : null;
+}
+
+function formatScalar(value: ScalarValue): string {
+  if (typeof value === 'number') return formatNumber(value);
+  if (typeof value === 'string') return `\"${value}\"`;
+  return value ? 'true' : 'false';
 }
 
 function formatNumber(value: number): string {
