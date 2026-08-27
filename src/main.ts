@@ -42,6 +42,7 @@ app.innerHTML = `
           <span>:CONFIG</span><span>OPEN CONFIGURATION</span>
           <span>:HELP</span><span>SHOW THIS SCREEN</span>
           <span>:SCHEME</span><span>SHOW READ-ONLY SIGNAL SCHEME</span>
+          <span>TAB</span><span>TOGGLE LIVE / SCHEME</span>
           <span>:SAVE</span><span>SAVE SOURCE FILE</span>
           <span>:LOAD</span><span>LOAD SOURCE FILE</span>
           <span>:NEW</span><span>CLEAR SOURCE</span>
@@ -66,7 +67,7 @@ app.innerHTML = `
             <div id="scheme-nodes" class="scheme-nodes"></div>
           </div>
         </div>
-        <div class="scheme-hints">ESC&nbsp;&nbsp;LIVE</div>
+        <div class="scheme-hints">ESC / TAB&nbsp;&nbsp;LIVE</div>
       </div>
 
       <div id="phosphor-layer" class="phosphor-layer" aria-hidden="true">
@@ -113,6 +114,23 @@ let commandMode = false;
 let messageTimer = 0;
 let scopeFrame = 0;
 let savedEditorSelection: { start: number; end: number; direction: 'forward' | 'backward' | 'none' } | null = null;
+let audioAutoStartPending = true;
+
+async function tryAutoStartAudio(): Promise<void> {
+  if (!audioAutoStartPending) return;
+  try {
+    await audioEngine.start();
+    if (audioEngine.snapshot().state !== 'running') throw new Error('audio start blocked');
+    audioAutoStartPending = false;
+  } catch {
+    notify('audio waiting for browser permission');
+  }
+}
+
+function retryAutoStartFromGesture(): void {
+  if (!audioAutoStartPending) return;
+  void tryAutoStartAudio();
+}
 
 audioEngine.subscribe((snapshot) => {
   const isRunning = snapshot.state === 'running';
@@ -126,6 +144,7 @@ audioEngine.subscribe((snapshot) => {
 
 editor.value = '';
 editor.focus();
+void tryAutoStartAudio();
 
 function must<T extends Element>(id: string): T {
   const el = document.getElementById(id);
@@ -446,6 +465,14 @@ function drawSchemeConnections(connections: SchemeConnection[], elements: Map<st
   defs.append(marker);
   schemeEdges.append(defs);
 
+  const parallelGroups = new Map<string, SchemeConnection[]>();
+  for (const connection of connections) {
+    const key = `${connection.source}->${connection.target}:${connection.type}`;
+    const group = parallelGroups.get(key) ?? [];
+    group.push(connection);
+    parallelGroups.set(key, group);
+  }
+
   const worldRect = schemeWorld.getBoundingClientRect();
   for (const connection of connections) {
     const source = elements.get(connection.source);
@@ -454,10 +481,15 @@ function drawSchemeConnections(connections: SchemeConnection[], elements: Map<st
 
     const a = source.getBoundingClientRect();
     const b = target.getBoundingClientRect();
+    const groupKey = `${connection.source}->${connection.target}:${connection.type}`;
+    const group = parallelGroups.get(groupKey) ?? [connection];
+    const edgeIndex = Math.max(0, group.indexOf(connection));
+    const edgeOffset = (edgeIndex - (group.length - 1) / 2) * 16;
+
     const x1 = a.right - worldRect.left;
-    const y1 = a.top - worldRect.top + a.height / 2;
+    const y1 = a.top - worldRect.top + a.height / 2 + edgeOffset;
     const x2 = b.left - worldRect.left;
-    const y2 = b.top - worldRect.top + b.height / 2;
+    const y2 = b.top - worldRect.top + b.height / 2 + edgeOffset;
     const bend = Math.max(36, (x2 - x1) * 0.5);
 
     const path = document.createElementNS(ns, 'path');
@@ -718,6 +750,7 @@ async function runCommand(raw: string): Promise<void> {
       leaveCommandMode();
       try {
         await audioEngine.start();
+        audioAutoStartPending = false;
         notify('audio engine running');
       } catch (error) {
         notify(error instanceof Error ? error.message : 'audio start failed');
@@ -822,6 +855,7 @@ editor.addEventListener('scroll', () => {
 window.addEventListener('resize', () => {
   requestAnimationFrame(positionBlockCaret);
 });
+window.addEventListener('keydown', retryAutoStartFromGesture, { capture: true });
 
 editor.addEventListener('beforeinput', (event) => {
   const input = event as InputEvent;
@@ -855,7 +889,7 @@ editor.addEventListener('keydown', (event) => {
     return;
   }
 
-  if (event.key === 'Tab') {
+  if (event.key === 'Tab' && event.shiftKey) {
     event.preventDefault();
     const start = editor.selectionStart;
     const end = editor.selectionEnd;
@@ -878,14 +912,25 @@ command.addEventListener('keydown', (event) => {
 });
 
 document.addEventListener('keydown', (event) => {
-  if (event.key !== 'Escape' || commandMode) return;
-  if (screen === 'config' || screen === 'help' || screen === 'scheme') {
+  if (commandMode) return;
+
+  if (event.key === 'Tab' && !event.shiftKey) {
+    if (screen === 'live' || screen === 'scheme') {
+      event.preventDefault();
+      event.stopPropagation();
+      showScreen(screen === 'live' ? 'scheme' : 'live');
+      return;
+    }
+  }
+
+  if (event.key === 'Escape' && (screen === 'config' || screen === 'help' || screen === 'scheme')) {
     event.preventDefault();
     showScreen('live');
   }
-});
+}, { capture: true });
 
 window.addEventListener('pointerdown', (event) => {
+  retryAutoStartFromGesture();
   if (screen !== 'live' || commandMode) return;
   if (event.target === editor || editor.contains(event.target as Node)) return;
   editor.focus();
