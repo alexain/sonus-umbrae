@@ -1,8 +1,9 @@
 import './style.css';
+import { AudioEngine } from './audio/engine';
 
 type Screen = 'live' | 'config' | 'help';
 
-const VERSION = '0.0.1';
+const VERSION = '0.0.2';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Missing #app');
@@ -38,8 +39,11 @@ app.innerHTML = `
           <span>:LOAD</span><span>LOAD SOURCE FILE</span>
           <span>:NEW</span><span>CLEAR SOURCE</span>
           <span>:CLEAR</span><span>CLEAR SOURCE</span>
-          <span>:START</span><span>AUDIO NOT IMPLEMENTED</span>
-          <span>:STOP</span><span>AUDIO NOT IMPLEMENTED</span>
+          <span>:START</span><span>START / RESUME AUDIO ENGINE</span>
+          <span>:STOP</span><span>SUSPEND AUDIO ENGINE</span>
+          <span>:TEST 440</span><span>PLAY DIAGNOSTIC SINE TONE</span>
+          <span>:TEST STOP</span><span>STOP DIAGNOSTIC TONE</span>
+          <span>:PANIC</span><span>STOP CURRENT AUDIO IMMEDIATELY</span>
         </div>
         <div class="system-copy muted">ESC  RETURN TO LIVE</div>
       </div>
@@ -66,10 +70,24 @@ const helpScreen = must<HTMLElement>('help-screen');
 const phosphorLayer = must<HTMLElement>('phosphor-layer');
 const message = must<HTMLElement>('message');
 const blockCaret = must<HTMLElement>('block-caret');
+const liveDot = must<HTMLElement>('live-dot');
+const dspStatus = must<HTMLElement>('dsp-status');
+
+const audioEngine = new AudioEngine();
 
 let screen: Screen = 'live';
 let commandMode = false;
 let messageTimer = 0;
+let savedEditorRange: Range | null = null;
+
+audioEngine.subscribe((snapshot) => {
+  const isRunning = snapshot.state === 'running';
+  liveDot.classList.toggle('on', isRunning);
+  liveDot.classList.toggle('off', !isRunning);
+  liveDot.setAttribute('aria-label', isRunning ? 'engine running' : 'engine stopped');
+  dspStatus.textContent = snapshot.sampleRate ? `${Math.round(snapshot.sampleRate / 1000)}K` : '--';
+  dspStatus.classList.toggle('disabled', snapshot.sampleRate === null);
+});
 
 editor.textContent = '';
 editor.focus();
@@ -94,6 +112,7 @@ function showScreen(next: Screen): void {
 
 function enterCommandMode(): void {
   if (screen !== 'live') return;
+  saveEditorSelection();
   commandMode = true;
   commandbar.classList.remove('hidden');
   command.value = '';
@@ -105,8 +124,33 @@ function leaveCommandMode(): void {
   commandMode = false;
   commandbar.classList.add('hidden');
   command.value = '';
-  editor.focus();
+  restoreEditorSelection();
   requestAnimationFrame(positionBlockCaret);
+}
+
+function saveEditorSelection(): void {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) return;
+
+  const range = selection.getRangeAt(0);
+  if (!editor.contains(range.startContainer) || !editor.contains(range.endContainer)) return;
+  savedEditorRange = range.cloneRange();
+}
+
+function restoreEditorSelection(): void {
+  editor.focus();
+
+  const selection = window.getSelection();
+  if (!selection) return;
+
+  if (savedEditorRange && editor.contains(savedEditorRange.startContainer) && editor.contains(savedEditorRange.endContainer)) {
+    selection.removeAllRanges();
+    selection.addRange(savedEditorRange);
+  } else {
+    placeCaretAtEnd(editor);
+  }
+
+  savedEditorRange = null;
 }
 
 function notify(text: string): void {
@@ -121,6 +165,7 @@ function sourceText(): string {
 }
 
 function setSourceText(text: string): void {
+  savedEditorRange = null;
   editor.textContent = text.replace(/\r\n/g, '\n');
   placeCaretAtEnd(editor);
 }
@@ -251,9 +296,44 @@ async function runCommand(raw: string): Promise<void> {
       await loadSource();
       return;
     case 'start':
+      leaveCommandMode();
+      try {
+        await audioEngine.start();
+        notify('audio engine running');
+      } catch {
+        notify('audio start failed');
+      }
+      return;
     case 'stop':
       leaveCommandMode();
-      notify('audio engine not implemented');
+      try {
+        await audioEngine.stop();
+        notify('audio engine stopped');
+      } catch {
+        notify('audio stop failed');
+      }
+      return;
+    case 'test': {
+      leaveCommandMode();
+      if (args[0] === 'stop') {
+        audioEngine.stopTestTone();
+        notify('test tone stopped');
+        return;
+      }
+
+      const frequency = args[0] === undefined ? 440 : Number(args[0]);
+      try {
+        await audioEngine.testTone(frequency);
+        notify(`test tone ${Math.round(frequency)} hz`);
+      } catch (error) {
+        notify(error instanceof RangeError ? error.message : 'test tone failed');
+      }
+      return;
+    }
+    case 'panic':
+      leaveCommandMode();
+      audioEngine.panic();
+      notify('panic');
       return;
     default:
       leaveCommandMode();
