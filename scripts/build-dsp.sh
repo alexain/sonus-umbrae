@@ -36,7 +36,7 @@ em++ \
   -s ALLOW_MEMORY_GROWTH=0 \
   -s INITIAL_MEMORY=33554432 \
   -s FILESYSTEM=0 \
-  -s EXPORTED_FUNCTIONS='["_su_voice_create","_su_voice_destroy","_su_voice_set_model","_su_voice_set_frequency","_su_voice_set_harmo","_su_voice_set_timbre","_su_voice_set_morph","_su_voice_set_trigger","_su_voice_process","_su_voice_out","_su_voice_aux"]' \
+  -s EXPORTED_FUNCTIONS='["_su_voice_create","_su_voice_destroy","_su_voice_set_model","_su_voice_set_frequency","_su_voice_set_harmo","_su_voice_set_timbre","_su_voice_set_morph","_su_voice_set_v_oct","_su_voice_set_trigger","_su_voice_process","_su_voice_out","_su_voice_aux"]' \
   -Wl,--no-entry \
   -o "$OUTPUT"
 

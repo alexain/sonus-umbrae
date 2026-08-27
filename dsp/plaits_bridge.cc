@@ -85,6 +85,15 @@ void su_voice_set_morph(VoiceState* state, float value) {
   if (state) state->patch.morph = Clamp01(value);
 }
 
+
+void su_voice_set_v_oct(VoiceState* state, float value) {
+  if (!state || !std::isfinite(value)) return;
+  // Sonus Umbrae represents V/OCT as logical volts: +1.0 raises the pitch by
+  // one octave, -1.0 lowers it by one octave. Plaits expects note modulation
+  // in semitones.
+  state->modulations.note = value * 12.0f;
+}
+
 void su_voice_set_trigger(VoiceState* state, float value, int patched) {
   if (!state) return;
   state->trigger = value;

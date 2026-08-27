@@ -102,6 +102,36 @@ A possible initial layout is a fixed bank of scripts (for example `00` through `
 
 Multi-script support becomes particularly useful on constrained or dedicated devices where several prepared programs can remain resident and be switched or combined during performance.
 
+## MIDI integration
+
+MIDI should be able to operate both as a direct control-mapping layer and as a modular signal/event source.
+
+Planned parameter mapping syntax includes descriptors such as:
+
+- `a.timbre(20).midi("#20");` for MIDI CC 20.
+- `a.timbre(20).midi("#20@2");` for MIDI CC 20 on channel 2.
+- Note/event descriptors such as `"!C2"` or `"!C2@3"` where appropriate.
+- MIDI learn for assigning hardware controls without manually entering controller numbers.
+
+A future built-in `Midi` source should convert incoming MIDI into ordinary Sonus Umbrae ports so it can participate in the same routing graph as software and Eurorack signals. Candidate ports include:
+
+- `Midi.note` as a SIGNAL carrying pitch in the logical V/OCT domain.
+- `Midi.gate` as a GATE held high from Note On until Note Off.
+- `Midi.trig` as a TRIGGER emitted on Note On.
+- `Midi.velocity` as a SIGNAL.
+- Future pitch bend, pressure, modulation, and MIDI clock sources.
+- `Midi.ch(n)` as an optional channel filter, with channel 1 as the default when omitted.
+
+A typical future patch could therefore use:
+
+`Midi.note -> a.v_oct;`
+
+`Midi.gate -> a.trig;`
+
+MIDI must not become a separate special-purpose signal system. Once converted to Sonus Umbrae ports, MIDI-derived SIGNAL, GATE, and TRIGGER data should follow the same routing, attenuation, visualization, and Scheme rules as every other source.
+
+`Voice.v_oct` is the first pitch-CV input intended for this model. Internally it remains a continuous SIGNAL; user-facing displays should prefer musical note names (for example `C2`, `F#3`, or `A4 +12c`) rather than raw voltage values.
+
 ## Beyond the browser
 
 The web version is currently the reference implementation, not necessarily the final platform.

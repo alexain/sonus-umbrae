@@ -13,6 +13,7 @@ export interface SonusDiagnostic {
 export interface SchemeParameter {
   name: string;
   value: string;
+  liveSignal?: string;
 }
 
 export type ViewKind = SignalKind | 'parameter';
@@ -610,6 +611,8 @@ export class SonusRuntime {
         }
         if (targetPort === 'trig') {
           if (!voices.has(targetName)) { diagnostics.push({ line: lineNumber, message: `trigger input is only available on Voice objects: ${targetName}` }); continue; }
+        } else if (targetPort === 'v_oct') {
+          if (!voices.has(targetName)) { diagnostics.push({ line: lineNumber, message: `v_oct input is only available on Voice objects: ${targetName}` }); continue; }
         } else if (targetName !== 'Main' && !gains.has(targetName)) {
           diagnostics.push({ line: lineNumber, message: `unknown or non-input object: ${targetName}` });
           continue;
@@ -714,10 +717,15 @@ export class SonusRuntime {
         id: name,
         label: `${name.toUpperCase()} : VOICE`,
         kind: 'module' as const,
-        parameters: [...definition.parameters.entries()].map(([parameterName, value]) => ({
-          name: parameterName,
-          value,
-        })),
+        parameters: [
+          ...[...definition.parameters.entries()].map(([parameterName, value]) => ({
+            name: parameterName,
+            value,
+          })),
+          ...([...routes.values()].some((route) => route.target === `${name}.v_oct`)
+            ? [{ name: 'V_OCT', value: '--', liveSignal: `${name}.v_oct` }]
+            : []),
+        ],
         views: embeddedViews.get(name),
       })),
       ...[...gains.entries()].map(([name, definition]) => ({
@@ -736,9 +744,9 @@ export class SonusRuntime {
     const schemeConnections: SchemeConnection[] = [
       ...[...routes.values()].map((route) => ({
         source: route.source.replace(/\.(out|aux)$/, ''),
-        target: route.target.startsWith('Main.') ? 'Main' : route.target.replace(/\.(in|trig)$/, ''),
+        target: route.target.startsWith('Main.') ? 'Main' : route.target.replace(/\.(in|trig|v_oct)$/, ''),
         sourcePort: route.source.endsWith('.aux') ? 'AUX' : 'OUT',
-        targetPort: route.target.endsWith('.trig') ? 'TRIG' : 'IN',
+        targetPort: route.target.endsWith('.trig') ? 'TRIG' : route.target.endsWith('.v_oct') ? 'V/OCT' : 'IN',
         type: route.kind,
         amount: route.amount,
       })),
@@ -945,7 +953,7 @@ interface ParsedRoute {
   sourcePort: 'out' | 'aux';
   amountExpression: string | null;
   targetName: string;
-  targetPort: 'in' | 'trig';
+  targetPort: 'in' | 'trig' | 'v_oct';
 }
 
 function parseRouteLine(line: string): ParsedRoute | null {
@@ -953,7 +961,7 @@ function parseRouteLine(line: string): ParsedRoute | null {
   if (arrow < 0 || line.indexOf('->', arrow + 2) >= 0) return null;
   const left = line.slice(0, arrow).trim();
   const right = line.slice(arrow + 2).trim();
-  const target = right.match(/^([A-Za-z_]\w*)\.(in|trig)$/);
+  const target = right.match(/^([A-Za-z_]\w*)\.(in|trig|v_oct)$/);
   if (!target) return null;
   const source = left.match(/^([A-Za-z_]\w*)\.(out|aux)(.*)$/);
   if (!source) return null;
@@ -969,7 +977,7 @@ function parseRouteLine(line: string): ParsedRoute | null {
     sourcePort: source[2] as 'out' | 'aux',
     amountExpression,
     targetName: target[1],
-    targetPort: target[2] as 'in' | 'trig',
+    targetPort: target[2] as 'in' | 'trig' | 'v_oct',
   };
 }
 

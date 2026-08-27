@@ -379,8 +379,10 @@ function syncViews(): void {
 
 function drawScopes(): void {
   scopeFrame = 0;
+  updateSchemeLiveValues();
   const canvases = [...document.querySelectorAll<HTMLCanvasElement>('canvas.scope-canvas')];
-  if (canvases.length === 0) return;
+  const liveValues = document.querySelectorAll<HTMLElement>('.scheme-live-value');
+  if (canvases.length === 0 && liveValues.length === 0) return;
 
   const phosphor = getComputedStyle(document.documentElement).getPropertyValue('--phosphor-hot').trim() || '#ffe783';
   for (const canvas of canvases) {
@@ -486,6 +488,27 @@ function drawTriggerPhase(
   ctx.restore();
 }
 
+
+function updateSchemeLiveValues(): void {
+  for (const element of document.querySelectorAll<HTMLElement>('.scheme-live-value')) {
+    const signal = element.dataset.liveSignal;
+    const match = signal?.match(/^([A-Za-z_]\w*)\.v_oct$/);
+    if (!match) continue;
+    const midi = audioEngine.readVoicePitchMidi(match[1]);
+    element.textContent = midi === null ? '--' : formatMidiNote(midi);
+  }
+}
+
+function formatMidiNote(midi: number): string {
+  if (!Number.isFinite(midi)) return '--';
+  const nearest = Math.round(midi);
+  const names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+  const name = names[((nearest % 12) + 12) % 12];
+  const octave = Math.floor(nearest / 12) - 1;
+  const cents = Math.round((midi - nearest) * 100);
+  return cents === 0 ? `${name}${octave}` : `${name}${octave} ${cents > 0 ? '+' : ''}${cents}c`;
+}
+
 function renderScheme(): void {
   const model = runtime.getSchemeModel();
   schemeNodes.replaceChildren();
@@ -501,7 +524,7 @@ function renderScheme(): void {
   requestAnimationFrame(() => {
     layoutScheme(model, nodeElements);
     drawSchemeConnections(model.connections, nodeElements);
-    if (model.nodes.some((node) => (node.views?.length ?? 0) > 0) && scopeFrame === 0) {
+    if ((model.nodes.some((node) => (node.views?.length ?? 0) > 0) || document.querySelector('.scheme-live-value')) && scopeFrame === 0) {
       scopeFrame = requestAnimationFrame(drawScopes);
     }
   });
@@ -524,6 +547,10 @@ function buildSchemeNode(node: SchemeNode): HTMLElement {
     name.textContent = parameter.name;
     const value = document.createElement('span');
     value.textContent = parameter.value;
+    if (parameter.liveSignal) {
+      value.classList.add('scheme-live-value');
+      value.dataset.liveSignal = parameter.liveSignal;
+    }
     row.append(name, value);
     element.append(row);
   }

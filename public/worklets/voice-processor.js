@@ -45,6 +45,10 @@ class SonusVoiceProcessor extends AudioWorkletProcessor {
     }
     this.call('su_voice_set_trigger', this.handle, trigger, triggerInput ? 1 : 0);
 
+    const vOctInput = inputs[1]?.[0];
+    const vOct = vOctInput && vOctInput.length > 0 ? vOctInput[0] : 0;
+    this.call('su_voice_set_v_oct', this.handle, vOct);
+
     const frames = outputs[0]?.[0]?.length ?? 128;
     this.call('su_voice_process', this.handle, frames);
 

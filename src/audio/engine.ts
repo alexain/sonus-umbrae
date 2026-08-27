@@ -55,6 +55,7 @@ interface GainVoice {
 
 interface MacroVoice {
   node: AudioWorkletNode;
+  vOctInput: GainNode;
   model: number;
   frequency: number;
   harmo: number;
@@ -114,6 +115,7 @@ export class AudioEngine {
   private pendingProgram: AudioProgram | null = null;
   private routes = new Map<string, AudioRoute>();
   private views = new Map<string, ViewTap>();
+  private controlMonitors = new Map<string, AnalyserNode>();
   private listeners = new Set<AudioEngineListener>();
 
   snapshot(): AudioEngineSnapshot {
@@ -250,14 +252,18 @@ export class AudioEngine {
     const context = this.ensureContext();
     const wasmBytes = this.voiceWasmBytes.slice(0);
     const node = new AudioWorkletNode(context, 'sonus-voice', {
-      numberOfInputs: 1,
+      numberOfInputs: 2,
       numberOfOutputs: 2,
       outputChannelCount: [1, 1],
       processorOptions: { wasmBytes },
     });
+    const vOctInput = context.createGain();
+    vOctInput.gain.value = 1;
+    vOctInput.connect(node, 0, 1);
 
     this.voices.set(definition.name, {
       node,
+      vOctInput,
       model: definition.model,
       frequency: definition.frequency,
       harmo: definition.harmo,
@@ -437,9 +443,40 @@ export class AudioEngine {
       return { node: voice.node, input: 0 };
     }
 
+    const vOct = port.match(/^([A-Za-z_]\w*)\.v_oct$/);
+    if (vOct) {
+      const voice = this.voices.get(vOct[1]);
+      if (!voice) throw new Error(`unknown Voice v_oct input: ${vOct[1]}`);
+      return { node: voice.vOctInput, input: 0 };
+    }
+
     const match = port.match(/^([A-Za-z_]\w*)\.in$/);
     if (!match) throw new Error(`unknown destination: ${port}`);
     return { node: this.requireGain(match[1]).node, input: 0 };
+  }
+
+
+  readVoicePitchMidi(name: string): number | null {
+    const voice = this.voices.get(name);
+    if (!voice) return null;
+
+    // The analyser is intentionally short: v/oct is a control signal and the
+    // latest block value is more useful here than a long averaged waveform.
+    const context = this.ensureContext();
+    const analyserKey = `${name}.v_oct`;
+    let analyser = this.controlMonitors.get(analyserKey);
+    if (!analyser) {
+      analyser = context.createAnalyser();
+      analyser.fftSize = 32;
+      analyser.smoothingTimeConstant = 0;
+      voice.vOctInput.connect(analyser);
+      this.controlMonitors.set(analyserKey, analyser);
+    }
+    const data = new Float32Array(32);
+    analyser.getFloatTimeDomainData(data);
+    const volts = data[data.length - 1] ?? 0;
+    const baseMidi = 69 + 12 * Math.log2(voice.frequency / 440);
+    return baseMidi + volts * 12;
   }
 
 
@@ -643,6 +680,13 @@ export class AudioEngine {
     if (!voice) return;
     this.removeView(`${name}.out`);
     this.removeView(`${name}.aux`);
+    const controlMonitor = this.controlMonitors.get(`${name}.v_oct`);
+    if (controlMonitor) {
+      voice.vOctInput.disconnect(controlMonitor);
+      controlMonitor.disconnect();
+      this.controlMonitors.delete(`${name}.v_oct`);
+    }
+    voice.vOctInput.disconnect();
     voice.node.disconnect();
     voice.node.port.close();
     this.voices.delete(name);
