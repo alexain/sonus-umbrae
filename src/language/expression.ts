@@ -3,6 +3,7 @@ export type ScalarValue = number | string | boolean;
 export interface ExpressionContext {
   resolveIdentifier(name: string): ScalarValue | undefined;
   resolveMember(path: string[]): ScalarValue | undefined;
+  callFunction?(name: string, args: ScalarValue[], position: number): ScalarValue | undefined;
 }
 
 type TokenType = 'number' | 'string' | 'identifier' | 'operator' | 'punctuation' | 'eof';
@@ -146,7 +147,8 @@ class ExpressionParser {
   }
 
   private parseIdentifier(): ScalarValue {
-    const first = this.advance().value;
+    const firstToken = this.advance();
+    const first = firstToken.value;
 
     if (this.matchPunctuation('(')) {
       const args: ScalarValue[] = [];
@@ -156,7 +158,7 @@ class ExpressionParser {
         } while (this.matchPunctuation(','));
         this.expectPunctuation(')');
       }
-      return this.callFunction(first, args);
+      return this.callFunction(first, args, firstToken.position);
     }
 
     if (first === 'true') return true;
@@ -180,7 +182,10 @@ class ExpressionParser {
     return value;
   }
 
-  private callFunction(name: string, args: ScalarValue[]): ScalarValue {
+  private callFunction(name: string, args: ScalarValue[], position: number): ScalarValue {
+    const externalValue = this.context.callFunction?.(name, args, position);
+    if (externalValue !== undefined) return externalValue;
+
     switch (name.toLowerCase()) {
       case 'rnd': {
         this.expectArity(name, args, 2);

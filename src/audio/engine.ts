@@ -111,6 +111,7 @@ export class AudioEngine {
   private gains = new Map<string, GainVoice>();
   private voices = new Map<string, MacroVoice>();
   private clocks = new Map<string, ClockSource>();
+  private clockTriggerListeners = new Map<string, Set<() => void>>();
   private masterClockBpm = 0;
   private clockTransportRunning = true;
   private voiceWasmBytes: ArrayBuffer | null = null;
@@ -484,6 +485,33 @@ export class AudioEngine {
   }
 
 
+  subscribeClockTrigger(name: string, listener: () => void): () => void {
+    const listeners = this.clockTriggerListeners.get(name) ?? new Set<() => void>();
+    listeners.add(listener);
+    this.clockTriggerListeners.set(name, listeners);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) this.clockTriggerListeners.delete(name);
+    };
+  }
+
+  setVoiceParameter(name: string, parameter: 'freq' | 'model' | 'harmo' | 'timbre' | 'morph', value: number): void {
+    const voice = this.voices.get(name);
+    if (!voice) throw new Error(`unknown Voice object: ${name}`);
+    if (parameter === 'freq') {
+      voice.frequency = value;
+      voice.node.port.postMessage({ type: 'params', frequency: value });
+      return;
+    }
+    if (parameter === 'model') {
+      voice.model = value;
+      voice.node.port.postMessage({ type: 'params', model: value });
+      return;
+    }
+    voice[parameter] = value;
+    voice.node.port.postMessage({ type: 'params', [parameter]: value / 100 });
+  }
+
   setClockTransport(running: boolean): void {
     this.clockTransportRunning = running;
     this.updateAllClocks();
@@ -531,6 +559,7 @@ export class AudioEngine {
         const emittedAt = message.frame / this.context.sampleRate;
         current.lastTriggerTime = emittedAt;
         current.triggerCount += 1;
+        for (const listener of this.clockTriggerListeners.get(name) ?? []) listener();
         const effectiveBpm = this.masterClockBpm * current.rate;
         if (effectiveBpm > 0) {
           const periodAtEmission = 60 / effectiveBpm;

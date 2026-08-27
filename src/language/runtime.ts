@@ -1,6 +1,50 @@
 import { AudioEngine, type AudioProgram, type SignalKind } from '../audio/engine';
 import { evaluateExpression, ExpressionError, type ScalarValue } from './expression';
 
+
+const RESERVED_IDENTIFIERS = new Set([
+  // Built-in objects and constructors.
+  'main',
+  'clock',
+  'midi',
+  'voice',
+  'pattern',
+  'scale',
+  'osc',
+  'gain',
+
+  // Current expression functions.
+  'rnd',
+  'choose',
+  'coin',
+  'clamp',
+  'map',
+  'min',
+  'max',
+  'abs',
+  'round',
+  'floor',
+  'ceil',
+
+  // Language keywords reserved before their implementation.
+  'when',
+  'prob',
+  'every',
+  'skip',
+  'if',
+  'else',
+  'for',
+  'while',
+  'after',
+  'repeat',
+  'walk',
+  'chaos',
+  'seed',
+  'wrap',
+  'quantize',
+  'slew',
+]);
+
 export interface EvaluationResult {
   message: string;
 }
@@ -108,6 +152,8 @@ export class SonusRuntime {
     connections: [],
   };
 
+  private whenUnsubscribers: Array<() => void> = [];
+
   constructor(private readonly audio: AudioEngine) {}
 
   getParameterViews(): ParameterViewState[] {
@@ -144,10 +190,23 @@ export class SonusRuntime {
     const parameterViews = new Map<string, ParameterViewState>();
     const variableViewRequests: Array<{ name: string; line: number }> = [];
     const variables = new Map<string, ScalarValue>();
+    const generativeState = new Map<string, number | { x: number; y: number }>();
+    let randomState = 0x6d2b79f5;
+    const random = (): number => {
+      // xorshift32: small, deterministic, and sufficient for musical/generative use.
+      let x = randomState | 0;
+      x ^= x << 13;
+      x ^= x >>> 17;
+      x ^= x << 5;
+      randomState = x >>> 0;
+      return randomState / 0x100000000;
+    };
     const results: EvaluationResult[] = [];
     const diagnostics: SonusDiagnostic[] = [];
 
-    const lines = parseStatements(source);
+    const parsedWhen = extractWhenBlocks(source);
+    if (parsedWhen.diagnostics.length > 0) throw new SonusEvaluationError(parsedWhen.diagnostics);
+    const lines = parseStatements(parsedWhen.source);
 
     // Pass 1: declarations. Objects are collected before the remaining statements
     // so the source remains declarative rather than execution-order dependent.
@@ -155,8 +214,13 @@ export class SonusRuntime {
       const clockDeclaration = parseClockDeclaration(line);
       if (clockDeclaration) {
         const { name, rate, label, calls } = clockDeclaration;
-        if (name === 'Main' || name === 'Clock' || objectExists(name, oscillators, gains, voices) || clockSources.has(name)) {
-          diagnostics.push({ line: lineNumber, message: `reserved or duplicate object: ${name}` });
+        const reservationError = identifierReservationError(name);
+        if (reservationError) {
+          diagnostics.push({ line: lineNumber, message: reservationError });
+          continue;
+        }
+        if (objectExists(name, oscillators, gains, voices) || clockSources.has(name)) {
+          diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` });
           continue;
         }
         const definition: ClockDefinition = { rate, rateLabel: label, parameters: new Map([['RATE', label]]) };
@@ -233,6 +297,120 @@ export class SonusRuntime {
         return evaluateExpression(expression, {
           resolveIdentifier: (name) => variables.get(name),
           resolveMember,
+          callFunction: (name, args, position) => {
+            const lower = name.toLowerCase();
+            const site = `${lineNumber}:${expression}:${position}:${lower}`;
+
+            const numeric = (value: ScalarValue, label: string): number => {
+              if (typeof value !== 'number' || !Number.isFinite(value)) throw new ExpressionError(`${label} expects numeric values`);
+              return value;
+            };
+
+            if (lower === 'rnd') {
+              if (args.length !== 2) throw new ExpressionError('rnd expects 2 arguments');
+              const min = numeric(args[0], 'rnd');
+              const max = numeric(args[1], 'rnd');
+              if (max < min) throw new ExpressionError('rnd expects min <= max');
+              return min + random() * (max - min);
+            }
+
+            if (lower === 'choose') {
+              if (args.length === 0) throw new ExpressionError('choose expects at least one value');
+              return args[Math.floor(random() * args.length)];
+            }
+
+            if (lower === 'coin') {
+              if (args.length > 1) throw new ExpressionError('coin expects zero or one probability value');
+              const probability = args.length === 0 ? 50 : numeric(args[0], 'coin');
+              if (probability < 0 || probability > 100) throw new ExpressionError('coin probability must be between 0 and 100');
+              return random() * 100 < probability;
+            }
+
+            if (lower === 'wrap') {
+              if (args.length !== 3) throw new ExpressionError('wrap expects 3 arguments');
+              const value = numeric(args[0], 'wrap');
+              const min = numeric(args[1], 'wrap');
+              const max = numeric(args[2], 'wrap');
+              if (max <= min) throw new ExpressionError('wrap expects min < max');
+              const width = max - min;
+              return ((value - min) % width + width) % width + min;
+            }
+
+            if (lower === 'quantize') {
+              if (args.length !== 2) throw new ExpressionError('quantize expects 2 arguments');
+              const value = numeric(args[0], 'quantize');
+              const step = numeric(args[1], 'quantize');
+              if (step <= 0) throw new ExpressionError('quantize step must be > 0');
+              return Math.round(value / step) * step;
+            }
+
+            if (lower === 'walk') {
+              if (args.length !== 3) throw new ExpressionError('walk expects 3 arguments: min, max, step');
+              const min = numeric(args[0], 'walk');
+              const max = numeric(args[1], 'walk');
+              const step = Math.abs(numeric(args[2], 'walk'));
+              if (max < min) throw new ExpressionError('walk expects min <= max');
+              const previous = typeof generativeState.get(site) === 'number'
+                ? generativeState.get(site) as number
+                : (min + max) / 2;
+              const direction = Math.floor(random() * 3) - 1;
+              const value = Math.min(max, Math.max(min, previous + direction * step));
+              generativeState.set(site, value);
+              return value;
+            }
+
+            if (lower === 'slew') {
+              if (args.length !== 2) throw new ExpressionError('slew expects 2 arguments: value, amount');
+              const target = numeric(args[0], 'slew');
+              const amount = numeric(args[1], 'slew');
+              if (amount < 0 || amount > 100) throw new ExpressionError('slew amount must be between 0 and 100');
+              const previous = typeof generativeState.get(site) === 'number'
+                ? generativeState.get(site) as number
+                : target;
+              const value = previous + (target - previous) * (1 - amount / 100);
+              generativeState.set(site, value);
+              return value;
+            }
+
+            if (lower === 'chaos') {
+              if (args.length < 3 || args.length > 4) throw new ExpressionError('chaos expects type, min, max [, amount]');
+              if (typeof args[0] !== 'string') throw new ExpressionError('chaos type must be a string');
+              const type = args[0].toLowerCase();
+              const min = numeric(args[1], 'chaos');
+              const max = numeric(args[2], 'chaos');
+              const amount = args.length === 4 ? numeric(args[3], 'chaos') : undefined;
+              if (max < min) throw new ExpressionError('chaos expects min <= max');
+
+              let normalized: number;
+              if (type === 'logistic') {
+                const r = amount ?? 3.91;
+                if (r <= 0 || r > 4) throw new ExpressionError('logistic chaos amount must be > 0 and <= 4');
+                const previous = typeof generativeState.get(site) === 'number' ? generativeState.get(site) as number : 0.371;
+                normalized = r * previous * (1 - previous);
+                generativeState.set(site, normalized);
+              } else if (type === 'cubic') {
+                const r = amount ?? 2.59;
+                const previous = typeof generativeState.get(site) === 'number' ? generativeState.get(site) as number : 0.173;
+                const raw = r * previous * (1 - previous * previous);
+                normalized = Math.min(1, Math.max(0, Math.abs(raw)));
+                generativeState.set(site, normalized);
+              } else if (type === 'henon') {
+                const a = amount ?? 1.4;
+                const state = generativeState.get(site);
+                const previous = typeof state === 'object' ? state : { x: 0.1, y: 0.3 };
+                const x = 1 - a * previous.x * previous.x + previous.y;
+                const y = 0.3 * previous.x;
+                generativeState.set(site, { x, y });
+                normalized = Math.min(1, Math.max(0, (x + 1.5) / 3));
+              } else {
+                throw new ExpressionError(`unknown chaos type: ${args[0]}`);
+              }
+
+              return min + normalized * (max - min);
+            }
+
+            return undefined;
+          },
         });
       } catch (error) {
         const message = error instanceof ExpressionError ? error.message : String(error);
@@ -287,8 +465,13 @@ export class SonusRuntime {
       const setterAssignment = line.match(/^([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*)\.(freq|note|level|model|harmo|timbre|morph|bpm)\(\s*(.+)\s*\)$/);
       if (setterAssignment) {
         const [, variableName, objectName, parameter, rawValue] = setterAssignment;
-        if (variableName === 'Main' || variableName === 'Clock' || objectExists(variableName, oscillators, gains, voices) || clockSources.has(variableName)) {
-          diagnostics.push({ line: lineNumber, message: `cannot assign scalar value to object or reserved name: ${variableName}` });
+        const reservationError = identifierReservationError(variableName);
+        if (reservationError) {
+          diagnostics.push({ line: lineNumber, message: reservationError });
+          continue;
+        }
+        if (objectExists(variableName, oscillators, gains, voices) || clockSources.has(variableName)) {
+          diagnostics.push({ line: lineNumber, message: `cannot assign scalar value to object: ${variableName}` });
           continue;
         }
 
@@ -395,8 +578,13 @@ export class SonusRuntime {
       const scalarAssignment = line.match(/^([A-Za-z_]\w*)\s*=\s*(.+)$/);
       if (scalarAssignment) {
         const [, name, expression] = scalarAssignment;
-        if (name === 'Main' || name === 'Clock' || objectExists(name, oscillators, gains, voices) || clockSources.has(name)) {
-          diagnostics.push({ line: lineNumber, message: `cannot assign scalar value to object or reserved name: ${name}` });
+        const reservationError = identifierReservationError(name);
+        if (reservationError) {
+          diagnostics.push({ line: lineNumber, message: reservationError });
+          continue;
+        }
+        if (objectExists(name, oscillators, gains, voices) || clockSources.has(name)) {
+          diagnostics.push({ line: lineNumber, message: `cannot assign scalar value to object: ${name}` });
           continue;
         }
         const value = evalValue(expression, lineNumber);
@@ -407,7 +595,17 @@ export class SonusRuntime {
         continue;
       }
 
-      let match = line.match(/^Clock\.bpm\(\s*(.+)\s*\)\s*$/);
+      let match = line.match(/^seed\(\s*(.+)\s*\)\s*$/);
+      if (match) {
+        const seedValue = evalNumber(match[1], lineNumber, 'seed');
+        if (seedValue === undefined) continue;
+        randomState = (Math.trunc(seedValue) >>> 0) || 0x6d2b79f5;
+        generativeState.clear();
+        results.push({ message: `seed ${Math.trunc(seedValue)}` });
+        continue;
+      }
+
+      match = line.match(/^Clock\.bpm\(\s*(.+)\s*\)\s*$/);
       if (match) {
         const bpm = evalNumber(match[1], lineNumber, 'Clock.bpm');
         if (bpm === undefined) continue;
@@ -656,6 +854,89 @@ export class SonusRuntime {
       results.push({ message: `${request.name} view` });
     }
 
+    const whenHandlers: Array<{
+      sourceName: string;
+      rate: number;
+      cycle: CycleCondition | null;
+      probability: number;
+      body: string;
+      line: number;
+    }> = [];
+
+    for (const block of parsedWhen.blocks) {
+      const parsed = parseWhenHeader(block.header);
+      if (!parsed) {
+        diagnostics.push({ line: block.line, message: 'invalid when() expression' });
+        continue;
+      }
+      if (parsed.probability < 0 || parsed.probability > 100) {
+        diagnostics.push({ line: block.line, message: 'prob() expects 0..100' });
+        continue;
+      }
+      const sourceName = parsed.rate === 1 ? 'Clock' : `__when_${whenHandlers.length + 1}`;
+      for (const statement of parseStatements(block.body)) {
+        const statementLine = block.line + statement.line - 1;
+        const bodyLine = statement.source;
+
+        let match = bodyLine.match(/^([A-Za-z_]\w*)\.(freq|model|harmo|timbre|morph)\(\s*(.+)\s*\)$/);
+        if (match) {
+          const [, name, parameter, rawValue] = match;
+          const voice = voices.get(name);
+          if (!voice) {
+            diagnostics.push({ line: statementLine, message: `unknown Voice object: ${name}` });
+            continue;
+          }
+
+          // Validate the expression now without consuming stateful generators.
+          // Numeric validity/range is checked again when the event actually runs.
+          try {
+            evaluateExpression(rawValue, {
+              resolveIdentifier: (identifier) => variables.get(identifier),
+              resolveMember,
+              callFunction: (functionName, args) => {
+                const lower = functionName.toLowerCase();
+                if (lower === 'walk' || lower === 'slew') return 0;
+                if (lower === 'chaos') return 0;
+                if (lower === 'rnd') return 0;
+                if (lower === 'choose') return args[0] ?? 0;
+                if (lower === 'coin') return false;
+                return undefined;
+              },
+            });
+          } catch (error) {
+            const message = error instanceof ExpressionError ? error.message : String(error);
+            diagnostics.push({ line: statementLine, message });
+          }
+
+          if (parameter === 'freq') continue;
+          if (parameter === 'model') continue;
+          if (parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph') continue;
+        }
+
+        match = bodyLine.match(/^([A-Za-z_]\w*)\s*=\s*(.+)$/);
+        if (match) {
+          const [, name] = match;
+          const reservationError = identifierReservationError(name);
+          if (reservationError) diagnostics.push({ line: statementLine, message: reservationError });
+          else if (objectExists(name, oscillators, gains, voices) || clockSources.has(name)) {
+            diagnostics.push({ line: statementLine, message: `cannot assign scalar value to object: ${name}` });
+          }
+          continue;
+        }
+
+        diagnostics.push({ line: statementLine, message: `unsupported statement inside when: ${bodyLine}` });
+      }
+
+      whenHandlers.push({
+        sourceName,
+        rate: parsed.rate,
+        cycle: parsed.cycle,
+        probability: parsed.probability,
+        body: block.body,
+        line: block.line,
+      });
+    }
+
     if (diagnostics.length > 0) throw new SonusEvaluationError(diagnostics);
 
     // VARIABLES is the runtime symbol table for user-created names. Scalars
@@ -782,7 +1063,11 @@ export class SonusRuntime {
 
     const program: AudioProgram = {
       clock: { bpm: clockBpm },
-      clockSources: [{ name: 'Clock', rate: 1 }, ...[...clockSources.entries()].map(([name, definition]) => ({ name, rate: definition.rate }))],
+      clockSources: [
+        { name: 'Clock', rate: 1 },
+        ...[...clockSources.entries()].map(([name, definition]) => ({ name, rate: definition.rate })),
+        ...whenHandlers.filter((handler) => handler.sourceName !== 'Clock').map((handler) => ({ name: handler.sourceName, rate: handler.rate })),
+      ],
       oscillators: [...oscillators.entries()].map(([name, definition]) => ({
         name,
         frequency: definition.frequency,
@@ -823,7 +1108,64 @@ export class SonusRuntime {
     this.explicitSignalViews = [...views.entries()]
       .filter(([, kind]) => kind !== 'parameter')
       .map(([signal, kind]) => ({ signal, kind: kind as SignalKind }));
+    for (const unsubscribe of this.whenUnsubscribers) unsubscribe();
+    this.whenUnsubscribers = [];
+
     this.audio.applyProgram(program);
+
+    for (const handler of whenHandlers) {
+      let eventIndex = 0;
+      const unsubscribe = this.audio.subscribeClockTrigger(handler.sourceName, () => {
+        eventIndex += 1;
+        if (!matchesCycle(handler.cycle, eventIndex)) return;
+        if (handler.probability < 100 && random() * 100 >= handler.probability) return;
+
+        for (const statement of parseStatements(handler.body)) {
+          const lineNumber = handler.line + statement.line - 1;
+          const line = statement.source;
+
+          let match = line.match(/^([A-Za-z_]\w*)\.(freq|model|harmo|timbre|morph)\(\s*(.+)\s*\)$/);
+          if (match) {
+            const [, name, parameter, rawValue] = match;
+            const voice = voices.get(name);
+            if (!voice) return;
+            const value = evalNumber(rawValue, lineNumber, parameter);
+            if (value === undefined) continue;
+            if (parameter === 'freq') {
+              if (frequencyError(value)) continue;
+              voice.frequency = value;
+            } else if (parameter === 'model') {
+              const model = parseVoiceModelValue(value);
+              if (model === null) continue;
+              voice.model = model;
+              this.audio.setVoiceParameter(name, 'model', model);
+              continue;
+            } else {
+              if (percentError(value, parameter)) continue;
+              const modulationParameter = parameter as 'harmo' | 'timbre' | 'morph';
+              voice[modulationParameter] = value;
+            }
+            this.audio.setVoiceParameter(name, parameter as 'freq' | 'harmo' | 'timbre' | 'morph', value);
+            continue;
+          }
+
+          match = line.match(/^([A-Za-z_]\w*)\s*=\s*(.+)$/);
+          if (match) {
+            const [, name, expression] = match;
+            if (identifierReservationError(name) || objectExists(name, oscillators, gains, voices) || clockSources.has(name)) continue;
+            const value = evalValue(expression, lineNumber);
+            if (value !== undefined) {
+              variables.set(name, value);
+              const existing = this.variableViews.find((view) => view.name === name);
+              if (existing) existing.value = formatScalar(value);
+              else this.variableViews.push({ name, value: formatScalar(value) });
+            }
+          }
+        }
+      });
+      this.whenUnsubscribers.push(unsubscribe);
+    }
+
     return results.length > 0 ? results : [{ message: 'ok' }];
   }
 }
@@ -838,6 +1180,160 @@ interface ObjectDeclaration {
   calls: ChainedCall[];
 }
 
+
+interface WhenBlock {
+  header: string;
+  body: string;
+  line: number;
+}
+
+interface CycleCondition {
+  position?: number;
+  length?: number;
+  first?: boolean;
+  notFirst?: boolean;
+}
+
+function extractWhenBlocks(source: string): { source: string; blocks: WhenBlock[]; diagnostics: SonusDiagnostic[] } {
+  const blocks: WhenBlock[] = [];
+  const diagnostics: SonusDiagnostic[] = [];
+  const chars = [...source];
+  let i = 0;
+
+  while (i < source.length) {
+    const match = /\bwhen\s*\(/g;
+    match.lastIndex = i;
+    const found = match.exec(source);
+    if (!found) break;
+
+    const start = found.index;
+    let p = match.lastIndex;
+    let depth = 1;
+    let quote: string | null = null;
+    while (p < source.length && depth > 0) {
+      const ch = source[p++];
+      if (quote) {
+        if (ch === '\\') p += 1;
+        else if (ch === quote) quote = null;
+      } else if (ch === '"' || ch === "'") quote = ch;
+      else if (ch === '(') depth += 1;
+      else if (ch === ')') depth -= 1;
+    }
+    if (depth !== 0) {
+      diagnostics.push({ line: lineAt(source, start), message: 'unterminated when()' });
+      break;
+    }
+
+    const header = source.slice(match.lastIndex, p - 1).trim();
+    while (p < source.length && /\s/.test(source[p])) p += 1;
+    if (source[p] !== '{') {
+      diagnostics.push({ line: lineAt(source, start), message: 'when() expects a block' });
+      i = p;
+      continue;
+    }
+
+    const bodyStart = ++p;
+    let braceDepth = 1;
+    quote = null;
+    while (p < source.length && braceDepth > 0) {
+      const ch = source[p++];
+      if (quote) {
+        if (ch === '\\') p += 1;
+        else if (ch === quote) quote = null;
+      } else if (ch === '"' || ch === "'") quote = ch;
+      else if (ch === '{') braceDepth += 1;
+      else if (ch === '}') braceDepth -= 1;
+    }
+    if (braceDepth !== 0) {
+      diagnostics.push({ line: lineAt(source, start), message: 'unterminated when block' });
+      break;
+    }
+
+    blocks.push({ header, body: source.slice(bodyStart, p - 1), line: lineAt(source, start) });
+    for (let n = start; n < p; n += 1) if (chars[n] !== '\n') chars[n] = ' ';
+    i = p;
+  }
+
+  return { source: chars.join(''), blocks, diagnostics };
+}
+
+function lineAt(source: string, index: number): number {
+  return source.slice(0, index).split('\n').length;
+}
+
+function splitTopLevelArguments(value: string): string[] {
+  const result: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let quote: string | null = null;
+  for (let i = 0; i < value.length; i += 1) {
+    const ch = value[i];
+    if (quote) {
+      if (ch === '\\') i += 1;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === '(') depth += 1;
+    else if (ch === ')') depth -= 1;
+    else if (ch === ',' && depth === 0) {
+      result.push(value.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  result.push(value.slice(start).trim());
+  return result.filter(Boolean);
+}
+
+function parseWhenHeader(header: string): { rate: number; cycle: CycleCondition | null; probability: number } | null {
+  const args = splitTopLevelArguments(header);
+  if (args.length === 0) return null;
+
+  const source = args[0].match(/^Clock\.out(?:\(\s*["']([^"']+)["']\s*\))?$/);
+  if (!source) return null;
+  const rate = source[1] ? parseClockRate(source[1])?.rate : 1;
+  if (rate === undefined) return null;
+
+  let cycle: CycleCondition | null = null;
+  let probability = 100;
+
+  for (const modifier of args.slice(1)) {
+    const cycleMatch = modifier.match(/^cycle\(\s*["']([^"']+)["']\s*\)$/);
+    if (cycleMatch) {
+      if (cycle !== null) return null;
+      cycle = parseCycleCondition(cycleMatch[1]);
+      if (!cycle) return null;
+      continue;
+    }
+    const probMatch = modifier.match(/^prob\(\s*(\d+(?:\.\d+)?)\s*\)$/);
+    if (probMatch) {
+      probability = Number(probMatch[1]);
+      continue;
+    }
+    return null;
+  }
+
+  return { rate, cycle, probability };
+}
+
+function parseCycleCondition(value: string): CycleCondition | null {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'first') return { first: true };
+  if (normalized === '!first') return { notFirst: true };
+  const match = normalized.match(/^(\d+):(\d+)$/);
+  if (!match) return null;
+  const position = Number(match[1]);
+  const length = Number(match[2]);
+  if (position < 1 || length < 1 || position > length) return null;
+  return { position, length };
+}
+
+function matchesCycle(condition: CycleCondition | null, eventIndex: number): boolean {
+  if (!condition) return true;
+  if (condition.first) return eventIndex === 1;
+  if (condition.notFirst) return eventIndex > 1;
+  return ((eventIndex - 1) % condition.length!) + 1 === condition.position;
+}
 
 function parseStatements(source: string): Array<{ source: string; line: number }> {
   const statements: Array<{ source: string; line: number }> = [];
@@ -1019,6 +1515,16 @@ function parseRouteLine(line: string): ParsedRoute | null {
   };
 }
 
+function identifierReservationError(name: string): string | null {
+  if (name.startsWith('__')) {
+    return `identifiers beginning with '__' are reserved: ${name}`;
+  }
+  if (RESERVED_IDENTIFIERS.has(name.toLowerCase())) {
+    return `reserved identifier: ${name}`;
+  }
+  return null;
+}
+
 function reservedOrDuplicate(
   name: string,
   oscillators: Map<string, OscillatorDefinition>,
@@ -1027,8 +1533,9 @@ function reservedOrDuplicate(
   diagnostics: SonusDiagnostic[],
   lineNumber: number,
 ): boolean {
-  if (name === 'Main' || name === 'Clock') {
-    diagnostics.push({ line: lineNumber, message: `${name} is a built-in singleton and cannot be assigned` });
+  const reservationError = identifierReservationError(name);
+  if (reservationError) {
+    diagnostics.push({ line: lineNumber, message: reservationError });
     return true;
   }
   if (objectExists(name, oscillators, gains, voices)) {

@@ -319,3 +319,32 @@ The following concepts are being explored but should not yet be treated as imple
 - richer clock generation, probability, division and multiplication.
 
 The goal is to keep these features compatible with the same declarative, live-reconciled object and routing model.
+
+
+## Generative functions
+
+Sonus Umbrae includes small numerical/generative helpers that can be used anywhere an expression is accepted.
+
+```text
+x = rnd(10, 50);
+y = choose(20, 40, 60, 80);
+gate = coin(35);
+
+wrapped = wrap(x, 0, 100);
+stepped = quantize(x, 5);
+```
+
+Stateful functions retain state for their specific call-site until the document is evaluated again:
+
+```text
+when (Clock.out) {
+    a.timbre(walk(20, 80, 5));
+    a.morph(chaos("logistic", 10, 90));
+}
+```
+
+Available chaos engines currently include `logistic`, `cubic`, and `henon`.
+
+`slew(value, amount)` smooths changes at a call-site. `amount` is 0..100, where larger values respond more slowly.
+
+`seed(n);` sets the deterministic random seed used by `rnd`, `choose`, `coin`, `prob`, `walk`, and chaos initialization. Reusing the same seed makes generative behavior reproducible after evaluation.

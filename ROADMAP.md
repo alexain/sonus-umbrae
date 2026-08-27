@@ -17,6 +17,7 @@ This roadmap is directional rather than a release commitment. Features may move,
 - Looping and iteration primitives.
 - Persistent runtime state for event-driven code.
 - Clear distinction between snapshot values and continuously evaluated signals.
+- Stateful generative helpers including `walk()`, `chaos()`, `slew()`, reproducible `seed()`, numeric `wrap()`, and `quantize()`.
 
 ### Signal routing
 
@@ -81,6 +82,143 @@ Planned directions include:
 - Event-driven scripting connected to clock and trigger ports.
 
 The design is conceptually closer to a programmable modular timing source than to a conventional DAW transport.
+
+
+
+## Event-driven language core
+
+The primary control-flow model should remain musical and event-driven rather than becoming a conventional general-purpose scripting language.
+
+Initial event syntax:
+
+`when (Clock.out) { ... }`
+
+A temporary clock-rate view can be requested directly from the event source without creating a named derived clock:
+
+`when (Clock.out("/2")) { ... }`
+
+`when (Clock.out("*2")) { ... }`
+
+Event modifiers use the same function-call syntax as normal language operations:
+
+`when (Clock.out("/2"), cycle("1:4"), prob(30)) { ... }`
+
+Initial modifiers:
+
+- `cycle("1:4")`, `cycle("2:4")`, etc. select a position in a repeating event cycle.
+- `cycle("first")` matches only the first event after the handler is evaluated.
+- `cycle("!first")` matches every event except the first.
+- `prob(n)` applies a percentage probability after the cycle condition matches.
+
+Modifiers are optional and order-independent. This avoids introducing a separate object/map configuration syntax solely for `when`.
+
+The language may later gain conventional `if`, `for`, or other control structures where genuinely useful, but musical event primitives should remain the preferred way to express temporal behavior.
+
+
+## Visual engine / audiovisual performance
+
+Sonus Umbrae should eventually include a programmable visual engine driven by the same live-coding language used for audio.
+
+The visual engine is a separate subsystem from the audio engine:
+
+- The audio engine starts automatically when the application launches, subject to browser/device permission requirements.
+- The visual engine is disabled by default.
+- The visual engine is started and stopped explicitly from command mode, for example:
+  `:visual start`
+  `:visual stop`
+- A separate command may open the visual output client, for example:
+  `:visual open`
+- The main status bar should indicate visual-engine state independently from audio-engine state.
+
+The same `.sum` source can contain both audio and visual code. Visual objects should follow the same object/parameter/routing model as audio modules rather than introducing a separate visual programming language.
+
+Possible visual primitives include:
+
+- `Circle()`
+- `Rect()`
+- `Line()`
+- `Grid()`
+- `Pixel()`
+- `Text()`
+- `Ascii()`
+- `Bitmap()`
+- `Sprite()`
+- procedural noise and pixel-art sources
+
+Possible visual properties and transforms include:
+
+- position
+- scale and size
+- rotation
+- opacity
+- color
+- gradients
+- distortion
+- blur
+- glow
+- feedback
+- trails
+- mirror/kaleidoscopic transforms
+- pixelation
+- threshold/posterization
+
+Audio/runtime values should be routable into visual properties using the same conceptual patching model used elsewhere in Sonus Umbrae. SIGNAL, GATE, and TRIGGER sources may drive visual behavior without requiring a separate syntax family.
+
+Examples of future concepts include:
+
+`Clock.out -> visual.trig;`
+
+`voice.out -> visual.distort;`
+
+`voice.timbre -> visual.size;`
+
+The exact visual API will be designed after the core event and routing systems are stable.
+
+### Audio analysis for visuals
+
+The visual engine should not require rendering individual audio samples directly. A dedicated analysis layer can expose musically useful derived values such as:
+
+- level / envelope
+- onset
+- low/mid/high spectral energy
+- spectrum bands
+- pitch or other extracted features where useful
+
+These values can then be routed to visual parameters using the normal language model.
+
+### Separate visual output
+
+The browser implementation should support a dedicated visual-output client, initially as another route/end-point of the same application, for example:
+
+`/visual`
+
+This allows:
+
+- live coding and runtime monitoring on the primary display
+- fullscreen generated visuals on a second monitor or projector
+- the visual output to remain active while the main UI switches between LIVE, SCHEME, CONFIG, or other screens
+
+The architecture should not assume that the visual renderer always runs on the same display or even the same machine. A future implementation may allow the visual client to connect to the active Sonus Umbrae session over a local network.
+
+### Scheme interaction
+
+The Scheme view remains focused on the audio/modular runtime and must not expand into a graph of every visual object.
+
+Individual visual primitives such as `Circle`, `Text`, `Bitmap`, gradients, or visual effects should **not** appear as separate Scheme nodes.
+
+If the visual engine receives data from the modular graph, Scheme may show one aggregated terminal node:
+
+`VISUAL`
+
+This node represents the entire visual subsystem. Connections entering it may use a dedicated visual-control edge style so they are distinguishable from normal audio, gate, and trigger routing.
+
+The node may show only compact aggregate state such as:
+
+- engine ON/OFF
+- number of active visual objects
+- number of incoming control connections
+
+The internal visual scene remains opaque to Scheme.
 
 ## Multi-script sessions
 
@@ -194,6 +332,8 @@ Sonus Umbrae should continue to follow these principles:
 - The system is live, not command-line oriented.
 - Values are observed through views rather than `print()`-style console output.
 - The Scheme view is read-only and never becomes a graphical patch editor.
+- Visual objects are programmed in the same language, but Scheme exposes them only through an optional aggregated `VISUAL` endpoint rather than individual visual nodes.
+- Audio and visual engines have independent lifecycle state; visual output is opt-in by default.
 - Audio and CV are signals, not artificially separated language concepts.
 - Gate and trigger semantics are metadata used for interpretation and visualization.
 - Visual interfaces should remain compact, phosphor-inspired, keyboard-first, and deliberately non-IDE-like.

@@ -1036,16 +1036,19 @@ function statementLabels(source: string): string[] {
   const labels = Array(lines.length).fill('') as string[];
   let statement = 0;
   let pending = false;
+  let braceDepth = 0;
   let quote: '"' | "'" | null = null;
   let escaped = false;
 
   for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
     const line = lines[lineIndex];
     let hasCode = false;
-    let terminates = false;
+    let topLevelTerminator = false;
+
     for (let i = 0; i < line.length; i += 1) {
       const char = line[i];
       const next = line[i + 1];
+
       if (quote) {
         hasCode = true;
         if (escaped) escaped = false;
@@ -1053,18 +1056,39 @@ function statementLabels(source: string): string[] {
         else if (char === quote) quote = null;
         continue;
       }
-      if (char === '"' || char === "'") { quote = char; hasCode = true; continue; }
+
+      if (char === '"' || char === "'") {
+        quote = char;
+        hasCode = true;
+        continue;
+      }
+
       if (char === '/' && next === '/') break;
       if (!/\s/.test(char)) hasCode = true;
-      if (char === ';') terminates = true;
+
+      if (char === '{') {
+        braceDepth += 1;
+        continue;
+      }
+
+      if (char === '}') {
+        braceDepth = Math.max(0, braceDepth - 1);
+        if (braceDepth === 0) topLevelTerminator = true;
+        continue;
+      }
+
+      if (char === ';' && braceDepth === 0) topLevelTerminator = true;
     }
+
     if (hasCode && !pending) {
       statement += 1;
       labels[lineIndex] = String(statement);
       pending = true;
     }
-    if (terminates) pending = false;
+
+    if (topLevelTerminator) pending = false;
   }
+
   return labels;
 }
 
@@ -1072,22 +1096,45 @@ function statementCompleteBeforeCaret(source: string): boolean {
   let quote: '"' | "'" | null = null;
   let escaped = false;
   let inComment = false;
+  let braceDepth = 0;
   let lastSignificant = '';
+
   for (let i = 0; i < source.length; i += 1) {
     const char = source[i];
     const next = source[i + 1];
-    if (inComment) { if (char === '\n') inComment = false; continue; }
+
+    if (inComment) {
+      if (char === '\n') inComment = false;
+      continue;
+    }
+
     if (quote) {
       if (escaped) escaped = false;
       else if (char === '\\') escaped = true;
       else if (char === quote) quote = null;
       continue;
     }
-    if (char === '"' || char === "'") { quote = char; lastSignificant = char; continue; }
-    if (char === '/' && next === '/') { inComment = true; i += 1; continue; }
+
+    if (char === '"' || char === "'") {
+      quote = char;
+      lastSignificant = char;
+      continue;
+    }
+
+    if (char === '/' && next === '/') {
+      inComment = true;
+      i += 1;
+      continue;
+    }
+
+    if (char === '{') braceDepth += 1;
+    else if (char === '}') braceDepth = Math.max(0, braceDepth - 1);
+
     if (!/\s/.test(char)) lastSignificant = char;
   }
-  return lastSignificant === ';';
+
+  if (braceDepth > 0) return false;
+  return lastSignificant === ';' || lastSignificant === '}';
 }
 
 function renderSyntaxLayer(): void {
