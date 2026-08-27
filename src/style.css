@@ -661,3 +661,74 @@ button, input, textarea { font: inherit; }
   text-align: right;
   white-space: nowrap;
 }
+
+/* Runtime monitor panels */
+.monitor-card {
+  border-bottom: 1px solid rgba(215, 169, 46, 0.12);
+  padding-bottom: 10px;
+}
+
+.monitor-card.dragging {
+  opacity: 0.42;
+}
+
+.monitor-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 22px;
+  margin-bottom: 7px;
+  cursor: grab;
+  user-select: none;
+}
+
+.monitor-title:active { cursor: grabbing; }
+.monitor-disclosure { width: 1em; color: var(--phosphor-dim); }
+.monitor-title-text { color: var(--phosphor); }
+.monitor-card.collapsed .monitor-title { margin-bottom: 0; }
+.monitor-card.collapsed .monitor-body { display: none; }
+
+.monitor-body {
+  display: grid;
+  gap: 10px;
+}
+
+.monitor-section-label {
+  margin-bottom: 4px;
+  color: var(--phosphor-dim);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.monitor-parameters {
+  display: grid;
+  gap: 5px;
+  padding: 7px 10px 2px;
+  border-left: 1px solid rgba(215, 169, 46, 0.12);
+}
+
+.monitor-parameter-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  color: var(--phosphor-hot);
+  font-size: 16px;
+  line-height: 1.05;
+}
+
+.monitor-parameter-row > span:first-child {
+  color: var(--phosphor-dim);
+}
+
+.monitor-parameter-detail {
+  display: grid;
+  gap: 6px;
+  padding: 8px 10px;
+  border-left: 1px solid rgba(215, 169, 46, 0.14);
+  background: rgba(5, 6, 5, 0.28);
+}
+
+.monitor-empty {
+  color: var(--phosphor-dim);
+  font-size: 14px;
+}

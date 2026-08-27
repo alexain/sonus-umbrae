@@ -123,6 +123,14 @@ let scopeFrame = 0;
 let savedEditorSelection: { start: number; end: number; direction: 'forward' | 'backward' | 'none' } | null = null;
 let audioAutoStartPending = true;
 let diagnosticLines = new Set<number>();
+const PANEL_STATE_KEY = 'sonus-umbrae.monitor-panels';
+const panelCollapsed = new Map<string, boolean>();
+const panelExplicitState = new Set<string>();
+let panelOrder: string[] = [];
+let draggedPanelId: string | null = null;
+let clockWasActive = false;
+
+loadPanelState();
 
 async function tryAutoStartAudio(): Promise<void> {
   if (!audioAutoStartPending) return;
@@ -130,6 +138,8 @@ async function tryAutoStartAudio(): Promise<void> {
     await audioEngine.start();
     if (audioEngine.snapshot().state !== 'running') throw new Error('audio start blocked');
     audioAutoStartPending = false;
+    if (!sourceText().trim()) runtime.evaluate('');
+    syncViews();
   } catch {
     notify('audio waiting for browser permission');
   }
@@ -232,149 +242,319 @@ function sourceText(): string {
   return editor.value.replace(/\r\n/g, '\n');
 }
 
-function evaluateLiveSource(): void {
+function evaluateLiveSource(): boolean {
   try {
     clearDiagnostic();
     const source = sourceText();
     if (!source.trim()) {
       runtime.evaluate('');
+      syncViews();
       notify('ok');
-      return;
+      return true;
     }
 
     const results = runtime.evaluate(source);
     const last = results.at(-1);
+    syncViews();
     notify(last?.message ?? 'ok');
+    return true;
   } catch (error) {
     if (error instanceof SonusEvaluationError) {
       showDiagnostics(error.diagnostics);
-      return;
+      syncViews();
+      return false;
     }
 
     notify(error instanceof Error ? error.message : 'evaluation failed');
+    syncViews();
+    return false;
   }
 }
 
 
 function syncViews(): void {
-  const signalViews = audioEngine.getViewSignals();
-  const parameterViews = runtime.getParameterViews();
-  const variableViews = runtime.getVariableViews();
-  const views = [
-    ...signalViews.map((view) => ({ signal: view.signal, kind: view.kind as string, parameter: null as ParameterViewState | null })),
-    ...parameterViews.map((view) => ({ signal: view.signal, kind: 'parameter', parameter: view })),
-  ];
-  const hasViews = views.length > 0 || variableViews.length > 0;
-  liveScreen.classList.toggle('with-views', hasViews);
-  viewPanel.classList.toggle('hidden', !hasViews);
+  const signalViews = new Map(audioEngine.getViewSignals().map((view) => [view.signal, view.kind]));
+  const explicitSignals = new Set(runtime.getExplicitSignalViews().map((view) => view.signal));
+  const parameterViews = new Map(runtime.getParameterViews().map((view) => [view.signal, view]));
+  const variables = runtime.getVariableViews();
+  const scheme = runtime.getSchemeModel();
+  const nodes = new Map(scheme.nodes.map((node) => [node.id, node]));
+  const panels: HTMLElement[] = [];
 
-  const existing = new Map(
-    [...viewStack.querySelectorAll<HTMLElement>('.view-card')].map((card) => [card.dataset.signal ?? '', card]),
-  );
+  panels.push(buildVariablesPanel(variables));
 
-  for (const view of views) {
-    const { signal, kind, parameter } = view;
-    let card = existing.get(signal);
-    if (card) {
-      card.dataset.kind = kind;
-      if (kind === 'parameter' && parameter) {
-        const value = card.querySelector<HTMLElement>('.parameter-value');
-        const base = card.querySelector<HTMLElement>('.parameter-base');
-        if (value) value.textContent = parameter.value;
-        if (base) base.textContent = parameter.base;
-      }
-      existing.delete(signal);
-      continue;
+  const main = nodes.get('Main');
+  panels.push(buildModuleMonitorPanel({
+    id: 'Main',
+    title: 'MAIN.OUT',
+    parameters: main?.parameters ?? [],
+    signals: signalViews.has('Main.out') ? [{ signal: 'Main.out', kind: 'signal', label: 'OUT' }] : [],
+    defaultCollapsed: false,
+  }));
+
+  const clock = nodes.get('Clock');
+  const clockBpm = audioEngine.getClockStatus().bpm;
+  const clockActive = clockBpm > 0;
+  if (clockActive && !clockWasActive && !panelExplicitState.has('Clock')) panelCollapsed.set('Clock', false);
+  if (!clockActive && !panelExplicitState.has('Clock')) panelCollapsed.set('Clock', true);
+  clockWasActive = clockActive;
+  panels.push(buildModuleMonitorPanel({
+    id: 'Clock',
+    title: 'CLOCK',
+    parameters: clock?.parameters ?? [],
+    signals: signalViews.has('Clock.out') ? [{ signal: 'Clock.out', kind: 'trigger', label: 'OUT' }] : [],
+    defaultCollapsed: !clockActive,
+  }));
+
+  for (const node of scheme.nodes) {
+    if (node.id === 'Main' || node.id === 'Clock') continue;
+    const isDerivedClock = / : CLOCK$/i.test(node.label);
+    const primarySignal = `${node.id}.out`;
+    const explicitPrimary = explicitSignals.has(primarySignal);
+    if (isDerivedClock && !explicitPrimary) continue;
+
+    const signals: Array<{ signal: string; kind: string; label: string }> = [];
+    const primaryKind = signalViews.get(primarySignal);
+    if (primaryKind && (!isDerivedClock || explicitPrimary)) {
+      signals.push({ signal: primarySignal, kind: primaryKind, label: 'OUT' });
     }
 
-    card = document.createElement('section');
-    card.className = 'view-card';
-    card.dataset.signal = signal;
-    card.dataset.kind = kind;
-
-    const title = document.createElement('div');
-    title.className = 'view-title';
-    title.textContent = `${signal.toUpperCase()} / ${kind.toUpperCase()}`;
-
-    if (kind === 'parameter' && parameter) {
-      const readout = document.createElement('div');
-      readout.className = 'parameter-readout';
-      readout.dataset.signal = signal;
-
-      const valueRow = document.createElement('div');
-      valueRow.className = 'parameter-row';
-      valueRow.innerHTML = `<span>VALUE</span><span class="parameter-value">${parameter.value}</span>`;
-
-      const baseRow = document.createElement('div');
-      baseRow.className = 'parameter-row parameter-base-row';
-      baseRow.innerHTML = `<span>BASE</span><span class="parameter-base">${parameter.base}</span>`;
-      readout.append(valueRow, baseRow);
-      card.append(title, readout);
-    } else {
-      const canvas = document.createElement('canvas');
-      canvas.className = `scope-canvas view-${kind}`;
-      canvas.dataset.signal = signal;
-      canvas.dataset.kind = kind;
-      canvas.setAttribute('aria-label', `${signal} ${kind} monitor`);
-      card.append(title, canvas);
+    for (const signal of explicitSignals) {
+      if (!signal.startsWith(`${node.id}.`) || signal === primarySignal) continue;
+      const kind = signalViews.get(signal);
+      if (!kind) continue;
+      const port = signal.slice(node.id.length + 1).toUpperCase();
+      signals.push({ signal, kind, label: port });
     }
-    viewStack.append(card);
+
+    const details = [...parameterViews.values()].filter((view) => view.signal.startsWith(`${node.id}.`));
+
+    // User-created modules exist in VARIABLES and SCHEME automatically, but a
+    // LIVE monitor panel is created only by an explicit .view(). Merely
+    // creating or changing a module must not consume monitor space.
+    if (signals.length === 0 && details.length === 0) continue;
+
+    panels.push(buildModuleMonitorPanel({
+      id: node.id,
+      title: node.label,
+      parameters: node.parameters,
+      signals,
+      parameterDetails: details,
+      defaultCollapsed: false,
+    }));
   }
 
-  const variablesKey = '__variables__';
-  if (variableViews.length > 0) {
-    let card = existing.get(variablesKey);
-    if (!card) {
-      card = document.createElement('section');
-      card.className = 'view-card variables-card';
-      card.dataset.signal = variablesKey;
+  viewStack.replaceChildren(...panels);
+  applySavedPanelOrder();
+  liveScreen.classList.add('with-views');
+  viewPanel.classList.remove('hidden');
 
-      const title = document.createElement('div');
-      title.className = 'view-title';
-      title.textContent = 'VARIABLES';
-
-      const readout = document.createElement('div');
-      readout.className = 'variables-readout';
-      card.append(title, readout);
-      viewStack.append(card);
-    }
-
-    const readout = card.querySelector<HTMLElement>('.variables-readout');
-    if (readout) {
-      const rows = new Map(
-        [...readout.querySelectorAll<HTMLElement>('.variable-row')].map((row) => [row.dataset.name ?? '', row]),
-      );
-
-      for (const variable of variableViews) {
-        let row = rows.get(variable.name);
-        if (!row) {
-          row = document.createElement('div');
-          row.className = 'variable-row';
-          row.dataset.name = variable.name;
-
-          const name = document.createElement('span');
-          name.className = 'variable-name';
-          name.textContent = variable.name;
-
-          const value = document.createElement('span');
-          value.className = 'variable-value';
-          row.append(name, value);
-          readout.append(row);
-        }
-        const value = row.querySelector<HTMLElement>('.variable-value');
-        if (value) value.textContent = variable.value;
-        rows.delete(variable.name);
-      }
-
-      for (const row of rows.values()) row.remove();
-    }
-    existing.delete(variablesKey);
-  }
-
-  for (const card of existing.values()) card.remove();
-
-  if (hasViews && scopeFrame === 0) scopeFrame = requestAnimationFrame(drawScopes);
+  if (scopeFrame === 0) scopeFrame = requestAnimationFrame(drawScopes);
   requestAnimationFrame(positionBlockCaret);
+}
+
+function buildVariablesPanel(variables: Array<{ name: string; value: string }>): HTMLElement {
+  const card = createMonitorCard('Variables', 'VARIABLES', false);
+  const body = card.querySelector<HTMLElement>('.monitor-body');
+  if (!body) return card;
+
+  const readout = document.createElement('div');
+  readout.className = 'variables-readout';
+  if (variables.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'monitor-empty';
+    empty.textContent = 'NO VARIABLES';
+    readout.append(empty);
+  } else {
+    for (const variable of variables) {
+      const row = document.createElement('div');
+      row.className = 'variable-row';
+      const name = document.createElement('span');
+      name.className = 'variable-name';
+      name.textContent = variable.name;
+      const value = document.createElement('span');
+      value.className = 'variable-value';
+      value.textContent = variable.value;
+      row.append(name, value);
+      readout.append(row);
+    }
+  }
+  body.append(readout);
+  return card;
+}
+
+function buildModuleMonitorPanel(options: {
+  id: string;
+  title: string;
+  parameters: Array<{ name: string; value: string; liveSignal?: string }>;
+  signals: Array<{ signal: string; kind: string; label: string }>;
+  parameterDetails?: ParameterViewState[];
+  defaultCollapsed: boolean;
+}): HTMLElement {
+  const card = createMonitorCard(options.id, options.title, options.defaultCollapsed);
+  const body = card.querySelector<HTMLElement>('.monitor-body');
+  if (!body) return card;
+
+  for (const signal of options.signals) {
+    const section = document.createElement('div');
+    section.className = 'monitor-signal';
+    const label = document.createElement('div');
+    label.className = 'monitor-section-label';
+    label.textContent = signal.label;
+    const canvas = document.createElement('canvas');
+    canvas.className = `scope-canvas view-${signal.kind}`;
+    canvas.dataset.signal = signal.signal;
+    canvas.dataset.kind = signal.kind;
+    canvas.setAttribute('aria-label', `${signal.signal} ${signal.kind} monitor`);
+    section.append(label, canvas);
+    body.append(section);
+  }
+
+  if (options.parameters.length > 0) {
+    const params = document.createElement('div');
+    params.className = 'monitor-parameters';
+    for (const parameter of options.parameters) {
+      const row = document.createElement('div');
+      row.className = 'monitor-parameter-row';
+      const name = document.createElement('span');
+      name.textContent = parameter.name;
+      const value = document.createElement('span');
+      value.textContent = parameter.value;
+      if (parameter.liveSignal) {
+        value.className = 'scheme-live-value';
+        value.dataset.liveSignal = parameter.liveSignal;
+      }
+      row.append(name, value);
+      params.append(row);
+    }
+    body.append(params);
+  }
+
+  for (const detail of options.parameterDetails ?? []) {
+    const detailBox = document.createElement('div');
+    detailBox.className = 'monitor-parameter-detail';
+    const label = document.createElement('div');
+    label.className = 'monitor-section-label';
+    label.textContent = detail.signal.split('.').at(-1)?.toUpperCase() ?? detail.label;
+    const value = document.createElement('div');
+    value.className = 'parameter-row';
+    value.innerHTML = `<span>VALUE</span><span>${detail.value}</span>`;
+    const base = document.createElement('div');
+    base.className = 'parameter-row parameter-base-row';
+    base.innerHTML = `<span>BASE</span><span>${detail.base}</span>`;
+    detailBox.append(label, value, base);
+    body.append(detailBox);
+  }
+
+  return card;
+}
+
+function createMonitorCard(id: string, titleText: string, defaultCollapsed: boolean): HTMLElement {
+  const card = document.createElement('section');
+  card.className = 'view-card monitor-card';
+  card.dataset.panelId = id;
+
+  const collapsed = panelCollapsed.get(id) ?? defaultCollapsed;
+  panelCollapsed.set(id, collapsed);
+  card.classList.toggle('collapsed', collapsed);
+
+  const header = document.createElement('div');
+  header.className = 'view-title monitor-title';
+  header.draggable = true;
+  header.title = 'Click to collapse; drag to reorder';
+
+  const disclosure = document.createElement('span');
+  disclosure.className = 'monitor-disclosure';
+  disclosure.textContent = collapsed ? '▸' : '▾';
+  const name = document.createElement('span');
+  name.className = 'monitor-title-text';
+  name.textContent = titleText;
+  header.append(disclosure, name);
+
+  const body = document.createElement('div');
+  body.className = 'monitor-body';
+
+  header.addEventListener('click', () => {
+    const next = !card.classList.contains('collapsed');
+    card.classList.toggle('collapsed', next);
+    disclosure.textContent = next ? '▸' : '▾';
+    panelCollapsed.set(id, next);
+    panelExplicitState.add(id);
+    savePanelState();
+    if (!next && scopeFrame === 0) scopeFrame = requestAnimationFrame(drawScopes);
+  });
+
+  header.addEventListener('dragstart', (event) => {
+    draggedPanelId = id;
+    card.classList.add('dragging');
+    event.dataTransfer?.setData('text/plain', id);
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+  });
+  header.addEventListener('dragend', () => {
+    draggedPanelId = null;
+    card.classList.remove('dragging');
+    savePanelOrderFromDom();
+  });
+
+  card.append(header, body);
+  return card;
+}
+
+viewStack.addEventListener('dragover', (event) => {
+  if (!draggedPanelId) return;
+  event.preventDefault();
+  const dragging = viewStack.querySelector<HTMLElement>(`[data-panel-id="${CSS.escape(draggedPanelId)}"]`);
+  if (!dragging) return;
+  const siblings = [...viewStack.querySelectorAll<HTMLElement>('.monitor-card:not(.dragging)')];
+  const next = siblings.find((card) => event.clientY < card.getBoundingClientRect().top + card.offsetHeight / 2);
+  if (next) viewStack.insertBefore(dragging, next); else viewStack.append(dragging);
+});
+
+viewStack.addEventListener('drop', (event) => {
+  if (!draggedPanelId) return;
+  event.preventDefault();
+  savePanelOrderFromDom();
+});
+
+function loadPanelState(): void {
+  try {
+    const raw = localStorage.getItem(PANEL_STATE_KEY);
+    if (!raw) return;
+    const state = JSON.parse(raw) as { collapsed?: Record<string, boolean>; order?: string[] };
+    for (const [id, collapsed] of Object.entries(state.collapsed ?? {})) {
+      panelCollapsed.set(id, Boolean(collapsed));
+      panelExplicitState.add(id);
+    }
+    panelOrder = Array.isArray(state.order) ? state.order.filter((id): id is string => typeof id === 'string') : [];
+  } catch {
+    // UI preferences are intentionally non-critical.
+  }
+}
+
+function savePanelState(): void {
+  try {
+    localStorage.setItem(PANEL_STATE_KEY, JSON.stringify({
+      collapsed: Object.fromEntries(panelCollapsed),
+      order: panelOrder,
+    }));
+  } catch {
+    // Ignore unavailable or disabled local storage.
+  }
+}
+
+function savePanelOrderFromDom(): void {
+  panelOrder = [...viewStack.querySelectorAll<HTMLElement>('.monitor-card')]
+    .map((card) => card.dataset.panelId)
+    .filter((id): id is string => Boolean(id));
+  savePanelState();
+}
+
+function applySavedPanelOrder(): void {
+  if (panelOrder.length === 0) return;
+  const rank = new Map(panelOrder.map((id, index) => [id, index]));
+  const cards = [...viewStack.querySelectorAll<HTMLElement>('.monitor-card')];
+  cards.sort((a, b) => (rank.get(a.dataset.panelId ?? '') ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.dataset.panelId ?? '') ?? Number.MAX_SAFE_INTEGER));
+  for (const card of cards) viewStack.append(card);
 }
 
 function drawScopes(): void {
@@ -1082,6 +1262,8 @@ async function runCommand(raw: string): Promise<void> {
     case 'new':
     case 'clear':
       setSourceText('');
+      runtime.evaluate('');
+      syncViews();
       leaveCommandMode();
       notify('source cleared');
       return;
@@ -1098,6 +1280,8 @@ async function runCommand(raw: string): Promise<void> {
       try {
         await audioEngine.start();
         audioAutoStartPending = false;
+    if (!sourceText().trim()) runtime.evaluate('');
+    syncViews();
         notify('audio engine running');
       } catch (error) {
         notify(error instanceof Error ? error.message : 'audio start failed');
@@ -1190,7 +1374,9 @@ async function loadSource(): Promise<void> {
     const file = input.files?.[0];
     if (!file) return;
     setSourceText(await file.text());
-    notify(`loaded ${file.name}`);
+    const applied = evaluateLiveSource();
+    if (applied) notify(`loaded ${file.name}`);
+    else notify(`loaded ${file.name} — runtime unchanged`);
   }, { once: true });
   input.click();
 }

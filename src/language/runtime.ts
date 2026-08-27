@@ -101,6 +101,7 @@ interface ClockDefinition {
 export class SonusRuntime {
   private parameterViews: ParameterViewState[] = [];
   private variableViews: VariableViewState[] = [];
+  private explicitSignalViews: Array<{ signal: string; kind: SignalKind }> = [];
 
   private scheme: SchemeModel = {
     nodes: [{ id: 'Main', label: 'MAIN', kind: 'module', parameters: [] }],
@@ -115,6 +116,10 @@ export class SonusRuntime {
 
   getVariableViews(): VariableViewState[] {
     return this.variableViews.map((view) => ({ ...view }));
+  }
+
+  getExplicitSignalViews(): Array<{ signal: string; kind: SignalKind }> {
+    return this.explicitSignalViews.map((view) => ({ ...view }));
   }
 
   getSchemeModel(): SchemeModel {
@@ -653,6 +658,16 @@ export class SonusRuntime {
 
     if (diagnostics.length > 0) throw new SonusEvaluationError(diagnostics);
 
+    // VARIABLES is the runtime symbol table for user-created names. Scalars
+    // show their current value, while object references show their object type.
+    // Built-in singletons such as Main and Clock are intentionally omitted.
+    variableViews.length = 0;
+    for (const [name] of voices) variableViews.push({ name, value: 'Voice' });
+    for (const [name] of clockSources) variableViews.push({ name, value: 'Clock' });
+    for (const [name] of oscillators) variableViews.push({ name, value: 'Osc' });
+    for (const [name] of gains) variableViews.push({ name, value: 'Gain' });
+    for (const [name, value] of variables) variableViews.push({ name, value: formatScalar(value) });
+
     // Parameter views are declarative like the rest of the source. Resolve their
     // values only after every parameter statement has been applied, so the view
     // reflects the final document state regardless of where .view() appears.
@@ -687,8 +702,7 @@ export class SonusRuntime {
     }
 
     const embeddedViews = new Map<string, SchemeEmbeddedView[]>();
-    for (const [signal, signalKind] of views) {
-      if (signalKind === 'parameter') continue;
+    const addEmbeddedView = (signal: string, signalKind: SignalKind): void => {
       const owner = signal === 'Main.out'
         ? 'Main'
         : signal === 'Clock.out'
@@ -696,8 +710,20 @@ export class SonusRuntime {
           : signal.replace(/\.(out|aux)$/, '');
       const port = signal.endsWith('.aux') ? 'AUX' : 'OUT';
       const ownerViews = embeddedViews.get(owner) ?? [];
-      ownerViews.push({ signal, signalKind, port });
-      embeddedViews.set(owner, ownerViews);
+      if (!ownerViews.some((view) => view.signal === signal)) {
+        ownerViews.push({ signal, signalKind, port });
+        embeddedViews.set(owner, ownerViews);
+      }
+    };
+
+    // Keep Scheme compact: only structural/global monitors are automatic.
+    // Module outputs, secondary ports and derived clocks require .view().
+    addEmbeddedView('Main.out', 'signal');
+    addEmbeddedView('Clock.out', 'trigger');
+
+    for (const [signal, signalKind] of views) {
+      if (signalKind === 'parameter') continue;
+      addEmbeddedView(signal, signalKind as SignalKind);
     }
 
     const schemeNodes: SchemeNode[] = [
@@ -781,10 +807,22 @@ export class SonusRuntime {
       views: [...views.entries()]
         .filter(([, kind]) => kind !== 'parameter')
         .map(([signal, kind]) => ({ signal, kind: kind as SignalKind })),
+      monitorViews: (() => {
+        const monitors = new Map<string, SignalKind>();
+        monitors.set('Main.out', 'signal');
+        monitors.set('Clock.out', 'trigger');
+        for (const [signal, kind] of views) {
+          if (kind !== 'parameter') monitors.set(signal, kind as SignalKind);
+        }
+        return [...monitors].map(([signal, kind]) => ({ signal, kind }));
+      })(),
     };
 
     this.parameterViews = [...parameterViews.values()];
     this.variableViews = variableViews;
+    this.explicitSignalViews = [...views.entries()]
+      .filter(([, kind]) => kind !== 'parameter')
+      .map(([signal, kind]) => ({ signal, kind: kind as SignalKind }));
     this.audio.applyProgram(program);
     return results.length > 0 ? results : [{ message: 'ok' }];
   }

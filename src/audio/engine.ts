@@ -38,6 +38,10 @@ export interface AudioProgram {
     signal: string;
     kind: SignalKind;
   }>;
+  monitorViews: Array<{
+    signal: string;
+    kind: SignalKind;
+  }>;
 }
 
 export type AudioEngineListener = (snapshot: AudioEngineSnapshot) => void;
@@ -170,7 +174,7 @@ export class AudioEngine {
     const desiredVoices = new Map(program.voices.map((definition) => [definition.name, definition]));
     const desiredGains = new Map(program.gains.map((definition) => [definition.name, definition]));
     const desiredRoutes = new Map(program.routes.map((route) => [`${route.source}->${route.destination}`, route]));
-    const desiredViews = new Map(program.views.map((view) => [view.signal, view]));
+    const desiredViews = new Map(program.monitorViews.map((view) => [view.signal, view]));
 
     for (const signal of this.views.keys()) {
       if (!desiredViews.has(signal)) this.removeView(signal);
@@ -218,7 +222,7 @@ export class AudioEngine {
       this.connect(route.source, route.destination, route.amount, false);
     }
 
-    for (const view of program.views) this.createView(view.signal, view.kind);
+    for (const view of program.monitorViews) this.createView(view.signal, view.kind);
 
     this.emit();
   }
