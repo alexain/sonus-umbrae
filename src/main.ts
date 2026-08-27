@@ -51,6 +51,8 @@ app.innerHTML = `
           <span>:STOP</span><span>SUSPEND AUDIO ENGINE</span>
           <span>:TEST 440</span><span>PLAY DIAGNOSTIC SINE TONE</span>
           <span>:TEST STOP</span><span>STOP DIAGNOSTIC TONE</span>
+          <span>:CLOCK START</span><span>START MASTER CLOCK TRANSPORT</span>
+          <span>:CLOCK STOP</span><span>STOP MASTER CLOCK TRANSPORT</span>
           <span>:PANIC</span><span>STOP CURRENT AUDIO IMMEDIATELY</span>
           <span>ENTER</span><span>EVALUATE SOURCE AND INSERT NEW LINE</span>
           <span>SHIFT+ENTER</span><span>INSERT NEW LINE WITHOUT EVALUATING</span>
@@ -105,6 +107,7 @@ const viewStack = must<HTMLElement>('view-stack');
 const diagnostic = must<HTMLElement>('diagnostic');
 const liveDot = must<HTMLElement>('live-dot');
 const dspStatus = must<HTMLElement>('dsp-status');
+const clockStatus = must<HTMLElement>('clock-status');
 
 const audioEngine = new AudioEngine();
 const runtime = new SonusRuntime(audioEngine);
@@ -139,6 +142,9 @@ audioEngine.subscribe((snapshot) => {
   liveDot.setAttribute('aria-label', isRunning ? 'engine running' : 'engine stopped');
   dspStatus.textContent = snapshot.sampleRate ? `${Math.round(snapshot.sampleRate / 1000)}K` : '--';
   dspStatus.classList.toggle('disabled', snapshot.sampleRate === null);
+  const clock = audioEngine.getClockStatus();
+  clockStatus.textContent = clock.bpm > 0 ? `${clock.bpm.toFixed(clock.bpm % 1 ? 1 : 0)}${clock.running ? '' : ' ○'}` : '--.-';
+  clockStatus.classList.toggle('disabled', clock.bpm <= 0);
   syncViews();
 });
 
@@ -246,8 +252,8 @@ function evaluateLiveSource(): void {
 
 
 function syncViews(): void {
-  const signals = audioEngine.getViewSignals();
-  const hasViews = signals.length > 0;
+  const views = audioEngine.getViewSignals();
+  const hasViews = views.length > 0;
   liveScreen.classList.toggle('with-views', hasViews);
   viewPanel.classList.toggle('hidden', !hasViews);
 
@@ -255,9 +261,11 @@ function syncViews(): void {
     [...viewStack.querySelectorAll<HTMLElement>('.view-card')].map((card) => [card.dataset.signal ?? '', card]),
   );
 
-  for (const signal of signals) {
+  for (const view of views) {
+    const { signal, kind } = view;
     let card = existing.get(signal);
     if (card) {
+      card.dataset.kind = kind;
       existing.delete(signal);
       continue;
     }
@@ -265,15 +273,17 @@ function syncViews(): void {
     card = document.createElement('section');
     card.className = 'view-card';
     card.dataset.signal = signal;
+    card.dataset.kind = kind;
 
     const title = document.createElement('div');
     title.className = 'view-title';
-    title.textContent = signal.toUpperCase();
+    title.textContent = `${signal.toUpperCase()} / ${kind.toUpperCase()}`;
 
     const canvas = document.createElement('canvas');
-    canvas.className = 'scope-canvas';
+    canvas.className = `scope-canvas view-${kind}`;
     canvas.dataset.signal = signal;
-    canvas.setAttribute('aria-label', `${signal} oscilloscope`);
+    canvas.dataset.kind = kind;
+    canvas.setAttribute('aria-label', `${signal} ${kind} monitor`);
 
     card.append(title, canvas);
     viewStack.append(card);
@@ -302,29 +312,97 @@ function drawScopes(): void {
       canvas.height = height;
     }
 
-    const data = new Float32Array(512);
-    if (!audioEngine.readOscilloscope(signal, data)) continue;
     const ctx = canvas.getContext('2d');
     if (!ctx) continue;
 
     ctx.clearRect(0, 0, width, height);
     ctx.strokeStyle = phosphor;
+    ctx.fillStyle = phosphor;
     ctx.lineWidth = Math.max(1, window.devicePixelRatio);
     ctx.shadowColor = phosphor;
     ctx.shadowBlur = 3 * window.devicePixelRatio;
-    ctx.beginPath();
-    for (let i = 0; i < data.length; i += 1) {
-      const x = (i / (data.length - 1)) * width;
-      const y = height * 0.5 - data[i] * height * 0.42;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
+    const kind = canvas.dataset.kind ?? 'signal';
+    if (kind === 'trigger') {
+      drawTriggerPhase(ctx, width, height, signal, phosphor);
+      continue;
     }
-    ctx.stroke();
+
+    const data = new Float32Array(512);
+    if (!audioEngine.readOscilloscope(signal, data)) continue;
+    if (kind === 'gate') {
+      ctx.beginPath();
+      for (let i = 0; i < data.length; i += 1) {
+        const x = (i / (data.length - 1)) * width;
+        const y = data[i] > 0.3 ? height * 0.25 : height * 0.72;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    } else {
+      ctx.beginPath();
+      for (let i = 0; i < data.length; i += 1) {
+        const x = (i / (data.length - 1)) * width;
+        const y = height * 0.5 - data[i] * height * 0.42;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
   }
 
   scopeFrame = requestAnimationFrame(drawScopes);
 }
 
+
+
+function drawTriggerPhase(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  signal: string,
+  phosphor: string,
+): void {
+  const ratio = window.devicePixelRatio;
+  const events = audioEngine.getTriggerViewEvents(signal);
+  const left = Math.max(14 * ratio, width * 0.06);
+  const right = width - left;
+  const span = Math.max(1, right - left);
+  const y = height * 0.56;
+
+  ctx.save();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--phosphor-dim').trim() || phosphor;
+  ctx.globalAlpha = 0.32;
+  ctx.lineWidth = Math.max(1, ratio);
+  ctx.beginPath();
+  ctx.moveTo(left, y);
+  ctx.lineTo(right, y);
+  ctx.stroke();
+
+  for (const event of events) {
+    const x = left + span * event.progress;
+    const radius = Math.max(3.0 * ratio, height * 0.05);
+
+    // Each trigger is an independent particle. Its speed is frozen at the
+    // moment it is emitted, so later clock changes do not affect particles
+    // already travelling across the monitor.
+    for (let trail = 5; trail >= 1; trail -= 1) {
+      const trailX = Math.max(left, x - trail * 4.5 * ratio);
+      ctx.globalAlpha = 0.035 * (6 - trail);
+      ctx.fillStyle = phosphor;
+      ctx.beginPath();
+      ctx.arc(trailX, y, radius * (0.32 + (6 - trail) * 0.055), 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = phosphor;
+    ctx.shadowColor = phosphor;
+    ctx.shadowBlur = 8 * ratio;
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
 
 function renderScheme(): void {
   const model = runtime.getSchemeModel();
@@ -370,8 +448,9 @@ function buildSchemeNode(node: SchemeNode): HTMLElement {
 
   if (node.kind === 'view' && node.signal) {
     const canvas = document.createElement('canvas');
-    canvas.className = 'scope-canvas scheme-scope';
+    canvas.className = `scope-canvas scheme-scope view-${node.signalKind ?? 'signal'}`;
     canvas.dataset.signal = node.signal;
+    canvas.dataset.kind = node.signalKind ?? 'signal';
     canvas.setAttribute('aria-label', `${node.signal} oscilloscope`);
     element.append(canvas);
   }
@@ -500,7 +579,7 @@ function drawSchemeConnections(connections: SchemeConnection[], elements: Map<st
 
     const labelParts: string[] = [];
     if (connection.amount !== undefined && connection.amount !== 100) labelParts.push(`${formatSchemeNumber(connection.amount)}%`);
-    if (connection.type === 'audio' && (connection.sourcePort || connection.targetPort)) {
+    if (connection.type !== 'view' && (connection.sourcePort || connection.targetPort)) {
       labelParts.push(`${connection.sourcePort ?? ''}${connection.sourcePort && connection.targetPort ? ' → ' : ''}${connection.targetPort ?? ''}`);
     }
     if (labelParts.length > 0) {
@@ -780,6 +859,14 @@ async function runCommand(raw: string): Promise<void> {
       } catch (error) {
         notify(error instanceof RangeError ? error.message : 'test tone failed');
       }
+      return;
+    }
+    case 'clock': {
+      const action = args[0]?.toLowerCase();
+      if (action === 'start') { audioEngine.setClockTransport(true); notify('clock started'); }
+      else if (action === 'stop') { audioEngine.setClockTransport(false); notify('clock stopped'); }
+      else notify('usage: :clock start | :clock stop');
+      leaveCommandMode();
       return;
     }
     case 'panic':

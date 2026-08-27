@@ -1,4 +1,4 @@
-import { AudioEngine, type AudioProgram } from '../audio/engine';
+import { AudioEngine, type AudioProgram, type SignalKind } from '../audio/engine';
 
 export interface EvaluationResult {
   message: string;
@@ -20,6 +20,7 @@ export interface SchemeNode {
   kind: 'module' | 'view';
   parameters: SchemeParameter[];
   signal?: string;
+  signalKind?: SignalKind;
 }
 
 export interface SchemeConnection {
@@ -27,8 +28,9 @@ export interface SchemeConnection {
   target: string;
   sourcePort?: string;
   targetPort?: string;
-  type: 'audio' | 'view';
+  type: SignalKind | 'view';
   amount?: number;
+  signalKind?: SignalKind;
 }
 
 export interface SchemeModel {
@@ -66,6 +68,13 @@ interface RouteDefinition {
   source: string;
   target: string;
   amount: number;
+  kind: SignalKind;
+}
+
+interface ClockDefinition {
+  rate: number;
+  rateLabel: string;
+  parameters: Map<string, string>;
 }
 
 export class SonusRuntime {
@@ -91,7 +100,9 @@ export class SonusRuntime {
     const gains = new Map<string, GainDefinition>();
     const voices = new Map<string, VoiceDefinition>();
     const routes = new Map<string, RouteDefinition>();
-    const views = new Set<string>();
+    const clockSources = new Map<string, ClockDefinition>();
+    let clockBpm = 0;
+    const views = new Map<string, SignalKind>();
     const results: EvaluationResult[] = [];
     const diagnostics: SonusDiagnostic[] = [];
 
@@ -103,6 +114,23 @@ export class SonusRuntime {
     // Pass 1: declarations. Objects are collected before the remaining statements
     // so the source remains declarative rather than execution-order dependent.
     for (const { source: line, line: lineNumber } of lines) {
+      const clockDeclaration = parseClockDeclaration(line);
+      if (clockDeclaration) {
+        const { name, rate, label, calls } = clockDeclaration;
+        if (name === 'Main' || name === 'Clock' || objectExists(name, oscillators, gains, voices) || clockSources.has(name)) {
+          diagnostics.push({ line: lineNumber, message: `reserved or duplicate object: ${name}` });
+          continue;
+        }
+        const definition: ClockDefinition = { rate, rateLabel: label, parameters: new Map([['RATE', label]]) };
+        clockSources.set(name, definition);
+        for (const call of calls) {
+          if (call.name === 'view' && call.argument.length === 0) views.set(`${name}.out`, 'trigger');
+          else diagnostics.push({ line: lineNumber, message: `unknown clock method: ${call.name}` });
+        }
+        results.push({ message: `${name} = Clock ${label}` });
+        continue;
+      }
+
       const oscillatorDeclaration = parseOscillatorDeclaration(line);
       if (oscillatorDeclaration) {
         const { name, calls } = oscillatorDeclaration;
@@ -157,9 +185,19 @@ export class SonusRuntime {
     // Pass 2: parameters, views and routes. Invalid lines do not stop validation
     // of later lines. The audio program is applied only if the whole document is valid.
     for (const { source: line, line: lineNumber } of lines) {
-      if (parseOscillatorDeclaration(line) || parseGainDeclaration(line) || parseVoiceDeclaration(line)) continue;
+      if (parseClockDeclaration(line) || parseOscillatorDeclaration(line) || parseGainDeclaration(line) || parseVoiceDeclaration(line)) continue;
 
-      let match = line.match(/^([A-Za-z_]\w*)\.freq\(\s*(-?\d+(?:\.\d+)?)\s*\)\s*$/);
+      let match = line.match(/^Clock\.bpm\(\s*(-?\d+(?:\.\d+)?)\s*\)\s*$/);
+      if (match) {
+        const bpm = Number(match[1]);
+        if (!Number.isFinite(bpm) || bpm < 0 || bpm > 300) diagnostics.push({ line: lineNumber, message: 'Clock.bpm expects 0..300' });
+        else { clockBpm = bpm; results.push({ message: `Clock ${formatNumber(bpm)} BPM` }); }
+        continue;
+      }
+
+      if (/^Clock(?:\.out)?\.view\(\s*\)\s*$/.test(line)) { views.set('Clock.out', 'trigger'); results.push({ message: 'Clock.out view' }); continue; }
+
+      match = line.match(/^([A-Za-z_]\w*)\.freq\(\s*(-?\d+(?:\.\d+)?)\s*\)\s*$/);
       if (match) {
         const [, name, rawFrequency] = match;
         const oscillator = oscillators.get(name);
@@ -273,10 +311,13 @@ export class SonusRuntime {
       }
 
       if (/^Main(?:\.out)?\.view\(\s*\)\s*$/.test(line)) {
-        views.add('Main.out');
+        views.set('Main.out', 'signal');
         results.push({ message: 'Main.out view' });
         continue;
       }
+
+      match = line.match(/^([A-Za-z_]\w*)\.view\(\s*\)\s*$/);
+      if (match && clockSources.has(match[1])) { views.set(`${match[1]}.out`, 'trigger'); results.push({ message: `${match[1]}.out view` }); continue; }
 
       match = line.match(/^([A-Za-z_]\w*)\.aux\.view\(\s*\)\s*$/);
       if (match) {
@@ -285,7 +326,7 @@ export class SonusRuntime {
           diagnostics.push({ line: lineNumber, message: `aux output is only available on Voice objects: ${name}` });
           continue;
         }
-        views.add(`${name}.aux`);
+        views.set(`${name}.aux`, 'signal');
         results.push({ message: `${name}.aux view` });
         continue;
       }
@@ -298,15 +339,15 @@ export class SonusRuntime {
           continue;
         }
 
-        views.add(`${name}.out`);
+        views.set(`${name}.out`, 'signal');
         results.push({ message: `${name}.out view` });
         continue;
       }
 
-      match = line.match(/^([A-Za-z_]\w*)\.(out|aux)(?:\(\s*(-?\d+(?:\.\d+)?)\s*\))?\s*->\s*([A-Za-z_]\w*)\.in\s*$/);
+      match = line.match(/^([A-Za-z_]\w*)\.(out|aux)(?:\(\s*(-?\d+(?:\.\d+)?)\s*\))?\s*->\s*([A-Za-z_]\w*)\.(in|trig)\s*$/);
       if (match) {
-        const [, sourceName, sourcePort, rawAmount, targetName] = match;
-        if (!objectExists(sourceName, oscillators, gains, voices)) {
+        const [, sourceName, sourcePort, rawAmount, targetName, targetPort] = match;
+        if (sourceName !== 'Clock' && !clockSources.has(sourceName) && !objectExists(sourceName, oscillators, gains, voices)) {
           diagnostics.push({ line: lineNumber, message: `unknown source object: ${sourceName}` });
           continue;
         }
@@ -314,7 +355,9 @@ export class SonusRuntime {
           diagnostics.push({ line: lineNumber, message: `aux output is only available on Voice objects: ${sourceName}` });
           continue;
         }
-        if (targetName !== 'Main' && !gains.has(targetName)) {
+        if (targetPort === 'trig') {
+          if (!voices.has(targetName)) { diagnostics.push({ line: lineNumber, message: `trigger input is only available on Voice objects: ${targetName}` }); continue; }
+        } else if (targetName !== 'Main' && !gains.has(targetName)) {
           diagnostics.push({ line: lineNumber, message: `unknown or non-input object: ${targetName}` });
           continue;
         }
@@ -327,8 +370,9 @@ export class SonusRuntime {
         }
 
         const source = `${sourceName}.${sourcePort}`;
-        const target = `${targetName}.in`;
-        routes.set(`${source}->${target}`, { source, target, amount });
+        const target = `${targetName}.${targetPort}`;
+        const kind: SignalKind = sourceName === 'Clock' || clockSources.has(sourceName) ? 'trigger' : 'signal';
+        routes.set(`${source}->${target}`, { source, target, amount, kind });
         results.push({ message: `${source} -> ${target} @ ${formatNumber(amount)}%` });
         continue;
       }
@@ -339,6 +383,8 @@ export class SonusRuntime {
     if (diagnostics.length > 0) throw new SonusEvaluationError(diagnostics);
 
     const schemeNodes: SchemeNode[] = [
+      { id: 'Clock', label: 'CLOCK', kind: 'module' as const, parameters: clockBpm > 0 ? [{ name: 'BPM', value: formatNumber(clockBpm) }] : [] },
+      ...[...clockSources.entries()].map(([name, definition]) => ({ id: name, label: `${name.toUpperCase()} : CLOCK`, kind: 'module' as const, parameters: [...definition.parameters.entries()].map(([parameterName, value]) => ({ name: parameterName, value })) })),
       ...[...oscillators.entries()].map(([name, definition]) => ({
         id: name,
         label: `${name.toUpperCase()} : OSC`,
@@ -367,31 +413,33 @@ export class SonusRuntime {
         })),
       })),
       { id: 'Main', label: 'MAIN', kind: 'module' as const, parameters: [] },
-      ...[...views].map((signal) => ({
+      ...[...views.entries()].map(([signal, signalKind]) => ({
         id: `view:${signal}`,
         label: `VIEW : ${signal.toUpperCase()}`,
         kind: 'view' as const,
         parameters: [],
         signal,
+        signalKind,
       })),
     ];
 
     const schemeConnections: SchemeConnection[] = [
       ...[...routes.values()].map((route) => ({
         source: route.source.replace(/\.(out|aux)$/, ''),
-        target: route.target === 'Main.in' ? 'Main' : route.target.replace(/\.in$/, ''),
+        target: route.target.startsWith('Main.') ? 'Main' : route.target.replace(/\.(in|trig)$/, ''),
         sourcePort: route.source.endsWith('.aux') ? 'AUX' : 'OUT',
-        targetPort: 'IN',
-        type: 'audio' as const,
+        targetPort: route.target.endsWith('.trig') ? 'TRIG' : 'IN',
+        type: route.kind,
         amount: route.amount,
       })),
-      ...[...views].map((signal) => {
-        const source = signal === 'Main.out' ? 'Main' : signal.replace(/\.(out|aux)$/, '');
+      ...[...views.entries()].map(([signal, signalKind]) => {
+        const source = signal === 'Main.out' ? 'Main' : signal === 'Clock.out' ? 'Clock' : signal.replace(/\.(out|aux)$/, '');
         return {
           source,
           target: `view:${signal}`,
           sourcePort: signal.endsWith('.aux') ? 'AUX' : 'OUT',
           type: 'view' as const,
+          signalKind,
         };
       }),
     ];
@@ -399,6 +447,8 @@ export class SonusRuntime {
     this.scheme = { nodes: schemeNodes, connections: schemeConnections };
 
     const program: AudioProgram = {
+      clock: { bpm: clockBpm },
+      clockSources: [{ name: 'Clock', rate: 1 }, ...[...clockSources.entries()].map(([name, definition]) => ({ name, rate: definition.rate }))],
       oscillators: [...oscillators.entries()].map(([name, definition]) => ({
         name,
         frequency: definition.frequency,
@@ -420,7 +470,7 @@ export class SonusRuntime {
         destination: route.target,
         amount: route.amount,
       })),
-      views: [...views].map((signal) => ({ signal })),
+      views: [...views.entries()].map(([signal, kind]) => ({ signal, kind })),
     };
 
     this.audio.applyProgram(program);
@@ -436,6 +486,30 @@ interface ChainedCall {
 interface ObjectDeclaration {
   name: string;
   calls: ChainedCall[];
+}
+
+
+function parseClockDeclaration(line: string): (ObjectDeclaration & { rate: number; label: string }) | null {
+  const match = line.match(/^([A-Za-z_]\w*)\s*=\s*Clock\.rate\(\s*["']([^"']+)["']\s*\)(.*)$/);
+  if (!match) return null;
+  const parsed = parseClockRate(match[2]);
+  if (!parsed) return null;
+  const tail = match[3].trim();
+  const calls: ChainedCall[] = [];
+  if (tail) {
+    const callPattern = /\.([A-Za-z_]\w*)\(\s*([^()]*)\s*\)/g;
+    let consumed = ''; let m: RegExpExecArray | null;
+    while ((m = callPattern.exec(tail)) !== null) { if (m.index !== consumed.length) return null; consumed += m[0]; calls.push({ name: m[1], argument: m[2].trim() }); }
+    if (consumed !== tail) return null;
+  }
+  return { name: match[1], calls, rate: parsed.rate, label: parsed.label };
+}
+
+function parseClockRate(value: string): { rate: number; label: string } | null {
+  const match = value.trim().match(/^([/*])(\d+(?:\.\d+)?)$/);
+  if (!match) return null;
+  const n = Number(match[2]); if (!Number.isFinite(n) || n <= 0) return null;
+  return { rate: match[1] === '/' ? 1 / n : n, label: `${match[1]}${formatNumber(n)}` };
 }
 
 function parseOscillatorDeclaration(line: string): ObjectDeclaration | null {
@@ -479,8 +553,8 @@ function reservedOrDuplicate(
   diagnostics: SonusDiagnostic[],
   lineNumber: number,
 ): boolean {
-  if (name === 'Main') {
-    diagnostics.push({ line: lineNumber, message: 'Main is a built-in singleton and cannot be assigned' });
+  if (name === 'Main' || name === 'Clock') {
+    diagnostics.push({ line: lineNumber, message: `${name} is a built-in singleton and cannot be assigned` });
     return true;
   }
   if (objectExists(name, oscillators, gains, voices)) {
@@ -503,7 +577,7 @@ function applyOscillatorCall(
   objectName: string,
   oscillator: OscillatorDefinition,
   call: ChainedCall,
-  views: Set<string>,
+  views: Map<string, SignalKind>,
 ): string | null {
   switch (call.name) {
     case 'freq': {
@@ -528,7 +602,7 @@ function applyOscillatorCall(
     }
     case 'view':
       if (call.argument.length > 0) return 'view does not accept parameters yet';
-      views.add(`${objectName}.out`);
+      views.set(`${objectName}.out`, 'signal');
       return null;
     default:
       return `unknown osc method: ${call.name}`;
@@ -539,7 +613,7 @@ function applyGainCall(
   objectName: string,
   gain: GainDefinition,
   call: ChainedCall,
-  views: Set<string>,
+  views: Map<string, SignalKind>,
 ): string | null {
   switch (call.name) {
     case 'level': {
@@ -553,7 +627,7 @@ function applyGainCall(
     }
     case 'view':
       if (call.argument.length > 0) return 'view does not accept parameters yet';
-      views.add(`${objectName}.out`);
+      views.set(`${objectName}.out`, 'signal');
       return null;
     default:
       return `unknown gain method: ${call.name}`;
@@ -570,7 +644,7 @@ function applyVoiceCall(
   objectName: string,
   voice: VoiceDefinition,
   call: ChainedCall,
-  views: Set<string>,
+  views: Map<string, SignalKind>,
 ): string | null {
   switch (call.name) {
     case 'model': {
@@ -602,7 +676,7 @@ function applyVoiceCall(
     }
     case 'view':
       if (call.argument.length > 0) return 'view does not accept parameters yet';
-      views.add(`${objectName}.out`);
+      views.set(`${objectName}.out`, 'signal');
       return null;
     default:
       return `unknown Voice method: ${call.name}`;
@@ -624,7 +698,7 @@ function formatVoiceModel(model: number): string {
 }
 
 function percentError(value: number, name: string): string | null {
-  return !Number.isFinite(value) || value < 0 || value > 100
+  return !Number.isFinite(value) || value < -100 || value > 100
     ? `${name} must be between 0 and 100`
     : null;
 }
@@ -652,14 +726,14 @@ function noteError(value: number): string | null {
 }
 
 function gainLevelError(value: number): string | null {
-  return !Number.isFinite(value) || value < 0 || value > 100
+  return !Number.isFinite(value) || value < -100 || value > 100
     ? 'gain level must be between 0 and 100'
     : null;
 }
 
 function routeAmountError(value: number): string | null {
-  return !Number.isFinite(value) || value < 0 || value > 100
-    ? 'route amount must be between 0 and 100'
+  return !Number.isFinite(value) || value < -100 || value > 100
+    ? 'route amount must be between -100 and 100'
     : null;
 }
 

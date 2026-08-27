@@ -18,6 +18,7 @@ struct VoiceState {
   char shared_buffer[16384];
   float out[kRenderCapacity];
   float aux[kRenderCapacity];
+  float trigger = 0.0f;
 
   VoiceState() {
     stmlib::BufferAllocator allocator(shared_buffer, sizeof(shared_buffer));
@@ -84,6 +85,12 @@ void su_voice_set_morph(VoiceState* state, float value) {
   if (state) state->patch.morph = Clamp01(value);
 }
 
+void su_voice_set_trigger(VoiceState* state, float value, int patched) {
+  if (!state) return;
+  state->trigger = value;
+  state->modulations.trigger_patched = patched != 0;
+}
+
 void su_voice_process(VoiceState* state, int size) {
   if (!state) return;
   size = std::max(0, std::min(size, kRenderCapacity));
@@ -92,6 +99,7 @@ void su_voice_process(VoiceState* state, int size) {
   while (rendered < size) {
     const int block_size = std::min<int>(plaits::kBlockSize, size - rendered);
     plaits::Voice::Frame frames[plaits::kBlockSize];
+    state->modulations.trigger = state->trigger;
     state->voice.Render(state->patch, state->modulations, frames, block_size);
 
     for (int i = 0; i < block_size; ++i) {

@@ -462,6 +462,21 @@ button, input, textarea { font: inherit; }
   filter: drop-shadow(0 0 2px rgba(215, 169, 46, 0.16));
 }
 
+.scheme-edge-signal {
+  stroke: var(--phosphor);
+}
+
+.scheme-edge-gate {
+  stroke: var(--phosphor);
+  stroke-width: 1.4;
+  stroke-dasharray: 8 5;
+}
+
+.scheme-edge-trigger {
+  stroke: var(--phosphor-hot);
+  stroke-dasharray: 2 6;
+}
+
 .scheme-edge-view {
   stroke: var(--phosphor-dim);
   stroke-dasharray: 2 5;
@@ -501,3 +516,6 @@ button, input, textarea { font: inherit; }
   .scheme-view-node { min-width: 180px; }
   .scheme-scope { width: 180px; height: 64px; }
 }
+
+.view-trigger { opacity: 0.95; }
+.view-gate { opacity: 0.95; }

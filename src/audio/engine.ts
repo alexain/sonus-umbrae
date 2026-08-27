@@ -8,7 +8,11 @@ export interface AudioEngineSnapshot {
   routeCount: number;
 }
 
+export type SignalKind = 'signal' | 'gate' | 'trigger';
+
 export interface AudioProgram {
+  clock: { bpm: number };
+  clockSources: Array<{ name: string; rate: number }>;
   oscillators: Array<{
     name: string;
     frequency: number;
@@ -32,6 +36,7 @@ export interface AudioProgram {
   }>;
   views: Array<{
     signal: string;
+    kind: SignalKind;
   }>;
 }
 
@@ -62,6 +67,29 @@ interface SignalSource {
   output: number;
 }
 
+interface SignalDestination {
+  node: AudioNode;
+  input: number;
+}
+
+interface TriggerVisualEvent {
+  emittedAt: number;
+  travelDuration: number;
+}
+
+interface ClockSource {
+  node: AudioWorkletNode;
+  rate: number;
+  lastTriggerTime: number | null;
+  triggerCount: number;
+  visualEvents: TriggerVisualEvent[];
+}
+
+interface ViewTap {
+  analyser: AnalyserNode;
+  kind: SignalKind;
+}
+
 interface AudioRoute {
   gain: GainNode;
   amount: number;
@@ -77,11 +105,15 @@ export class AudioEngine {
   private oscillators = new Map<string, OscillatorVoice>();
   private gains = new Map<string, GainVoice>();
   private voices = new Map<string, MacroVoice>();
+  private clocks = new Map<string, ClockSource>();
+  private masterClockBpm = 0;
+  private clockTransportRunning = true;
   private voiceWasmBytes: ArrayBuffer | null = null;
   private voiceWorkletLoaded = false;
+  private clockWorkletLoaded = false;
   private pendingProgram: AudioProgram | null = null;
   private routes = new Map<string, AudioRoute>();
-  private views = new Map<string, AnalyserNode>();
+  private views = new Map<string, ViewTap>();
   private listeners = new Set<AudioEngineListener>();
 
   snapshot(): AudioEngineSnapshot {
@@ -93,7 +125,7 @@ export class AudioEngine {
           : 'suspended',
       sampleRate: this.context?.sampleRate ?? null,
       testFrequency: this.testOscillator?.frequency.value ?? null,
-      objectCount: this.oscillators.size + this.gains.size + this.voices.size,
+      objectCount: this.oscillators.size + this.gains.size + this.voices.size + this.clocks.size,
       routeCount: this.routes.size,
     };
   }
@@ -107,6 +139,7 @@ export class AudioEngine {
   async start(): Promise<void> {
     const context = this.ensureContext();
     await this.ensureVoiceRuntime();
+    await this.ensureClockRuntime();
     if (context.state !== 'running') await context.resume();
     if (this.pendingProgram) {
       const program = this.pendingProgram;
@@ -129,14 +162,20 @@ export class AudioEngine {
       return;
     }
 
+    this.masterClockBpm = program.clock.bpm;
+    const desiredClockSources = new Map(program.clockSources.map((definition) => [definition.name, definition]));
     const desiredOscillators = new Map(program.oscillators.map((definition) => [definition.name, definition]));
     const desiredVoices = new Map(program.voices.map((definition) => [definition.name, definition]));
     const desiredGains = new Map(program.gains.map((definition) => [definition.name, definition]));
     const desiredRoutes = new Map(program.routes.map((route) => [`${route.source}->${route.destination}`, route]));
-    const desiredViews = new Set(program.views.map((view) => view.signal));
+    const desiredViews = new Map(program.views.map((view) => [view.signal, view]));
 
     for (const signal of this.views.keys()) {
       if (!desiredViews.has(signal)) this.removeView(signal);
+    }
+
+    for (const [name] of this.clocks) {
+      if (!desiredClockSources.has(name)) this.removeClock(name);
     }
 
     for (const [key] of this.routes) {
@@ -154,6 +193,9 @@ export class AudioEngine {
     for (const [name] of this.voices) {
       if (!desiredVoices.has(name)) this.removeVoice(name);
     }
+
+    for (const definition of program.clockSources) this.createOrUpdateClock(definition.name, definition.rate);
+    this.updateAllClocks();
 
     for (const definition of program.oscillators) {
       this.createOscillator(definition.name);
@@ -174,7 +216,7 @@ export class AudioEngine {
       this.connect(route.source, route.destination, route.amount, false);
     }
 
-    for (const view of program.views) this.createView(view.signal);
+    for (const view of program.views) this.createView(view.signal, view.kind);
 
     this.emit();
   }
@@ -208,7 +250,7 @@ export class AudioEngine {
     const context = this.ensureContext();
     const wasmBytes = this.voiceWasmBytes.slice(0);
     const node = new AudioWorkletNode(context, 'sonus-voice', {
-      numberOfInputs: 0,
+      numberOfInputs: 1,
       numberOfOutputs: 2,
       outputChannelCount: [1, 1],
       processorOptions: { wasmBytes },
@@ -284,14 +326,15 @@ export class AudioEngine {
   }
 
   connect(source: string, destination: string, amount = 100, emit = true): void {
-    if (!Number.isFinite(amount) || amount < 0 || amount > 100) {
-      throw new RangeError('route amount must be between 0 and 100');
+    if (!Number.isFinite(amount) || amount < -100 || amount > 100) {
+      throw new RangeError('route amount must be between -100 and 100');
     }
 
     const context = this.ensureContext();
     const sourceSignal = this.sourceForSignal(source);
-    const destinationNode = this.destinationNodeForPort(destination);
-    const routeKey = `${source}->${destination}`;
+    const destinationPort = destination;
+    const destinationTarget = this.destinationForPort(destinationPort);
+    const routeKey = `${source}->${destinationPort}`;
     const existing = this.routes.get(routeKey);
     const normalized = amount / 100;
 
@@ -305,24 +348,25 @@ export class AudioEngine {
     const gain = context.createGain();
     gain.gain.value = normalized;
     sourceSignal.node.connect(gain, sourceSignal.output, 0);
-    gain.connect(destinationNode);
-    this.routes.set(routeKey, { gain, amount, source, destination });
+    gain.connect(destinationTarget.node, 0, destinationTarget.input);
+    this.routes.set(routeKey, { gain, amount, source, destination: destinationPort });
     if (emit) this.emit();
   }
 
-  getViewSignals(): string[] {
-    return [...this.views.keys()];
+  getViewSignals(): Array<{ signal: string; kind: SignalKind }> {
+    return [...this.views.entries()].map(([signal, view]) => ({ signal, kind: view.kind }));
   }
 
   readOscilloscope(signal: string, target: Float32Array<ArrayBuffer>): boolean {
-    const analyser = this.views.get(signal);
-    if (!analyser) return false;
-    analyser.getFloatTimeDomainData(target);
+    const view = this.views.get(signal);
+    if (!view) return false;
+    view.analyser.getFloatTimeDomainData(target);
     return true;
   }
 
-  private createView(signal: string): void {
-    if (this.views.has(signal)) return;
+  private createView(signal: string, kind: SignalKind): void {
+    const existing = this.views.get(signal);
+    if (existing) { existing.kind = kind; return; }
 
     const context = this.ensureContext();
     const source = this.sourceForSignal(signal);
@@ -330,23 +374,34 @@ export class AudioEngine {
     analyser.fftSize = 512;
     analyser.smoothingTimeConstant = 0;
     source.node.connect(analyser, source.output, 0);
-    this.views.set(signal, analyser);
+    this.views.set(signal, { analyser, kind });
   }
 
   private removeView(signal: string): void {
-    const analyser = this.views.get(signal);
-    if (!analyser) return;
+    const view = this.views.get(signal);
+    if (!view) return;
 
     try {
-      this.sourceForSignal(signal).node.disconnect(analyser);
+      this.sourceForSignal(signal).node.disconnect(view.analyser);
     } catch {
       // The source may already have been retired; disconnecting the analyser is enough.
     }
-    analyser.disconnect();
+    view.analyser.disconnect();
     this.views.delete(signal);
   }
 
   private sourceForSignal(signal: string): SignalSource {
+    if (signal === 'Clock.out') {
+      const clock = this.clocks.get('Clock');
+      if (!clock) throw new Error('Clock source unavailable');
+      return { node: clock.node, output: 0 };
+    }
+
+    const derivedClock = signal.match(/^([A-Za-z_]\w*)\.out$/);
+    if (derivedClock && this.clocks.has(derivedClock[1])) {
+      return { node: this.clocks.get(derivedClock[1])!.node, output: 0 };
+    }
+
     if (signal === 'Main.out') {
       this.ensureContext();
       if (!this.master) throw new Error('audio engine unavailable');
@@ -368,16 +423,102 @@ export class AudioEngine {
     throw new Error(`unknown object: ${name}`);
   }
 
-  private destinationNodeForPort(port: string): AudioNode {
+  private destinationForPort(port: string): SignalDestination {
     if (port === 'Main.in') {
       this.ensureContext();
       if (!this.master) throw new Error('audio engine unavailable');
-      return this.master;
+      return { node: this.master, input: 0 };
+    }
+
+    const trigger = port.match(/^([A-Za-z_]\w*)\.trig$/);
+    if (trigger) {
+      const voice = this.voices.get(trigger[1]);
+      if (!voice) throw new Error(`unknown Voice trigger input: ${trigger[1]}`);
+      return { node: voice.node, input: 0 };
     }
 
     const match = port.match(/^([A-Za-z_]\w*)\.in$/);
     if (!match) throw new Error(`unknown destination: ${port}`);
-    return this.requireGain(match[1]).node;
+    return { node: this.requireGain(match[1]).node, input: 0 };
+  }
+
+
+  setClockTransport(running: boolean): void {
+    this.clockTransportRunning = running;
+    this.updateAllClocks();
+    this.emit();
+  }
+
+  getClockStatus(): { bpm: number; running: boolean } {
+    return { bpm: this.masterClockBpm, running: this.clockTransportRunning && this.masterClockBpm > 0 };
+  }
+
+  getTriggerViewEvents(signal: string): Array<{ progress: number; age: number }> {
+    const name = signal === 'Clock.out' ? 'Clock' : signal.match(/^([A-Za-z_]\w*)\.out$/)?.[1];
+    if (!name || !this.context) return [];
+    const clock = this.clocks.get(name);
+    if (!clock) return [];
+
+    const now = this.context.currentTime;
+    clock.visualEvents = clock.visualEvents.filter((event) => now - event.emittedAt < event.travelDuration);
+    return clock.visualEvents.map((event) => {
+      const age = Math.max(0, now - event.emittedAt);
+      return {
+        progress: Math.max(0, Math.min(1, age / event.travelDuration)),
+        age,
+      };
+    });
+  }
+
+  private createOrUpdateClock(name: string, rate: number): void {
+    if (!this.clockWorkletLoaded) return;
+    let clock = this.clocks.get(name);
+    if (!clock) {
+      const context = this.ensureContext();
+      const node = new AudioWorkletNode(context, 'sonus-clock', {
+        numberOfInputs: 0,
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
+        processorOptions: { bpm: this.masterClockBpm, rate },
+      });
+      clock = { node, rate, lastTriggerTime: null, triggerCount: 0, visualEvents: [] };
+      node.port.onmessage = (event) => {
+        const message = event.data;
+        if (!message || message.type !== 'trigger' || !Number.isFinite(message.frame)) return;
+        const current = this.clocks.get(name);
+        if (!current || !this.context) return;
+        const emittedAt = message.frame / this.context.sampleRate;
+        current.lastTriggerTime = emittedAt;
+        current.triggerCount += 1;
+        const effectiveBpm = this.masterClockBpm * current.rate;
+        if (effectiveBpm > 0) {
+          const periodAtEmission = 60 / effectiveBpm;
+          current.visualEvents.push({
+            emittedAt,
+            travelDuration: Math.max(0.05, periodAtEmission * 4),
+          });
+          if (current.visualEvents.length > 128) current.visualEvents.splice(0, current.visualEvents.length - 128);
+        }
+      };
+      this.clocks.set(name, clock);
+    }
+    clock.rate = rate;
+    clock.node.port.postMessage({ type: 'clock', bpm: this.masterClockBpm, rate, running: this.clockTransportRunning });
+  }
+
+  private updateAllClocks(): void {
+    for (const clock of this.clocks.values()) {
+      clock.node.port.postMessage({ type: 'clock', bpm: this.masterClockBpm, rate: clock.rate, running: this.clockTransportRunning });
+    }
+  }
+
+  private removeClock(name: string): void {
+    const clock = this.clocks.get(name);
+    if (!clock) return;
+    this.removeView(`${name}.out`);
+    clock.node.disconnect();
+    clock.node.port.close();
+    this.clocks.delete(name);
   }
 
   async testTone(frequency = 440): Promise<void> {
@@ -525,6 +666,14 @@ export class AudioEngine {
     const voice = this.gains.get(name);
     if (!voice) throw new Error(`unknown gain: ${name}`);
     return voice;
+  }
+
+
+  private async ensureClockRuntime(): Promise<void> {
+    if (this.clockWorkletLoaded) return;
+    const context = this.ensureContext();
+    await context.audioWorklet.addModule('/worklets/clock-processor.js');
+    this.clockWorkletLoaded = true;
   }
 
   private async ensureVoiceRuntime(): Promise<void> {
