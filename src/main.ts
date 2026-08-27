@@ -1,8 +1,8 @@
 import './style.css';
 import { AudioEngine } from './audio/engine';
-import { SonusEvaluationError, SonusRuntime } from './language/runtime';
+import { SonusEvaluationError, SonusRuntime, type SchemeConnection, type SchemeModel, type SchemeNode } from './language/runtime';
 
-type Screen = 'live' | 'config' | 'help';
+type Screen = 'live' | 'config' | 'help' | 'scheme';
 
 const VERSION = '0.0.3';
 
@@ -41,6 +41,7 @@ app.innerHTML = `
         <div class="help-grid">
           <span>:CONFIG</span><span>OPEN CONFIGURATION</span>
           <span>:HELP</span><span>SHOW THIS SCREEN</span>
+          <span>:SCHEME</span><span>SHOW READ-ONLY SIGNAL SCHEME</span>
           <span>:SAVE</span><span>SAVE SOURCE FILE</span>
           <span>:LOAD</span><span>LOAD SOURCE FILE</span>
           <span>:NEW</span><span>CLEAR SOURCE</span>
@@ -55,6 +56,17 @@ app.innerHTML = `
           <span>CMD+ENTER</span><span>EVALUATE ENTIRE SOURCE</span>
         </div>
         <div class="system-copy muted">ESC  RETURN TO LIVE</div>
+      </div>
+
+      <div id="scheme-screen" class="screen scheme-screen hidden" aria-hidden="true">
+        <div class="scheme-title">SCHEME</div>
+        <div id="scheme-viewport" class="scheme-viewport">
+          <div id="scheme-world" class="scheme-world">
+            <svg id="scheme-edges" class="scheme-edges" aria-hidden="true"></svg>
+            <div id="scheme-nodes" class="scheme-nodes"></div>
+          </div>
+        </div>
+        <div class="scheme-hints">ESC&nbsp;&nbsp;LIVE</div>
       </div>
 
       <div id="phosphor-layer" class="phosphor-layer" aria-hidden="true">
@@ -78,6 +90,11 @@ const command = must<HTMLInputElement>('command');
 const liveScreen = must<HTMLElement>('live-screen');
 const configScreen = must<HTMLElement>('config-screen');
 const helpScreen = must<HTMLElement>('help-screen');
+const schemeScreen = must<HTMLElement>('scheme-screen');
+const schemeViewport = must<HTMLElement>('scheme-viewport');
+const schemeWorld = must<HTMLElement>('scheme-world');
+const schemeEdges = must<SVGSVGElement>('scheme-edges');
+const schemeNodes = must<HTMLElement>('scheme-nodes');
 const phosphorLayer = must<HTMLElement>('phosphor-layer');
 const message = must<HTMLElement>('message');
 const blockCaret = must<HTMLElement>('block-caret');
@@ -110,10 +127,10 @@ audioEngine.subscribe((snapshot) => {
 editor.value = '';
 editor.focus();
 
-function must<T extends HTMLElement>(id: string): T {
+function must<T extends Element>(id: string): T {
   const el = document.getElementById(id);
   if (!el) throw new Error(`Missing #${id}`);
-  return el as T;
+  return el as unknown as T;
 }
 
 function showScreen(next: Screen): void {
@@ -121,9 +138,12 @@ function showScreen(next: Screen): void {
   liveScreen.classList.toggle('hidden', next !== 'live');
   configScreen.classList.toggle('hidden', next !== 'config');
   helpScreen.classList.toggle('hidden', next !== 'help');
+  schemeScreen.classList.toggle('hidden', next !== 'scheme');
   liveScreen.setAttribute('aria-hidden', String(next !== 'live'));
   configScreen.setAttribute('aria-hidden', String(next !== 'config'));
   helpScreen.setAttribute('aria-hidden', String(next !== 'help'));
+  schemeScreen.setAttribute('aria-hidden', String(next !== 'scheme'));
+  if (next === 'scheme') renderScheme();
   if (next === 'live') editor.focus();
   requestAnimationFrame(positionBlockCaret);
 }
@@ -248,7 +268,7 @@ function syncViews(): void {
 
 function drawScopes(): void {
   scopeFrame = 0;
-  const canvases = [...viewStack.querySelectorAll<HTMLCanvasElement>('canvas.scope-canvas')];
+  const canvases = [...document.querySelectorAll<HTMLCanvasElement>('canvas.scope-canvas')];
   if (canvases.length === 0) return;
 
   const phosphor = getComputedStyle(document.documentElement).getPropertyValue('--phosphor-hot').trim() || '#ffe783';
@@ -284,6 +304,186 @@ function drawScopes(): void {
   }
 
   scopeFrame = requestAnimationFrame(drawScopes);
+}
+
+
+function renderScheme(): void {
+  const model = runtime.getSchemeModel();
+  schemeNodes.replaceChildren();
+  schemeEdges.replaceChildren();
+
+  const nodeElements = new Map<string, HTMLElement>();
+  for (const node of model.nodes) {
+    const element = buildSchemeNode(node);
+    nodeElements.set(node.id, element);
+    schemeNodes.append(element);
+  }
+
+  requestAnimationFrame(() => {
+    layoutScheme(model, nodeElements);
+    drawSchemeConnections(model.connections, nodeElements);
+    if (model.nodes.some((node) => node.kind === 'view') && scopeFrame === 0) {
+      scopeFrame = requestAnimationFrame(drawScopes);
+    }
+  });
+}
+
+function buildSchemeNode(node: SchemeNode): HTMLElement {
+  const element = document.createElement('section');
+  element.className = `scheme-node ${node.kind === 'view' ? 'scheme-view-node' : 'scheme-module-node'}`;
+  element.dataset.nodeId = node.id;
+
+  const title = document.createElement('div');
+  title.className = 'scheme-node-title';
+  title.textContent = node.label;
+  element.append(title);
+
+  for (const parameter of node.parameters) {
+    const row = document.createElement('div');
+    row.className = 'scheme-param';
+    const name = document.createElement('span');
+    name.textContent = parameter.name;
+    const value = document.createElement('span');
+    value.textContent = parameter.value;
+    row.append(name, value);
+    element.append(row);
+  }
+
+  if (node.kind === 'view' && node.signal) {
+    const canvas = document.createElement('canvas');
+    canvas.className = 'scope-canvas scheme-scope';
+    canvas.dataset.signal = node.signal;
+    canvas.setAttribute('aria-label', `${node.signal} oscilloscope`);
+    element.append(canvas);
+  }
+
+  return element;
+}
+
+function layoutScheme(model: SchemeModel, elements: Map<string, HTMLElement>): void {
+  const levels = calculateSchemeLevels(model);
+  const grouped = new Map<number, SchemeNode[]>();
+  for (const node of model.nodes) {
+    const level = levels.get(node.id) ?? 0;
+    const group = grouped.get(level) ?? [];
+    group.push(node);
+    grouped.set(level, group);
+  }
+
+  const levelNumbers = [...grouped.keys()].sort((a, b) => a - b);
+  const columnGap = 110;
+  const rowGap = 34;
+  const padding = 34;
+  let x = padding;
+  let worldHeight = 0;
+
+  for (const level of levelNumbers) {
+    const nodes = grouped.get(level) ?? [];
+    const width = Math.max(...nodes.map((node) => elements.get(node.id)?.offsetWidth ?? 120), 120);
+    let y = padding;
+    for (const node of nodes) {
+      const element = elements.get(node.id);
+      if (!element) continue;
+      element.style.left = `${x}px`;
+      element.style.top = `${y}px`;
+      y += element.offsetHeight + rowGap;
+    }
+    worldHeight = Math.max(worldHeight, y);
+    x += width + columnGap;
+  }
+
+  const worldWidth = Math.max(x - columnGap + padding, schemeViewport.clientWidth);
+  worldHeight = Math.max(worldHeight + padding, schemeViewport.clientHeight);
+  schemeWorld.style.width = `${worldWidth}px`;
+  schemeWorld.style.height = `${worldHeight}px`;
+  schemeEdges.setAttribute('width', String(worldWidth));
+  schemeEdges.setAttribute('height', String(worldHeight));
+  schemeEdges.setAttribute('viewBox', `0 0 ${worldWidth} ${worldHeight}`);
+}
+
+function calculateSchemeLevels(model: SchemeModel): Map<string, number> {
+  const levels = new Map(model.nodes.map((node) => [node.id, 0]));
+  const nonViewIds = new Set(model.nodes.filter((node) => node.kind !== 'view').map((node) => node.id));
+  const graphEdges = model.connections.filter((connection) => connection.type !== 'view' && nonViewIds.has(connection.source) && nonViewIds.has(connection.target));
+
+  // Relax edges instead of requiring a strict DAG. This gives a stable left-to-right
+  // layout now and will degrade safely when feedback/cycles are introduced later.
+  for (let pass = 0; pass < nonViewIds.size; pass += 1) {
+    let changed = false;
+    for (const edge of graphEdges) {
+      const sourceLevel = levels.get(edge.source) ?? 0;
+      const targetLevel = levels.get(edge.target) ?? 0;
+      if (sourceLevel + 1 > targetLevel && sourceLevel + 1 < nonViewIds.size) {
+        levels.set(edge.target, sourceLevel + 1);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+
+  for (const edge of model.connections.filter((connection) => connection.type === 'view')) {
+    levels.set(edge.target, (levels.get(edge.source) ?? 0) + 1);
+  }
+
+  return levels;
+}
+
+function drawSchemeConnections(connections: SchemeConnection[], elements: Map<string, HTMLElement>): void {
+  const ns = 'http://www.w3.org/2000/svg';
+  const defs = document.createElementNS(ns, 'defs');
+  const marker = document.createElementNS(ns, 'marker');
+  marker.setAttribute('id', 'scheme-arrow');
+  marker.setAttribute('viewBox', '0 0 8 8');
+  marker.setAttribute('refX', '7');
+  marker.setAttribute('refY', '4');
+  marker.setAttribute('markerWidth', '6');
+  marker.setAttribute('markerHeight', '6');
+  marker.setAttribute('orient', 'auto-start-reverse');
+  const arrow = document.createElementNS(ns, 'path');
+  arrow.setAttribute('d', 'M 0 0 L 8 4 L 0 8 z');
+  arrow.setAttribute('class', 'scheme-arrow-head');
+  marker.append(arrow);
+  defs.append(marker);
+  schemeEdges.append(defs);
+
+  const worldRect = schemeWorld.getBoundingClientRect();
+  for (const connection of connections) {
+    const source = elements.get(connection.source);
+    const target = elements.get(connection.target);
+    if (!source || !target) continue;
+
+    const a = source.getBoundingClientRect();
+    const b = target.getBoundingClientRect();
+    const x1 = a.right - worldRect.left;
+    const y1 = a.top - worldRect.top + a.height / 2;
+    const x2 = b.left - worldRect.left;
+    const y2 = b.top - worldRect.top + b.height / 2;
+    const bend = Math.max(36, (x2 - x1) * 0.5);
+
+    const path = document.createElementNS(ns, 'path');
+    path.setAttribute('d', `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`);
+    path.setAttribute('class', `scheme-edge scheme-edge-${connection.type}`);
+    path.setAttribute('marker-end', 'url(#scheme-arrow)');
+    schemeEdges.append(path);
+
+    const labelParts: string[] = [];
+    if (connection.amount !== undefined && connection.amount !== 100) labelParts.push(`${formatSchemeNumber(connection.amount)}%`);
+    if (connection.type === 'audio' && (connection.sourcePort || connection.targetPort)) {
+      labelParts.push(`${connection.sourcePort ?? ''}${connection.sourcePort && connection.targetPort ? ' → ' : ''}${connection.targetPort ?? ''}`);
+    }
+    if (labelParts.length > 0) {
+      const label = document.createElementNS(ns, 'text');
+      label.setAttribute('x', String((x1 + x2) / 2));
+      label.setAttribute('y', String((y1 + y2) / 2 - 7));
+      label.setAttribute('class', 'scheme-edge-label');
+      label.textContent = labelParts.join('  ');
+      schemeEdges.append(label);
+    }
+  }
+}
+
+function formatSchemeNumber(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1).replace(/\.0$/, '');
 }
 
 function clearDiagnostic(): void {
@@ -496,6 +696,10 @@ async function runCommand(raw: string): Promise<void> {
       leaveCommandMode();
       showScreen('help');
       return;
+    case 'scheme':
+      leaveCommandMode();
+      showScreen('scheme');
+      return;
     case 'new':
     case 'clear':
       setSourceText('');
@@ -675,7 +879,7 @@ command.addEventListener('keydown', (event) => {
 
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape' || commandMode) return;
-  if (screen === 'config' || screen === 'help') {
+  if (screen === 'config' || screen === 'help' || screen === 'scheme') {
     event.preventDefault();
     showScreen('live');
   }

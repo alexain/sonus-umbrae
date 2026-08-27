@@ -9,6 +9,33 @@ export interface SonusDiagnostic {
   message: string;
 }
 
+export interface SchemeParameter {
+  name: string;
+  value: string;
+}
+
+export interface SchemeNode {
+  id: string;
+  label: string;
+  kind: 'module' | 'view';
+  parameters: SchemeParameter[];
+  signal?: string;
+}
+
+export interface SchemeConnection {
+  source: string;
+  target: string;
+  sourcePort?: string;
+  targetPort?: string;
+  type: 'audio' | 'view';
+  amount?: number;
+}
+
+export interface SchemeModel {
+  nodes: SchemeNode[];
+  connections: SchemeConnection[];
+}
+
 export class SonusEvaluationError extends SyntaxError {
   constructor(public readonly diagnostics: SonusDiagnostic[]) {
     super(diagnostics[0]?.message ?? 'evaluation failed');
@@ -18,6 +45,7 @@ export class SonusEvaluationError extends SyntaxError {
 
 interface OscillatorDefinition {
   frequency: number;
+  parameters: Map<string, string>;
 }
 
 interface RouteDefinition {
@@ -26,7 +54,22 @@ interface RouteDefinition {
 }
 
 export class SonusRuntime {
+  private scheme: SchemeModel = {
+    nodes: [{ id: 'Main', label: 'MAIN', kind: 'module', parameters: [] }],
+    connections: [],
+  };
+
   constructor(private readonly audio: AudioEngine) {}
+
+  getSchemeModel(): SchemeModel {
+    return {
+      nodes: this.scheme.nodes.map((node) => ({
+        ...node,
+        parameters: node.parameters.map((parameter) => ({ ...parameter })),
+      })),
+      connections: this.scheme.connections.map((connection) => ({ ...connection })),
+    };
+  }
 
   evaluate(source: string): EvaluationResult[] {
     const oscillators = new Map<string, OscillatorDefinition>();
@@ -56,7 +99,7 @@ export class SonusRuntime {
         continue;
       }
 
-      const definition: OscillatorDefinition = { frequency: 440 };
+      const definition: OscillatorDefinition = { frequency: 440, parameters: new Map() };
       oscillators.set(name, definition);
 
       for (const call of calls) {
@@ -89,6 +132,8 @@ export class SonusRuntime {
         }
 
         oscillator.frequency = frequency;
+        oscillator.parameters.delete('NOTE');
+        oscillator.parameters.set('FREQ', `${formatNumber(frequency)} HZ`);
         results.push({ message: `${name}.freq ${formatNumber(frequency)} hz` });
         continue;
       }
@@ -110,6 +155,8 @@ export class SonusRuntime {
         }
 
         oscillator.frequency = midiToFrequency(note);
+        oscillator.parameters.delete('FREQ');
+        oscillator.parameters.set('NOTE', formatNumber(note));
         results.push({ message: `${name}.note ${formatNumber(note)}` });
         continue;
       }
@@ -157,6 +204,48 @@ export class SonusRuntime {
     }
 
     if (diagnostics.length > 0) throw new SonusEvaluationError(diagnostics);
+
+    const schemeNodes: SchemeNode[] = [
+      ...[...oscillators.entries()].map(([name, definition]) => ({
+        id: name,
+        label: `${name.toUpperCase()} : OSC`,
+        kind: 'module' as const,
+        parameters: [...definition.parameters.entries()].map(([parameterName, value]) => ({
+          name: parameterName,
+          value,
+        })),
+      })),
+      { id: 'Main', label: 'MAIN', kind: 'module' as const, parameters: [] },
+      ...[...views].map((signal) => ({
+        id: `view:${signal}`,
+        label: `VIEW : ${signal.toUpperCase()}`,
+        kind: 'view' as const,
+        parameters: [],
+        signal,
+      })),
+    ];
+
+    const schemeConnections: SchemeConnection[] = [
+      ...[...routes.values()].map((route) => ({
+        source: route.source,
+        target: 'Main',
+        sourcePort: 'OUT',
+        targetPort: 'IN',
+        type: 'audio' as const,
+        amount: route.amount,
+      })),
+      ...[...views].map((signal) => {
+        const source = signal === 'Main.out' ? 'Main' : signal.replace(/\.out$/, '');
+        return {
+          source,
+          target: `view:${signal}`,
+          sourcePort: 'OUT',
+          type: 'view' as const,
+        };
+      }),
+    ];
+
+    this.scheme = { nodes: schemeNodes, connections: schemeConnections };
 
     const program: AudioProgram = {
       oscillators: [...oscillators.entries()].map(([name, definition]) => ({
@@ -220,6 +309,8 @@ function applyOscillatorCall(
       const error = frequencyError(frequency);
       if (error) return error;
       oscillator.frequency = frequency;
+      oscillator.parameters.delete('NOTE');
+      oscillator.parameters.set('FREQ', `${formatNumber(frequency)} HZ`);
       return null;
     }
     case 'note': {
@@ -228,6 +319,8 @@ function applyOscillatorCall(
       const error = noteError(note);
       if (error) return error;
       oscillator.frequency = midiToFrequency(note);
+      oscillator.parameters.delete('FREQ');
+      oscillator.parameters.set('NOTE', formatNumber(note));
       return null;
     }
     case 'view':
