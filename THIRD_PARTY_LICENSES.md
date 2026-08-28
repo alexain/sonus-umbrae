@@ -69,3 +69,12 @@ The upstream source is downloaded by the DSP setup process and is not authored b
 Marbles is part of the STM32F code in that repository, which is published under the MIT License. Sonus Umbrae uses the name **Dices** for its integration and does not use Mutable Instruments or Marbles as product branding.
 
 The upstream source is downloaded by the DSP setup process and is not authored by the Sonus Umbrae project.
+
+
+## SuperParasites
+
+The eight-mode `Mist()` backend uses DSP code from Patrick Dowling's SuperParasites project, itself based on Mutable Instruments Clouds, Parasites, and Beat Repeat.
+
+SuperParasites' STM32F code is distributed under the MIT License. Sonus Umbrae uses its own module name (`Mist`) and scripting API rather than upstream product branding.
+
+The upstream source is fetched into `vendor/superparasites` by `npm run dsp:setup` and is not vendored into this repository.

@@ -8,7 +8,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview --port 4173 --strictPort",
     "dsp:setup": "bash scripts/setup-dsp.sh",
-    "dsp:build": "bash scripts/build-dsp.sh"
+    "dsp:build": "bash scripts/build-dsp.sh",
+    "mist:harness:build": "bash scripts/build-mist-harness.sh"
   },
   "devDependencies": {
     "typescript": "^5.9.2",

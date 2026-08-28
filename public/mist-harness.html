@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sonus Umbrae — Mist WASM Harness</title>
+  <style>
+    body { max-width: 900px; margin: 40px auto; padding: 0 20px; background: #111; color: #ddd; font: 15px/1.5 monospace; }
+    h1 { font-size: 20px; }
+    button { font: inherit; padding: 8px 12px; }
+    pre { padding: 16px; background: #191919; border: 1px solid #333; min-height: 240px; white-space: pre-wrap; }
+    .pass { color: #9fda8b; }
+    .fail { color: #ff8e8e; }
+  </style>
+</head>
+<body>
+  <h1>Mist / Clouds isolated WASM harness</h1>
+  <p>This test does not use Sonus Umbrae's runtime or AudioWorklet.</p>
+  <button id="run">Run tests</button>
+  <pre id="log">Ready.</pre>
+  <script type="module" src="/mist-harness.js"></script>
+</body>
+</html>

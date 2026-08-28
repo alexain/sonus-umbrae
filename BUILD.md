@@ -179,3 +179,53 @@ npm run dsp:setup
 npm run dsp:build
 npm run dev
 ```
+
+
+## Mist / Clouds isolated harness
+
+Before connecting the Clouds DSP to the realtime `Mist()` module, build and test it independently:
+
+```bash
+npm run dsp:setup
+npm run mist:harness:build
+npm run dev
+```
+
+Then open:
+
+```text
+http://localhost:5173/mist-harness.html
+```
+
+The harness runs two tests on the main browser thread, with no `AudioWorklet` and no Sonus Umbrae runtime:
+
+1. Clouds' own `bypass` path must copy a 32-frame stereo block exactly.
+2. The granular engine receives four seconds of a 220 Hz test signal at Clouds' native 32 kHz sample rate. The test passes only if the wet output becomes non-zero.
+
+Do not integrate the Clouds WASM into `Mist()` until both tests pass.
+
+
+### SuperParasites and modern Clang
+
+The upstream SuperParasites sources contain a few aggregate initializers that use `0.0f` for boolean fields. Modern Clang/Emscripten diagnoses these as C++11 narrowing errors, while the original embedded toolchain accepted them.
+
+The Sonus Umbrae SuperParasites build therefore uses `-Wno-c++11-narrowing` for that backend only. Upstream files under `vendor/superparasites` are left untouched.
+
+
+SuperParasites uses an older CMSIS layout in which the Cortex core headers live under `CMSIS/Include`, while `arm_math.h` lives under `CMSIS/DSP_Lib/Include`. Both paths are required when building with modern Emscripten. The SuperParasites backend also defines `ARM_MATH_CM4`, matching the original Cortex-M4 target expected by that version of CMSIS.
+
+
+The SuperParasites `stmlib` checkout pinned at `8ab2aaee77cbacb47b646d46d22ee5d358effe2d` uses the older CMSIS layout. For the STM32F4 target, both `arm_math.h` and `core_cm4.h` are under:
+
+```text
+stmlib/third_party/STM/CMSIS/CM3_f4xx
+```
+
+The SuperParasites Emscripten build therefore includes that directory directly.
+
+
+### SuperParasites WASM FFT
+
+Do not compile the legacy ARM CMSIS-DSP sources for the WebAssembly backend. They contain Cortex-M inline assembly and register constraints that cannot target `wasm32`.
+
+SuperParasites' phase vocoder already uses `stmlib/fft/shy_fft.h`, a portable C++ real FFT implementation. The Mist WASM build therefore compiles the SuperParasites DSP and required `stmlib` C++ sources only, without CMSIS `CommonTables` or `TransformFunctions`.

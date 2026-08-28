@@ -345,7 +345,9 @@ function syncViews(): void {
         ? [1, 2, 3, 4].map((port) => `${node.id}.out${port}`)
         : / : VOICE$/i.test(node.label)
           ? [`${node.id}.out`, `${node.id}.aux`]
-          : []
+          : / : MIST$/i.test(node.label)
+            ? [`${node.id}.outL`, `${node.id}.outR`]
+            : []
       : [];
 
     // User-created modules exist in VARIABLES and SCHEME automatically, but a
@@ -467,7 +469,11 @@ function buildModuleMonitorPanel(options: {
     section.className = 'monitor-signal monitor-composite';
     const label = document.createElement('div');
     label.className = 'monitor-section-label';
-    label.textContent = options.compositeSignals!.length === 2 ? 'OUT / AUX' : 'OUT 1-4';
+    label.textContent = options.title.endsWith(': MIST')
+      ? 'OUT L / R'
+      : options.compositeSignals!.length === 2
+        ? 'OUT / AUX'
+        : 'OUT 1-4';
     const canvas = document.createElement('canvas');
     canvas.className = 'scope-canvas view-signal composite-scope';
     canvas.dataset.signals = options.compositeSignals!.join(',');

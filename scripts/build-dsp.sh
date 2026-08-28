@@ -3,9 +3,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VENDOR="$ROOT/vendor/eurorack"
+SUPERPARASITES="$ROOT/vendor/superparasites"
 VOICE_OUTPUT="$ROOT/public/dsp/voice.wasm"
 SWELL_OUTPUT="$ROOT/public/dsp/swell.wasm"
 DICES_OUTPUT="$ROOT/public/dsp/dices.wasm"
+MIST_OUTPUT="$ROOT/public/dsp/mist.wasm"
 
 if ! command -v em++ >/dev/null 2>&1; then
   echo "em++ not found. Install/activate Emscripten (emsdk) before building the DSP." >&2
@@ -89,3 +91,36 @@ em++ \
   -o "$DICES_OUTPUT"
 
 echo "Built $DICES_OUTPUT"
+
+
+
+SUPERPARASITES_DSP=()
+while IFS= read -r source; do
+  SUPERPARASITES_DSP+=("$source")
+done < <(find "$SUPERPARASITES/supercell/dsp" -name '*.cc' -type f | sort)
+
+SUPERPARASITES_STMLIB=()
+while IFS= read -r source; do
+  SUPERPARASITES_STMLIB+=("$source")
+done < <(find "$SUPERPARASITES/stmlib/dsp" "$SUPERPARASITES/stmlib/utils" -name '*.cc' -type f | sort)
+
+em++ \
+  -std=c++17 \
+  -O3 \
+  -Wno-c++11-narrowing \
+  -DTEST \
+  -DSUPERCELL \
+  -I"$SUPERPARASITES" \
+  "$ROOT/dsp/mist_bridge.cc" \
+  "${SUPERPARASITES_DSP[@]}" \
+  "${SUPERPARASITES_STMLIB[@]}" \
+  "$SUPERPARASITES/supercell/resources.cc" \
+  -s STANDALONE_WASM=1 \
+  -s ALLOW_MEMORY_GROWTH=0 \
+  -s INITIAL_MEMORY=8388608 \
+  -s FILESYSTEM=0 \
+  -s EXPORTED_FUNCTIONS='["_su_mist_init","_su_mist_set_sample_rate","_su_mist_set_mode","_su_mist_set_mix","_su_mist_set_position","_su_mist_set_size","_su_mist_set_pitch","_su_mist_set_density","_su_mist_set_texture","_su_mist_set_spread","_su_mist_set_feedback","_su_mist_set_reverb","_su_mist_set_freeze","_su_mist_set_reverse","_su_mist_in_l","_su_mist_in_r","_su_mist_trig","_su_mist_out_l","_su_mist_out_r","_su_mist_process"]' \
+  -Wl,--no-entry \
+  -o "$MIST_OUTPUT"
+
+echo "Built $MIST_OUTPUT (SuperParasites 8-mode backend)"

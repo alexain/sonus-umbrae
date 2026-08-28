@@ -10,6 +10,7 @@ const RESERVED_IDENTIFIERS = new Set([
   'voice',
   'swell',
   'dices',
+  'mist',
   'pattern',
   'scale',
   'osc',
@@ -159,6 +160,22 @@ interface DicesDefinition {
   parameters: Map<string, string>;
 }
 
+interface MistDefinition {
+  position: number;
+  size: number;
+  pitch: number;
+  density: number;
+  texture: number;
+  mix: number;
+  spread: number;
+  feedback: number;
+  reverb: number;
+  freeze: boolean;
+  reverse: boolean;
+  mode: number;
+  parameters: Map<string, string>;
+}
+
 interface RouteDefinition {
   source: string;
   target: string;
@@ -220,6 +237,7 @@ export class SonusRuntime {
     const voices = new Map<string, VoiceDefinition>();
     const swells = new Map<string, SwellDefinition>();
     const dices = new Map<string, DicesDefinition>();
+    const mists = new Map<string, MistDefinition>();
     const routes = new Map<string, RouteDefinition>();
     const clockSources = new Map<string, ClockDefinition>();
     let clockBpm = 0;
@@ -368,6 +386,40 @@ export class SonusRuntime {
           parameters: new Map(),
         });
         results.push({ message: `${name} = Dices` });
+        continue;
+      }
+
+      const mistDeclaration = parseMistDeclaration(line);
+      if (mistDeclaration) {
+        const { name } = mistDeclaration;
+        const reservationError = identifierReservationError(name);
+        if (reservationError) {
+          diagnostics.push({ line: lineNumber, message: reservationError });
+          continue;
+        }
+        if (objectExists(name, oscillators, gains, voices) || swells.has(name) || dices.has(name) || mists.has(name) || clockSources.has(name)) {
+          diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` });
+          continue;
+        }
+        mists.set(name, {
+          position: 50,
+          size: 50,
+          pitch: 0,
+          density: 50,
+          texture: 50,
+          mix: 0,
+          spread: 50,
+          feedback: 0,
+          reverb: 0,
+          freeze: false,
+          reverse: false,
+          mode: 0,
+          parameters: new Map([
+            ['MODE', 'GRANULAR'],
+            ['BACKEND', 'SUPERPARASITES'],
+          ]),
+        });
+        results.push({ message: `${name} = Mist` });
         continue;
       }
     }
@@ -571,6 +623,15 @@ export class SonusRuntime {
         const definition = dices.get(dicesDeclaration.name)!;
         for (const call of dicesDeclaration.calls) {
           const error = applyDicesCall(dicesDeclaration.name, definition, call, moduleViews, (expr) => evalValue(expr, lineNumber));
+          if (error) diagnostics.push({ line: lineNumber, message: error });
+        }
+        continue;
+      }
+      const mistDeclaration = parseMistDeclaration(line);
+      if (mistDeclaration) {
+        const definition = mists.get(mistDeclaration.name)!;
+        for (const call of mistDeclaration.calls) {
+          const error = applyMistCall(mistDeclaration.name, definition, call, moduleViews, (expr) => evalValue(expr, lineNumber));
           if (error) diagnostics.push({ line: lineNumber, message: error });
         }
         continue;
@@ -1006,6 +1067,20 @@ export class SonusRuntime {
         continue;
       }
 
+      match = line.match(/^([A-Za-z_]\w*)\.(outL|outR)\.view\(\s*\)\s*$/);
+      if (match && mists.has(match[1])) {
+        views.set(`${match[1]}.${match[2]}`, 'signal');
+        results.push({ message: `${match[1]}.${match[2]} view` });
+        continue;
+      }
+
+      match = line.match(/^([A-Za-z_]\w*)\.view\(\s*\)\s*$/);
+      if (match && mists.has(match[1])) {
+        moduleViews.add(match[1]);
+        results.push({ message: `${match[1]} module view` });
+        continue;
+      }
+
       match = line.match(/^([A-Za-z_]\w*)\.view\(\s*\)\s*$/);
       if (match && voices.has(match[1])) {
         moduleViews.add(match[1]);
@@ -1047,7 +1122,7 @@ export class SonusRuntime {
       const parsedRoute = parseRouteLine(line);
       if (parsedRoute) {
         const { sourceName, sourcePort, amountExpression, targetName, targetPort } = parsedRoute;
-        if (sourceName !== 'Clock' && !clockSources.has(sourceName) && !objectExists(sourceName, oscillators, gains, voices) && !swells.has(sourceName) && !dices.has(sourceName)) {
+        if (sourceName !== 'Clock' && !clockSources.has(sourceName) && !objectExists(sourceName, oscillators, gains, voices) && !swells.has(sourceName) && !dices.has(sourceName) && !mists.has(sourceName)) {
           diagnostics.push({ line: lineNumber, message: `unknown source object: ${sourceName}` });
           continue;
         }
@@ -1064,13 +1139,17 @@ export class SonusRuntime {
           continue;
         }
         if (targetPort === 'trig') {
-          if (!voices.has(targetName) && !swells.has(targetName)) { diagnostics.push({ line: lineNumber, message: `trigger input is only available on Voice or Swell objects: ${targetName}` }); continue; }
+          if (!voices.has(targetName) && !swells.has(targetName) && !mists.has(targetName)) { diagnostics.push({ line: lineNumber, message: `trigger input is only available on Voice, Swell or Mist objects: ${targetName}` }); continue; }
         } else if (targetPort === 'clock') {
           if (!swells.has(targetName) && !dices.has(targetName)) { diagnostics.push({ line: lineNumber, message: `clock input is only available on Swell or Dices objects: ${targetName}` }); continue; }
         } else if (targetPort === 'v_oct') {
           if (!voices.has(targetName) && !swells.has(targetName)) { diagnostics.push({ line: lineNumber, message: `v_oct input is only available on Voice or Swell objects: ${targetName}` }); continue; }
         } else if (targetPort === 'harmo' || targetPort === 'timbre' || targetPort === 'morph') {
           if (!voices.has(targetName)) { diagnostics.push({ line: lineNumber, message: `${targetPort} input is only available on Voice objects: ${targetName}` }); continue; }
+        } else if (targetPort === 'inL' || targetPort === 'inR') {
+          if (!mists.has(targetName)) { diagnostics.push({ line: lineNumber, message: `${targetPort} is only available on Mist objects: ${targetName}` }); continue; }
+        } else if (targetPort === 'in' && mists.has(targetName)) {
+          // Mono convenience input feeding both Mist channels.
         } else if (!(targetName === 'Audio' && targetPort === 'out') && !gains.has(targetName)) {
           diagnostics.push({ line: lineNumber, message: `unknown or non-input object: ${targetName}` });
           continue;
@@ -1201,6 +1280,7 @@ export class SonusRuntime {
     for (const [name] of voices) variableViews.push({ name, value: 'Voice' });
     for (const [name] of swells) variableViews.push({ name, value: 'Swell' });
     for (const [name] of dices) variableViews.push({ name, value: 'Dices' });
+    for (const [name] of mists) variableViews.push({ name, value: 'Mist' });
     for (const [name] of clockSources) variableViews.push({ name, value: 'Clock' });
     for (const [name] of oscillators) variableViews.push({ name, value: 'Osc' });
     for (const [name] of gains) variableViews.push({ name, value: 'Gain' });
@@ -1292,6 +1372,13 @@ export class SonusRuntime {
           signalKind: 'signal',
           port: 'SEQUENCE',
         });
+      } else if (mists.has(name)) {
+        ownerViews.push({
+          signal: `${name}.outL`,
+          signals: [`${name}.outL`, `${name}.outR`],
+          signalKind: 'signal',
+          port: 'OUT L / R',
+        });
       } else {
         continue;
       }
@@ -1343,6 +1430,16 @@ export class SonusRuntime {
         })),
         views: embeddedViews.get(name),
       })),
+      ...[...mists.entries()].map(([name, definition]) => ({
+        id: name,
+        label: `${name.toUpperCase()} : MIST`,
+        kind: 'module' as const,
+        parameters: [...definition.parameters.entries()].map(([parameterName, value]) => ({
+          name: parameterName,
+          value,
+        })),
+        views: embeddedViews.get(name),
+      })),
       ...[...gains.entries()].map(([name, definition]) => ({
         id: name,
         label: `${name.toUpperCase()} : GAIN`,
@@ -1358,11 +1455,11 @@ export class SonusRuntime {
 
     const schemeConnections: SchemeConnection[] = [
       ...[...routes.values()].map((route) => ({
-        source: route.source.replace(/\.(out|aux|out[1-4]|t[1-3]|x[1-3]|y)$/, ''),
+        source: route.source.replace(/\.(out|aux|out[1-4]|outL|outR|t[1-3]|x[1-3]|y)$/, ''),
         target: route.target.startsWith('Audio.')
           ? 'Audio'
-          : route.target.replace(/\.(in|trig|clock|v_oct|harmo|timbre|morph)$/, ''),
-        sourcePort: (route.source.match(/\.(out|aux|out[1-4]|t[1-3]|x[1-3]|y)$/)?.[1] ?? 'out').toUpperCase(),
+          : route.target.replace(/\.(inL|inR|in|trig|clock|v_oct|harmo|timbre|morph)$/, ''),
+        sourcePort: (route.source.match(/\.(out|aux|out[1-4]|outL|outR|t[1-3]|x[1-3]|y)$/)?.[1] ?? 'out').toUpperCase(),
         targetPort: route.target.endsWith('.trig')
           ? 'TRIG'
           : route.target.endsWith('.clock')
@@ -1423,6 +1520,21 @@ export class SonusRuntime {
         length: definition.length,
         scale: definition.scale,
       })),
+      mists: [...mists.entries()].map(([name, definition]) => ({
+        name,
+        position: definition.position,
+        size: definition.size,
+        pitch: definition.pitch,
+        density: definition.density,
+        texture: definition.texture,
+        mix: definition.mix,
+        spread: definition.spread,
+        feedback: definition.feedback,
+        reverb: definition.reverb,
+        freeze: definition.freeze,
+        reverse: definition.reverse,
+        mode: definition.mode,
+      })),
       gains: [...gains.entries()].map(([name, definition]) => ({
         name,
         level: definition.level,
@@ -1454,6 +1566,9 @@ export class SonusRuntime {
               monitors.set(`${name}.x${port}`, 'signal');
             }
             monitors.set(`${name}.y`, 'signal');
+          } else if (mists.has(name)) {
+            monitors.set(`${name}.outL`, 'signal');
+            monitors.set(`${name}.outR`, 'signal');
           }
         }
         return [...monitors].map(([signal, kind]) => ({ signal, kind }));
@@ -1803,6 +1918,10 @@ function parseDicesDeclaration(line: string): ObjectDeclaration | null {
   return parseDeclaration(line, 'Dices');
 }
 
+function parseMistDeclaration(line: string): ObjectDeclaration | null {
+  return parseDeclaration(line, 'Mist');
+}
+
 function parseDeclaration(line: string, constructorName: string): ObjectDeclaration | null {
   const match = line.match(new RegExp(`^([A-Za-z_]\\w*)\\s*=\\s*${constructorName}\\(\\s*\\)(.*)$`));
   if (!match) return null;
@@ -1850,10 +1969,10 @@ function parseChainedCalls(tail: string): ChainedCall[] | null {
 
 interface ParsedRoute {
   sourceName: string;
-  sourcePort: 'out' | 'aux' | 'out1' | 'out2' | 'out3' | 'out4' | 't1' | 't2' | 't3' | 'x1' | 'x2' | 'x3' | 'y';
+  sourcePort: 'out' | 'aux' | 'out1' | 'out2' | 'out3' | 'out4' | 't1' | 't2' | 't3' | 'x1' | 'x2' | 'x3' | 'y' | 'outL' | 'outR';
   amountExpression: string | null;
   targetName: string;
-  targetPort: 'out' | 'in' | 'trig' | 'clock' | 'v_oct' | 'harmo' | 'timbre' | 'morph';
+  targetPort: 'out' | 'in' | 'inL' | 'inR' | 'trig' | 'clock' | 'v_oct' | 'harmo' | 'timbre' | 'morph';
 }
 
 function parseRouteLine(line: string): ParsedRoute | null {
@@ -1861,9 +1980,9 @@ function parseRouteLine(line: string): ParsedRoute | null {
   if (arrow < 0 || line.indexOf('->', arrow + 2) >= 0) return null;
   const left = line.slice(0, arrow).trim();
   const right = line.slice(arrow + 2).trim();
-  const target = right.match(/^([A-Za-z_]\w*)\.(out|in|trig|clock|v_oct|harmo|timbre|morph)$/);
+  const target = right.match(/^([A-Za-z_]\w*)\.(out|inL|inR|in|trig|clock|v_oct|harmo|timbre|morph)$/);
   if (!target) return null;
-  const source = left.match(/^([A-Za-z_]\w*)\.(out1|out2|out3|out4|t1|t2|t3|x1|x2|x3|y|out|aux)(.*)$/);
+  const source = left.match(/^([A-Za-z_]\w*)\.(out1|out2|out3|out4|outL|outR|t1|t2|t3|x1|x2|x3|y|out|aux)(.*)$/);
   if (!source) return null;
   const suffix = source[3].trim();
   let amountExpression: string | null = null;
@@ -1918,6 +2037,92 @@ function objectExists(
   voices: Map<string, VoiceDefinition>,
 ): boolean {
   return oscillators.has(name) || gains.has(name) || voices.has(name);
+}
+
+function applyMistCall(
+  objectName: string,
+  definition: MistDefinition,
+  call: ChainedCall,
+  moduleViews: Set<string>,
+  evaluate: (expression: string) => ScalarValue | undefined,
+): string | null {
+  const percent = (
+    parameter: 'position' | 'size' | 'density' | 'texture' | 'mix' | 'spread' | 'feedback' | 'reverb',
+  ): string | null => {
+    const value = evaluate(call.argument);
+    if (typeof value !== 'number') return `${call.name} expects one numeric expression`;
+    const error = percentError(value, call.name);
+    if (error) return error;
+    definition[parameter] = value;
+    definition.parameters.set(call.name.toUpperCase(), `${formatNumber(value)}%`);
+    return null;
+  };
+
+  switch (call.name) {
+    case 'position': return percent('position');
+    case 'size': return percent('size');
+    case 'density': return percent('density');
+    case 'texture': return percent('texture');
+    case 'mix': return percent('mix');
+    case 'spread': return percent('spread');
+    case 'feedback': return percent('feedback');
+    case 'reverb': return percent('reverb');
+    case 'pitch': {
+      const value = evaluate(call.argument);
+      if (typeof value !== 'number' || value < -48 || value > 48) return 'pitch expects -48..48 semitones';
+      definition.pitch = value;
+      definition.parameters.set('PITCH', `${formatNumber(value)} ST`);
+      return null;
+    }
+    case 'freeze': {
+      const value = evaluate(call.argument);
+      if (typeof value !== 'boolean') return 'freeze expects true or false';
+      definition.freeze = value;
+      definition.parameters.set('FREEZE', value ? 'ON' : 'OFF');
+      return null;
+    }
+    case 'mode': {
+      const value = evaluate(call.argument);
+      if (typeof value !== 'string') return 'mode expects a mode name';
+
+      const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, '_');
+      const modes: Record<string, { id: number; label: string }> = {
+        granular: { id: 0, label: 'GRANULAR' },
+        stretch: { id: 1, label: 'STRETCH' },
+        looping_delay: { id: 2, label: 'LOOPING DELAY' },
+        delay: { id: 2, label: 'LOOPING DELAY' },
+        spectral: { id: 3, label: 'SPECTRAL' },
+        oliverb: { id: 4, label: 'OLIVERB' },
+        resonestor: { id: 5, label: 'RESONESTOR' },
+        beat_repeat: { id: 6, label: 'BEAT REPEAT' },
+        kammerl: { id: 6, label: 'BEAT REPEAT' },
+        spectral_clouds: { id: 7, label: 'SPECTRAL CLOUDS' },
+        spectral_cloud: { id: 7, label: 'SPECTRAL CLOUDS' },
+      };
+
+      const mode = modes[normalized];
+      if (!mode) {
+        return 'mode expects granular, stretch, looping_delay, spectral, oliverb, resonestor, beat_repeat, or spectral_clouds';
+      }
+
+      definition.mode = mode.id;
+      definition.parameters.set('MODE', mode.label);
+      return null;
+    }
+    case 'reverse': {
+      const value = evaluate(call.argument);
+      if (typeof value !== 'boolean') return 'reverse expects true or false';
+      definition.reverse = value;
+      definition.parameters.set('REVERSE', value ? 'ON' : 'OFF');
+      return null;
+    }
+    case 'view':
+      if (call.argument.length > 0) return 'view does not accept parameters yet';
+      moduleViews.add(objectName);
+      return null;
+    default:
+      return `unknown Mist method: ${call.name}`;
+  }
 }
 
 function parseDicesScale(value: string): number | null {

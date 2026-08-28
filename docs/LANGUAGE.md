@@ -534,3 +534,100 @@ The dedicated Dices view displays `CLOCK INTERNAL` when free-running and `CLOCK 
 
 
 The Dices `Y` oscilloscope uses a fixed Eurorack display scale of ±5V. This affects visualization only: the signal itself remains in volts for routing and the numeric Y readout continues to show the actual voltage.
+
+
+## Mist (phase 1 shell)
+
+`Mist()` is introduced first as a stereo pass-through module. This phase validates the language API, routing and module view independently from the Clouds WASM backend.
+
+```text
+fx = Mist()
+    .mode("granular")
+    .position(50)
+    .size(50)
+    .pitch(0)
+    .density(50)
+    .texture(50)
+    .mix(0)
+    .spread(50)
+    .feedback(0)
+    .reverb(0)
+    .view();
+```
+
+All effect parameters are parsed and retained, but audio is intentionally unity pass-through in phase 1.
+
+```text
+source.out -> fx.in;   // mono, duplicated to L/R
+left.out -> fx.inL;
+right.out -> fx.inR;
+
+fx.outL -> Audio.out;
+fx.outR -> Audio.out;
+```
+
+`fx.view()` shows `OUT L / R` as a two-trace module view. `fx.outL.view()` and `fx.outR.view()` remain generic single-port scopes.
+
+The Clouds backend will be attached only after an isolated WASM harness passes outside the realtime AudioWorklet path.
+
+
+The phase-1 `Mist()` shell deliberately has no Clouds backend. The upstream processor is validated separately at `/mist-harness.html`; only a backend that passes both the WASM bypass and granular-output tests should be connected to the realtime module.
+
+
+### Mist Clouds backend
+
+After the isolated harness passes, `Mist()` uses the same static-storage Clouds bridge in its AudioWorklet. The runtime WASM is intentionally built with a 4 MB initial memory instead of the earlier 32 MB experimental allocation.
+
+`mix()` is an equal-power host-side crossfade: the Clouds processor always produces a fully wet stream while WebAudio mixes the dry input and wet output.
+
+The `trig` input is available for explicit grain triggering:
+
+```text
+Clock.bpm(90);
+Clock.out -> fx.trig;
+```
+
+It is optional; with density away from the center region, Clouds can generate grains without an external trigger.
+
+
+### Mist: eight SuperParasites modes
+
+`Mist()` now uses the SuperParasites processor and exposes all eight modes:
+
+```text
+fx.mode("granular");
+fx.mode("stretch");
+fx.mode("looping_delay");
+fx.mode("spectral");
+fx.mode("oliverb");
+fx.mode("resonestor");
+fx.mode("beat_repeat");
+fx.mode("spectral_clouds");
+```
+
+The same primary controls remain available in every mode:
+
+```text
+.position()
+.size()
+.pitch()
+.density()
+.texture()
+.mix()
+.spread()
+.feedback()
+.reverb()
+.freeze()
+```
+
+Their musical meaning follows the selected SuperParasites engine. For example, Oliverb interprets the controls as reverb size/decay/filter/modulation parameters, while Resonestor uses pitch, size, density and texture as resonator controls.
+
+`reverse(true)` is also available for the Parasites modes that support reverse playback:
+
+```text
+fx.reverse(true);
+```
+
+Beat Repeat uses the existing Mist controls to recreate the SuperParasites/Kammerl control mapping: `mix` controls repeat probability, `spread` clock division, `feedback` pitch mode, `reverb` distortion, `position` slice selection, `texture` slice modulation and `density` size modulation. Sonus Umbrae still applies its own external equal-power dry/wet crossfade.
+
+Changing mode causes the DSP to run SuperParasites' normal `Prepare()` mode-transition path, so modes with different workspaces such as spectral, Oliverb and Resonestor can reset their internal state correctly.
