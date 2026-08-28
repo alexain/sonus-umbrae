@@ -631,3 +631,66 @@ fx.reverse(true);
 Beat Repeat uses the existing Mist controls to recreate the SuperParasites/Kammerl control mapping: `mix` controls repeat probability, `spread` clock division, `feedback` pitch mode, `reverb` distortion, `position` slice selection, `texture` slice modulation and `density` size modulation. Sonus Umbrae still applies its own external equal-power dry/wet crossfade.
 
 Changing mode causes the DSP to run SuperParasites' normal `Prepare()` mode-transition path, so modes with different workspaces such as spectral, Oliverb and Resonestor can reset their internal state correctly.
+
+
+## Stereo output naming and routing
+
+Stereo modules use a consistent output convention:
+
+```text
+fx.out       // stereo shorthand
+fx.out_L     // left channel only
+fx.out_R     // right channel only
+```
+
+The main audio bus follows the same convention:
+
+```text
+Audio.out
+Audio.out_L
+Audio.out_R
+```
+
+A mono source connected to `Audio.out` is duplicated automatically:
+
+```text
+plaits.out -> Audio.out;
+```
+
+A stereo source connected to `Audio.out` preserves L/R:
+
+```text
+fx.out -> Audio.out;
+```
+
+This expands internally to:
+
+```text
+fx.out_L -> Audio.out_L;
+fx.out_R -> Audio.out_R;
+```
+
+Channels can be selected, attenuated and crossed explicitly:
+
+```text
+fx.out_L(50) -> Audio.out_R;
+fx.out_R(75) -> Audio.out_L;
+```
+
+Selecting one channel of a stereo source makes that route mono, so this:
+
+```text
+fx.out_L -> Audio.out;
+```
+
+duplicates the left signal to both sides of the main output.
+
+Parentheses are deliberately not used for logical L/R selection. They remain available for route attenuation today and for future hardware-output addressing. A future syntax such as:
+
+```text
+Audio.out(5)
+```
+
+can therefore mean physical hardware output 5 without conflicting with stereo channel selection.
+
+`Audio.out` is always monitored as stereo using one overlaid two-trace oscilloscope. The L/R legend uses the same trace colors as other multi-output module views.

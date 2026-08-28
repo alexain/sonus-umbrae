@@ -294,7 +294,9 @@ function syncViews(): void {
     id: 'Audio',
     title: 'AUDIO OUT',
     parameters: audio?.parameters ?? [],
-    signals: signalViews.has('Audio.out') ? [{ signal: 'Audio.out', kind: 'signal', label: 'OUT' }] : [],
+    signals: [],
+    compositeSignals: ['Audio.out_L', 'Audio.out_R'],
+    stereoLegend: true,
     defaultCollapsed: false,
   }));
 
@@ -346,7 +348,7 @@ function syncViews(): void {
         : / : VOICE$/i.test(node.label)
           ? [`${node.id}.out`, `${node.id}.aux`]
           : / : MIST$/i.test(node.label)
-            ? [`${node.id}.outL`, `${node.id}.outR`]
+            ? [`${node.id}.out_L`, `${node.id}.out_R`]
             : []
       : [];
 
@@ -413,6 +415,7 @@ function buildModuleMonitorPanel(options: {
   parameters: Array<{ name: string; value: string; liveSignal?: string }>;
   signals: Array<{ signal: string; kind: string; label: string }>;
   compositeSignals?: string[];
+  stereoLegend?: boolean;
   dicesModule?: boolean;
   dicesClockSource?: 'INTERNAL' | 'EXTERNAL';
   parameterDetails?: ParameterViewState[];
@@ -469,16 +472,25 @@ function buildModuleMonitorPanel(options: {
     section.className = 'monitor-signal monitor-composite';
     const label = document.createElement('div');
     label.className = 'monitor-section-label';
-    label.textContent = options.title.endsWith(': MIST')
-      ? 'OUT L / R'
-      : options.compositeSignals!.length === 2
-        ? 'OUT / AUX'
-        : 'OUT 1-4';
+    label.textContent = options.id === 'Audio'
+      ? 'STEREO OUT'
+      : options.title.endsWith(': MIST')
+        ? 'OUT L / R'
+        : options.compositeSignals!.length === 2
+          ? 'OUT / AUX'
+          : 'OUT 1-4';
+
+    if (options.stereoLegend) {
+      const legend = document.createElement('span');
+      legend.className = 'scope-stereo-legend';
+      legend.innerHTML = '<span class="scope-legend-l">● L</span><span class="scope-legend-r">● R</span>';
+      label.append(legend);
+    }
     const canvas = document.createElement('canvas');
     canvas.className = 'scope-canvas view-signal composite-scope';
     canvas.dataset.signals = options.compositeSignals!.join(',');
     canvas.dataset.kind = 'multi-signal';
-    canvas.setAttribute('aria-label', `${options.title} four-channel signal monitor`);
+    canvas.setAttribute('aria-label', `${options.title} multi-channel signal monitor`);
     section.append(label, canvas);
     body.append(section);
   }

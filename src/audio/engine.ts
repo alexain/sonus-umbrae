@@ -202,6 +202,9 @@ interface AudioRoute {
 export class AudioEngine {
   private context: AudioContext | null = null;
   private master: GainNode | null = null;
+  private audioOutL: GainNode | null = null;
+  private audioOutR: GainNode | null = null;
+  private audioMerger: ChannelMergerNode | null = null;
   private hardwareGain: GainNode | null = null;
   private testOscillator: OscillatorNode | null = null;
   private testGain: GainNode | null = null;
@@ -841,6 +844,14 @@ export class AudioEngine {
       return { node: this.clocks.get(derivedClock[1])!.node, output: 0 };
     }
 
+    if (signal === 'Audio.out_L' || signal === 'Audio.out_R') {
+      this.ensureContext();
+      const node = signal === 'Audio.out_R' ? this.audioOutR : this.audioOutL;
+      if (!node) throw new Error('audio engine unavailable');
+      return { node, output: 0 };
+    }
+
+    // Internal compatibility alias: Audio.out observes the post-merge stereo bus.
     if (signal === 'Audio.out') {
       this.ensureContext();
       if (!this.master) throw new Error('audio engine unavailable');
@@ -867,11 +878,11 @@ export class AudioEngine {
       return { node: dices.node, output: outputs[port] };
     }
 
-    const mistOutput = signal.match(/^([A-Za-z_]\w*)\.(outL|outR)$/);
+    const mistOutput = signal.match(/^([A-Za-z_]\w*)\.(out_L|out_R)$/);
     if (mistOutput) {
       const mist = this.mists.get(mistOutput[1]);
       if (!mist) throw new Error(`unknown Mist object: ${mistOutput[1]}`);
-      return { node: mistOutput[2] === 'outR' ? mist.outputR : mist.outputL, output: 0 };
+      return { node: mistOutput[2] === 'out_R' ? mist.outputR : mist.outputL, output: 0 };
     }
 
     const match = signal.match(/^([A-Za-z_]\w*)\.(out|aux)$/);
@@ -890,10 +901,19 @@ export class AudioEngine {
   }
 
   private destinationForPort(port: string): SignalDestination {
+    if (port === 'Audio.out_L' || port === 'Audio.out_R') {
+      this.ensureContext();
+      const node = port === 'Audio.out_R' ? this.audioOutR : this.audioOutL;
+      if (!node) throw new Error('audio engine unavailable');
+      return { node, input: 0 };
+    }
+
+    // Audio.out routes are normally expanded to out_L/out_R by the runtime.
+    // Keep this alias for backwards compatibility with older serialized programs.
     if (port === 'Audio.out') {
       this.ensureContext();
-      if (!this.master) throw new Error('audio engine unavailable');
-      return { node: this.master, input: 0 };
+      if (!this.audioOutL) throw new Error('audio engine unavailable');
+      return { node: this.audioOutL, input: 0 };
     }
 
     const mistInput = port.match(/^([A-Za-z_]\w*)\.(in|inL|inR)$/);
@@ -1341,21 +1361,40 @@ export class AudioEngine {
   }
 
   private ensureContext(): AudioContext {
-    if (this.context && this.master && this.hardwareGain) return this.context;
+    if (
+      this.context &&
+      this.master &&
+      this.audioOutL &&
+      this.audioOutR &&
+      this.audioMerger &&
+      this.hardwareGain
+    ) return this.context;
 
     const context = new AudioContext({ latencyHint: 'interactive' });
 
+    // Logical stereo main bus. L/R stay independent until the final merger.
+    const audioOutL = context.createGain();
+    const audioOutR = context.createGain();
+    const audioMerger = context.createChannelMerger(2);
     const master = context.createGain();
-    master.gain.value = 1;
-
     const hardwareGain = context.createGain();
+
+    audioOutL.gain.value = 1;
+    audioOutR.gain.value = 1;
+    master.gain.value = 1;
     hardwareGain.gain.value = DEFAULT_HARDWARE_OUTPUT_GAIN;
 
+    audioOutL.connect(audioMerger, 0, 0);
+    audioOutR.connect(audioMerger, 0, 1);
+    audioMerger.connect(master);
     master.connect(hardwareGain);
     hardwareGain.connect(context.destination);
 
     context.addEventListener('statechange', () => this.emit());
     this.context = context;
+    this.audioOutL = audioOutL;
+    this.audioOutR = audioOutR;
+    this.audioMerger = audioMerger;
     this.master = master;
     this.hardwareGain = hardwareGain;
     this.emit();

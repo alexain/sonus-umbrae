@@ -1021,8 +1021,9 @@ export class SonusRuntime {
       }
 
       if (/^Audio(?:\.out)?\.view\(\s*\)\s*$/.test(line)) {
-        views.set('Audio.out', 'signal');
-        results.push({ message: 'Audio.out view' });
+        views.set('Audio.out_L', 'signal');
+        views.set('Audio.out_R', 'signal');
+        results.push({ message: 'Audio.out stereo view' });
         continue;
       }
 
@@ -1067,7 +1068,7 @@ export class SonusRuntime {
         continue;
       }
 
-      match = line.match(/^([A-Za-z_]\w*)\.(outL|outR)\.view\(\s*\)\s*$/);
+      match = line.match(/^([A-Za-z_]\w*)\.(out_L|out_R)\.view\(\s*\)\s*$/);
       if (match && mists.has(match[1])) {
         views.set(`${match[1]}.${match[2]}`, 'signal');
         results.push({ message: `${match[1]}.${match[2]} view` });
@@ -1134,6 +1135,10 @@ export class SonusRuntime {
           diagnostics.push({ line: lineNumber, message: `${sourcePort} is only available on Swell objects: ${sourceName}` });
           continue;
         }
+        if ((sourcePort === 'out_L' || sourcePort === 'out_R') && !mists.has(sourceName)) {
+          diagnostics.push({ line: lineNumber, message: `${sourcePort} is only available on stereo objects: ${sourceName}` });
+          continue;
+        }
         if (/^(t[1-3]|x[1-3]|y)$/.test(sourcePort) && !dices.has(sourceName)) {
           diagnostics.push({ line: lineNumber, message: `${sourcePort} is only available on Dices objects: ${sourceName}` });
           continue;
@@ -1146,6 +1151,11 @@ export class SonusRuntime {
           if (!voices.has(targetName) && !swells.has(targetName)) { diagnostics.push({ line: lineNumber, message: `v_oct input is only available on Voice or Swell objects: ${targetName}` }); continue; }
         } else if (targetPort === 'harmo' || targetPort === 'timbre' || targetPort === 'morph') {
           if (!voices.has(targetName)) { diagnostics.push({ line: lineNumber, message: `${targetPort} input is only available on Voice objects: ${targetName}` }); continue; }
+        } else if (targetPort === 'out_L' || targetPort === 'out_R') {
+          if (targetName !== 'Audio') {
+            diagnostics.push({ line: lineNumber, message: `${targetPort} is only available on Audio for now: ${targetName}` });
+            continue;
+          }
         } else if (targetPort === 'inL' || targetPort === 'inR') {
           if (!mists.has(targetName)) { diagnostics.push({ line: lineNumber, message: `${targetPort} is only available on Mist objects: ${targetName}` }); continue; }
         } else if (targetPort === 'in' && mists.has(targetName)) {
@@ -1163,11 +1173,45 @@ export class SonusRuntime {
           continue;
         }
 
-        const source = `${sourceName}.${sourcePort}`;
-        const target = `${targetName}.${targetPort}`;
-        const kind: SignalKind = sourceName === 'Clock' || clockSources.has(sourceName) ? 'trigger' : /^t[1-3]$/.test(sourcePort) ? 'gate' : 'signal';
-        routes.set(`${source}->${target}`, { source, target, amount, kind });
-        results.push({ message: `${source} -> ${target} @ ${formatNumber(amount)}%` });
+        const kind: SignalKind = sourceName === 'Clock' || clockSources.has(sourceName)
+          ? 'trigger'
+          : /^t[1-3]$/.test(sourcePort)
+            ? 'gate'
+            : 'signal';
+
+        const addRoute = (source: string, target: string): void => {
+          routes.set(`${source}->${target}`, { source, target, amount, kind });
+        };
+
+        const sourceIsStereoShorthand = mists.has(sourceName) && sourcePort === 'out';
+        const targetIsAudioStereo = targetName === 'Audio' && targetPort === 'out';
+
+        if (targetIsAudioStereo) {
+          if (sourceIsStereoShorthand) {
+            addRoute(`${sourceName}.out_L`, 'Audio.out_L');
+            addRoute(`${sourceName}.out_R`, 'Audio.out_R');
+            results.push({ message: `${sourceName}.out stereo -> Audio.out stereo @ ${formatNumber(amount)}%` });
+          } else {
+            const source = `${sourceName}.${sourcePort}`;
+            // Mono -> stereo duplicates to both channels.
+            addRoute(source, 'Audio.out_L');
+            addRoute(source, 'Audio.out_R');
+            results.push({ message: `${source} -> Audio.out stereo @ ${formatNumber(amount)}%` });
+          }
+        } else {
+          if (sourceIsStereoShorthand) {
+            diagnostics.push({
+              line: lineNumber,
+              message: `${sourceName}.out is stereo; select ${sourceName}.out_L or ${sourceName}.out_R for a mono destination`,
+            });
+            continue;
+          }
+
+          const source = `${sourceName}.${sourcePort}`;
+          const target = `${targetName}.${targetPort}`;
+          addRoute(source, target);
+          results.push({ message: `${source} -> ${target} @ ${formatNumber(amount)}%` });
+        }
         continue;
       }
 
@@ -1325,12 +1369,12 @@ export class SonusRuntime {
 
     const embeddedViews = new Map<string, SchemeEmbeddedView[]>();
     const addEmbeddedView = (signal: string, signalKind: SignalKind): void => {
-      const owner = signal === 'Audio.out'
+      const owner = /^Audio\.out_[LR]$/.test(signal)
         ? 'Audio'
         : signal === 'Clock.out'
           ? 'Clock'
-          : signal.replace(/\.(out|aux|out[1-4])$/, '');
-      const portMatch = signal.match(/\.(out|aux|out[1-4])$/);
+          : signal.replace(/\.(out|aux|out[1-4]|out_[LR])$/, '');
+      const portMatch = signal.match(/\.(out|aux|out[1-4]|out_[LR])$/);
       const port = portMatch ? portMatch[1].toUpperCase() : 'OUT';
       const ownerViews = embeddedViews.get(owner) ?? [];
       if (!ownerViews.some((view) => view.signal === signal)) {
@@ -1341,7 +1385,12 @@ export class SonusRuntime {
 
     // Keep Scheme compact: only structural/global monitors are automatic.
     // Module outputs, secondary ports and derived clocks require .view().
-    addEmbeddedView('Audio.out', 'signal');
+    embeddedViews.set('Audio', [{
+      signal: 'Audio.out_L',
+      signals: ['Audio.out_L', 'Audio.out_R'],
+      signalKind: 'signal',
+      port: 'OUT L / R',
+    }]);
     addEmbeddedView('Clock.out', 'trigger');
 
     for (const [signal, signalKind] of views) {
@@ -1374,8 +1423,8 @@ export class SonusRuntime {
         });
       } else if (mists.has(name)) {
         ownerViews.push({
-          signal: `${name}.outL`,
-          signals: [`${name}.outL`, `${name}.outR`],
+          signal: `${name}.out_L`,
+          signals: [`${name}.out_L`, `${name}.out_R`],
           signalKind: 'signal',
           port: 'OUT L / R',
         });
@@ -1455,11 +1504,11 @@ export class SonusRuntime {
 
     const schemeConnections: SchemeConnection[] = [
       ...[...routes.values()].map((route) => ({
-        source: route.source.replace(/\.(out|aux|out[1-4]|outL|outR|t[1-3]|x[1-3]|y)$/, ''),
+        source: route.source.replace(/\.(out|aux|out[1-4]|out_[LR]|t[1-3]|x[1-3]|y)$/, ''),
         target: route.target.startsWith('Audio.')
           ? 'Audio'
-          : route.target.replace(/\.(inL|inR|in|trig|clock|v_oct|harmo|timbre|morph)$/, ''),
-        sourcePort: (route.source.match(/\.(out|aux|out[1-4]|outL|outR|t[1-3]|x[1-3]|y)$/)?.[1] ?? 'out').toUpperCase(),
+          : route.target.replace(/\.(out_[LR]|inL|inR|in|trig|clock|v_oct|harmo|timbre|morph)$/, ''),
+        sourcePort: (route.source.match(/\.(out|aux|out[1-4]|out_[LR]|t[1-3]|x[1-3]|y)$/)?.[1] ?? 'out').toUpperCase(),
         targetPort: route.target.endsWith('.trig')
           ? 'TRIG'
           : route.target.endsWith('.clock')
@@ -1549,7 +1598,8 @@ export class SonusRuntime {
         .map(([signal, kind]) => ({ signal, kind: kind as SignalKind })),
       monitorViews: (() => {
         const monitors = new Map<string, SignalKind>();
-        monitors.set('Audio.out', 'signal');
+        monitors.set('Audio.out_L', 'signal');
+        monitors.set('Audio.out_R', 'signal');
         monitors.set('Clock.out', 'trigger');
         for (const [signal, kind] of views) {
           if (kind !== 'parameter') monitors.set(signal, kind as SignalKind);
@@ -1567,8 +1617,8 @@ export class SonusRuntime {
             }
             monitors.set(`${name}.y`, 'signal');
           } else if (mists.has(name)) {
-            monitors.set(`${name}.outL`, 'signal');
-            monitors.set(`${name}.outR`, 'signal');
+            monitors.set(`${name}.out_L`, 'signal');
+            monitors.set(`${name}.out_R`, 'signal');
           }
         }
         return [...monitors].map(([signal, kind]) => ({ signal, kind }));
@@ -1969,28 +2019,38 @@ function parseChainedCalls(tail: string): ChainedCall[] | null {
 
 interface ParsedRoute {
   sourceName: string;
-  sourcePort: 'out' | 'aux' | 'out1' | 'out2' | 'out3' | 'out4' | 't1' | 't2' | 't3' | 'x1' | 'x2' | 'x3' | 'y' | 'outL' | 'outR';
+  sourcePort: 'out' | 'out_L' | 'out_R' | 'aux' | 'out1' | 'out2' | 'out3' | 'out4' | 't1' | 't2' | 't3' | 'x1' | 'x2' | 'x3' | 'y';
   amountExpression: string | null;
   targetName: string;
-  targetPort: 'out' | 'in' | 'inL' | 'inR' | 'trig' | 'clock' | 'v_oct' | 'harmo' | 'timbre' | 'morph';
+  targetPort: 'out' | 'out_L' | 'out_R' | 'in' | 'inL' | 'inR' | 'trig' | 'clock' | 'v_oct' | 'harmo' | 'timbre' | 'morph';
 }
 
 function parseRouteLine(line: string): ParsedRoute | null {
   const arrow = line.indexOf('->');
   if (arrow < 0 || line.indexOf('->', arrow + 2) >= 0) return null;
+
   const left = line.slice(0, arrow).trim();
   const right = line.slice(arrow + 2).trim();
-  const target = right.match(/^([A-Za-z_]\w*)\.(out|inL|inR|in|trig|clock|v_oct|harmo|timbre|morph)$/);
+
+  const target = right.match(
+    /^([A-Za-z_]\w*)\.(out|out_L|out_R|inL|inR|in|trig|clock|v_oct|harmo|timbre|morph)$/,
+  );
   if (!target) return null;
-  const source = left.match(/^([A-Za-z_]\w*)\.(out1|out2|out3|out4|outL|outR|t1|t2|t3|x1|x2|x3|y|out|aux)(.*)$/);
+
+  const source = left.match(
+    /^([A-Za-z_]\w*)\.(out_L|out_R|out1|out2|out3|out4|t1|t2|t3|x1|x2|x3|y|out|aux)(.*)$/,
+  );
   if (!source) return null;
+
   const suffix = source[3].trim();
   let amountExpression: string | null = null;
+
   if (suffix) {
     if (!suffix.startsWith('(') || !suffix.endsWith(')')) return null;
     amountExpression = suffix.slice(1, -1).trim();
     if (!amountExpression) return null;
   }
+
   return {
     sourceName: source[1],
     sourcePort: source[2] as ParsedRoute['sourcePort'],
