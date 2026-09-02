@@ -1,6 +1,7 @@
 import './style.css';
 import { AudioEngine } from './audio/engine';
 import { SonusEvaluationError, SonusRuntime, type ParameterViewState, type SchemeConnection, type SchemeModel, type SchemeNode } from './language/runtime';
+import { compileLanguageSource, LanguageError } from './language/language';
 
 type Screen = 'live' | 'config' | 'help' | 'scheme';
 
@@ -14,7 +15,8 @@ app.innerHTML = `
     <header class="statusbar">
       <span class="brand">SONUS UMBRAE / ${VERSION}</span>
       <span class="status-item"><span class="label">CLK</span> <span id="clock-status" class="disabled">--.-</span></span>
-      <span class="status-item"><span class="label">LIVE</span> <span id="live-dot" class="dot off" aria-label="engine stopped"></span></span>
+      <span class="status-item"><span class="label">AUDIO ENGINE</span> <span id="live-dot" class="dot off" aria-label="engine stopped"></span></span>
+      <span class="status-item"><span class="label">LIVE</span> <span id="code-status" class="disabled" aria-label="code stopped">○</span></span>
       <span class="status-item optional"><span class="label">DSP</span> <span id="dsp-status" class="disabled">--%</span></span>
     </header>
 
@@ -50,6 +52,8 @@ app.innerHTML = `
           <span>:CLEAR</span><span>CLEAR SOURCE</span>
           <span>:START</span><span>START / RESUME AUDIO ENGINE</span>
           <span>:STOP</span><span>SUSPEND AUDIO ENGINE</span>
+          <span>:RUN</span><span>START / RELOAD LIVE CODE</span>
+          <span>:RUN STOP</span><span>STOP LIVE CODE</span>
           <span>:TEST 440</span><span>PLAY DIAGNOSTIC SINE TONE</span>
           <span>:TEST STOP</span><span>STOP DIAGNOSTIC TONE</span>
           <span>:CLOCK START</span><span>START MASTER CLOCK TRANSPORT</span>
@@ -122,6 +126,7 @@ const viewPanel = must<HTMLElement>('view-panel');
 const viewStack = must<HTMLElement>('view-stack');
 const diagnostic = must<HTMLElement>('diagnostic');
 const liveDot = must<HTMLElement>('live-dot');
+const codeStatus = must<HTMLElement>('code-status');
 const dspStatus = must<HTMLElement>('dsp-status');
 const clockStatus = must<HTMLElement>('clock-status');
 
@@ -139,6 +144,7 @@ const dicesHistories = new Map<string, {
 }>();
 let savedEditorSelection: { start: number; end: number; direction: 'forward' | 'backward' | 'none' } | null = null;
 let audioAutoStartPending = true;
+let codeRunning = false;
 let diagnosticLines = new Set<number>();
 const PANEL_STATE_KEY = 'sonus-umbrae.monitor-panels';
 const panelCollapsed = new Map<string, boolean>();
@@ -281,8 +287,50 @@ function notify(text: string): void {
   messageTimer = window.setTimeout(() => message.classList.remove('visible'), 1800);
 }
 
+function normalizeLanguageCommandCase(): void {
+  const normalized = editor.value.replace(
+    /^(\s*)(voice|play)\b/gim,
+    (_match, indentation: string, commandName: string) => `${indentation}${commandName.toUpperCase()}`,
+  );
+  if (normalized === editor.value) return;
+
+  const start = editor.selectionStart;
+  const end = editor.selectionEnd;
+  const direction = editor.selectionDirection ?? 'none';
+  editor.value = normalized;
+  editor.setSelectionRange(start, end, direction);
+}
+
 function sourceText(): string {
   return editor.value.replace(/\r\n/g, '\n');
+}
+
+function setCodeRunning(running: boolean): void {
+  codeRunning = running;
+  codeStatus.textContent = running ? '▶' : '○';
+  codeStatus.classList.toggle('disabled', !running);
+  codeStatus.setAttribute('aria-label', running ? 'code running' : 'code stopped');
+}
+
+function validateLanguageSource(): boolean {
+  try {
+    clearDiagnostic();
+    const source = sourceText();
+    if (source.trim()) compileLanguageSource(source);
+    notify('source valid');
+    return true;
+  } catch (error) {
+    if (error instanceof LanguageError) {
+      showDiagnostics(error.diagnostics);
+      return false;
+    }
+    notify(error instanceof Error ? error.message : 'validation failed');
+    return false;
+  }
+}
+
+function refreshCodeFromEditor(): boolean {
+  return codeRunning ? evaluateLiveSource() : validateLanguageSource();
 }
 
 function evaluateLiveSource(): boolean {
@@ -296,12 +344,19 @@ function evaluateLiveSource(): boolean {
       return true;
     }
 
-    const results = runtime.evaluate(source);
+    const compiled = compileLanguageSource(source);
+    const results = runtime.evaluate(compiled);
     const last = results.at(-1);
     syncViews();
     notify(last?.message ?? 'ok');
     return true;
   } catch (error) {
+    if (error instanceof LanguageError) {
+      showDiagnostics(error.diagnostics);
+      syncViews();
+      return false;
+    }
+
     if (error instanceof SonusEvaluationError) {
       showDiagnostics(error.diagnostics);
       syncViews();
@@ -1319,58 +1374,14 @@ function statementLabels(source: string): string[] {
   const lines = source.split('\n');
   const labels = Array(lines.length).fill('') as string[];
   let statement = 0;
-  let pending = false;
-  let braceDepth = 0;
-  let quote: '"' | "'" | null = null;
-  let escaped = false;
 
-  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-    const line = lines[lineIndex];
-    let hasCode = false;
-    let topLevelTerminator = false;
-
-    for (let i = 0; i < line.length; i += 1) {
-      const char = line[i];
-      const next = line[i + 1];
-
-      if (quote) {
-        hasCode = true;
-        if (escaped) escaped = false;
-        else if (char === '\\') escaped = true;
-        else if (char === quote) quote = null;
-        continue;
-      }
-
-      if (char === '"' || char === "'") {
-        quote = char;
-        hasCode = true;
-        continue;
-      }
-
-      if (char === '/' && next === '/') break;
-      if (!/\s/.test(char)) hasCode = true;
-
-      if (char === '{') {
-        braceDepth += 1;
-        continue;
-      }
-
-      if (char === '}') {
-        braceDepth = Math.max(0, braceDepth - 1);
-        if (braceDepth === 0) topLevelTerminator = true;
-        continue;
-      }
-
-      if (char === ';' && braceDepth === 0) topLevelTerminator = true;
-    }
-
-    if (hasCode && !pending) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const trimmed = lines[index].trim();
+    if (!trimmed || trimmed.startsWith('//')) continue;
+    if (/^(VOICE|PLAY)\b/i.test(trimmed)) {
       statement += 1;
-      labels[lineIndex] = String(statement);
-      pending = true;
+      labels[index] = String(statement);
     }
-
-    if (topLevelTerminator) pending = false;
   }
 
   return labels;
@@ -1386,48 +1397,16 @@ function statementNumberForPhysicalLine(labels: string[], physicalLine: number):
 }
 
 function statementCompleteBeforeCaret(source: string): boolean {
-  let quote: '"' | "'" | null = null;
-  let escaped = false;
-  let inComment = false;
-  let braceDepth = 0;
-  let lastSignificant = '';
+  const lines = source.replace(/\r\n/g, '\n').split('\n');
+  const current = lines.at(-1)?.trim() ?? '';
+  if (!current) return false;
 
-  for (let i = 0; i < source.length; i += 1) {
-    const char = source[i];
-    const next = source[i + 1];
+  if (/^PLAY\b/i.test(current)) return true;
 
-    if (inComment) {
-      if (char === '\n') inComment = false;
-      continue;
-    }
-
-    if (quote) {
-      if (escaped) escaped = false;
-      else if (char === '\\') escaped = true;
-      else if (char === quote) quote = null;
-      continue;
-    }
-
-    if (char === '"' || char === "'") {
-      quote = char;
-      lastSignificant = char;
-      continue;
-    }
-
-    if (char === '/' && next === '/') {
-      inComment = true;
-      i += 1;
-      continue;
-    }
-
-    if (char === '{') braceDepth += 1;
-    else if (char === '}') braceDepth = Math.max(0, braceDepth - 1);
-
-    if (!/\s/.test(char)) lastSignificant = char;
-  }
-
-  if (braceDepth > 0) return false;
-  return lastSignificant === ';' || lastSignificant === '}';
+  // VOICE blocks stay open while entering indented properties. They are
+  // evaluated with CMD/CTRL+ENTER for v1; later temporal statements will
+  // provide richer completion rules.
+  return false;
 }
 
 function renderSyntaxLayer(): void {
@@ -1610,6 +1589,7 @@ async function runCommand(raw: string): Promise<void> {
     case 'clear':
       setSourceText('');
       runtime.evaluate('');
+      setCodeRunning(false);
       syncViews();
       leaveCommandMode();
       notify('source cleared');
@@ -1622,6 +1602,27 @@ async function runCommand(raw: string): Promise<void> {
       leaveCommandMode();
       await loadSource();
       return;
+    case 'run': {
+      leaveCommandMode();
+      const action = args[0]?.toLowerCase();
+      if (action === 'stop') {
+        runtime.evaluate('');
+        setCodeRunning(false);
+        syncViews();
+        notify('live code stopped');
+        return;
+      }
+      if (action !== undefined) {
+        notify('usage: :run | :run stop');
+        return;
+      }
+      const applied = evaluateLiveSource();
+      if (applied) {
+        setCodeRunning(true);
+        notify('live code running');
+      }
+      return;
+    }
     case 'start':
       leaveCommandMode();
       try {
@@ -1721,7 +1722,7 @@ async function loadSource(): Promise<void> {
     const file = input.files?.[0];
     if (!file) return;
     setSourceText(await file.text());
-    const applied = evaluateLiveSource();
+    const applied = refreshCodeFromEditor();
     if (applied) notify(`loaded ${file.name}`);
     else notify(`loaded ${file.name} — runtime unchanged`);
   }, { once: true });
@@ -1734,6 +1735,7 @@ audioStartButton.addEventListener('click', () => {
 
 document.addEventListener('selectionchange', () => requestAnimationFrame(positionBlockCaret));
 editor.addEventListener('input', () => {
+  normalizeLanguageCommandCase();
   renderSyntaxLayer();
   renderLineGutter();
   requestAnimationFrame(positionBlockCaret);
@@ -1768,7 +1770,7 @@ editor.addEventListener('keydown', (event) => {
 
   if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
     event.preventDefault();
-    evaluateLiveSource();
+    refreshCodeFromEditor();
     requestAnimationFrame(positionBlockCaret);
     return;
   }
@@ -1776,16 +1778,24 @@ editor.addEventListener('keydown', (event) => {
   if (event.key === 'Enter') {
     event.preventDefault();
 
+    normalizeLanguageCommandCase();
+
     const start = editor.selectionStart;
     const end = editor.selectionEnd;
     const before = editor.value.slice(0, start);
-    const complete = statementCompleteBeforeCaret(before);
-    const indentation = complete ? '' : '    ';
+    const currentLine = before.slice(before.lastIndexOf('\n') + 1);
+    const trimmed = currentLine.trim();
+    const currentIndent = currentLine.match(/^\s*/)?.[0] ?? '';
+
+    let indentation = currentIndent;
+    if (!trimmed) indentation = '';
+    else if (/^VOICE\b.*:\s*$/i.test(trimmed)) indentation = '    ';
+
     editor.setRangeText(`\n${indentation}`, start, end, 'end');
 
     renderSyntaxLayer();
     renderLineGutter();
-    if (!event.shiftKey && complete) evaluateLiveSource();
+    if (!event.shiftKey) refreshCodeFromEditor();
 
     requestAnimationFrame(positionBlockCaret);
     return;
@@ -1850,5 +1860,6 @@ window.addEventListener('pointerdown', (event) => {
   requestAnimationFrame(positionBlockCaret);
 });
 
+setCodeRunning(false);
 renderSyntaxLayer();
 requestAnimationFrame(renderLineGutter);

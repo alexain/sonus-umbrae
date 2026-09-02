@@ -189,6 +189,19 @@ interface ClockDefinition {
   parameters: Map<string, string>;
 }
 
+interface LanguageSequenceDefinition {
+  values: number[];
+  mode: 'order' | 'random' | 'walk' | 'shuffle' | 'reverse';
+}
+
+interface LanguageCycleDefinition {
+  amount: number;
+  unit: 'ms' | 'sec' | 'beat';
+  chance: number;
+  drift: boolean;
+  loose: boolean;
+}
+
 export class SonusRuntime {
   private parameterViews: ParameterViewState[] = [];
   private variableViews: VariableViewState[] = [];
@@ -201,6 +214,7 @@ export class SonusRuntime {
   };
 
   private whenUnsubscribers: Array<() => void> = [];
+  private cycleUnsubscribers: Array<() => void> = [];
 
   constructor(private readonly audio: AudioEngine) {}
 
@@ -263,6 +277,31 @@ export class SonusRuntime {
     const parsedWhen = extractWhenBlocks(source);
     if (parsedWhen.diagnostics.length > 0) throw new SonusEvaluationError(parsedWhen.diagnostics);
     const lines = parseStatements(parsedWhen.source);
+
+    const languageSequences = new Map<string, LanguageSequenceDefinition>();
+    const languageCycles = new Map<string, LanguageCycleDefinition>();
+    for (const { source: line, line: lineNumber } of lines) {
+      const sequence = parseLanguageSequenceDirective(line);
+      if (sequence) {
+        if (sequence.values.length === 0 || sequence.values.some((value) => !Number.isFinite(value) || value <= 0)) {
+          diagnostics.push({ line: lineNumber, message: 'invalid internal sequence values' });
+        } else {
+          languageSequences.set(sequence.name, { values: sequence.values, mode: sequence.mode });
+        }
+        continue;
+      }
+
+      const cycle = parseLanguageCycleDirective(line);
+      if (cycle) {
+        languageCycles.set(cycle.name, {
+          amount: cycle.amount,
+          unit: cycle.unit,
+          chance: cycle.chance,
+          drift: cycle.drift,
+          loose: cycle.loose,
+        });
+      }
+    }
 
     // Pass 1: declarations. Objects are collected before the remaining statements
     // so the source remains declarative rather than execution-order dependent.
@@ -582,6 +621,8 @@ export class SonusRuntime {
     // source order. All module declarations already exist, so references between
     // modules are still independent from declaration order.
     for (const { source: line, line: lineNumber } of lines) {
+      if (parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageFromDirective(line)) continue;
+
       const oscillatorDeclaration = parseOscillatorDeclaration(line);
       if (oscillatorDeclaration) {
         const definition = oscillators.get(oscillatorDeclaration.name)!;
@@ -1218,6 +1259,10 @@ export class SonusRuntime {
       diagnostics.push({ line: lineNumber, message: `cannot evaluate: ${line}` });
     }
 
+    for (const name of languageCycles.keys()) {
+      if (!voices.has(name)) diagnostics.push({ line: 1, message: `cycle references unknown Voice object: ${name}` });
+    }
+
     const variableViews: VariableViewState[] = [];
     const seenVariableViews = new Set<string>();
     for (const request of variableViewRequests) {
@@ -1633,8 +1678,109 @@ export class SonusRuntime {
     this.moduleViews = new Set(moduleViews);
     for (const unsubscribe of this.whenUnsubscribers) unsubscribe();
     this.whenUnsubscribers = [];
+    for (const unsubscribe of this.cycleUnsubscribers) unsubscribe();
+    this.cycleUnsubscribers = [];
 
     this.audio.applyProgram(program);
+
+    for (const [name, cycle] of languageCycles) {
+      const voice = voices.get(name);
+      if (!voice) continue;
+      const sequence = languageSequences.get(name);
+      let cursor = 0;
+      let walkCursor = 0;
+      let shuffleOrder: number[] = [];
+      let shuffleCursor = 0;
+      let driftRatio = 1;
+
+      const reshuffle = (): void => {
+        const count = sequence?.values.length ?? 0;
+        shuffleOrder = Array.from({ length: count }, (_, index) => index);
+        for (let index = shuffleOrder.length - 1; index > 0; index -= 1) {
+          const swap = Math.floor(random() * (index + 1));
+          [shuffleOrder[index], shuffleOrder[swap]] = [shuffleOrder[swap], shuffleOrder[index]];
+        }
+        shuffleCursor = 0;
+      };
+
+      const nextFrequency = (): number => {
+        if (!sequence || sequence.values.length === 0) return voice.frequency;
+        const values = sequence.values;
+        if (values.length === 1) return values[0];
+
+        if (sequence.mode === 'random') return values[Math.floor(random() * values.length)];
+        if (sequence.mode === 'walk') {
+          const direction = random() < 0.5 ? -1 : 1;
+          walkCursor += direction;
+          if (walkCursor < 0) walkCursor = 1;
+          if (walkCursor >= values.length) walkCursor = Math.max(0, values.length - 2);
+          return values[walkCursor];
+        }
+        if (sequence.mode === 'shuffle') {
+          if (shuffleOrder.length !== values.length || shuffleCursor >= shuffleOrder.length) reshuffle();
+          return values[shuffleOrder[shuffleCursor++]];
+        }
+        if (sequence.mode === 'reverse') {
+          cursor = (cursor - 1 + values.length) % values.length;
+          return values[cursor];
+        }
+
+        cursor = (cursor + 1) % values.length;
+        return values[cursor];
+      };
+
+      const fire = (): void => {
+        if (cycle.chance < 100 && random() * 100 >= cycle.chance) return;
+        const frequency = nextFrequency();
+        voice.frequency = frequency;
+        this.audio.setVoiceParameter(name, 'freq', frequency);
+      };
+
+      if (cycle.unit === 'beat') {
+        let beats = 0;
+        let pendingTimeout: ReturnType<typeof setTimeout> | null = null;
+        const unsubscribeClock = this.audio.subscribeClockTrigger('Clock', () => {
+          beats += 1;
+          if (beats < cycle.amount) return;
+          beats = 0;
+          if (!cycle.loose) {
+            fire();
+            return;
+          }
+          const bpm = this.audio.getClockStatus().bpm;
+          const beatMs = bpm > 0 ? 60000 / bpm : 0;
+          pendingTimeout = setTimeout(fire, beatMs * 0.08 * random());
+        });
+        this.cycleUnsubscribers.push(() => {
+          unsubscribeClock();
+          if (pendingTimeout !== null) clearTimeout(pendingTimeout);
+        });
+        continue;
+      }
+
+      let active = true;
+      let timeout: ReturnType<typeof setTimeout> | null = null;
+      const baseMs = cycle.unit === 'sec' ? cycle.amount * 1000 : cycle.amount;
+      const schedule = (): void => {
+        if (!active) return;
+        if (cycle.drift) {
+          driftRatio += (random() - 0.5) * 0.06;
+          driftRatio = Math.min(1.2, Math.max(0.8, driftRatio));
+        } else {
+          driftRatio = 1;
+        }
+        const looseRatio = cycle.loose ? 0.94 + random() * 0.12 : 1;
+        timeout = setTimeout(() => {
+          fire();
+          schedule();
+        }, Math.max(1, baseMs * driftRatio * looseRatio));
+      };
+      schedule();
+      this.cycleUnsubscribers.push(() => {
+        active = false;
+        if (timeout !== null) clearTimeout(timeout);
+      });
+    }
 
     for (const handler of whenHandlers) {
       let eventIndex = 0;
@@ -1856,6 +2002,30 @@ function matchesCycle(condition: CycleCondition | null, eventIndex: number): boo
   if (condition.first) return eventIndex === 1;
   if (condition.notFirst) return eventIndex > 1;
   return ((eventIndex - 1) % condition.length!) + 1 === condition.position;
+}
+
+function parseLanguageSequenceDirective(line: string): ({ name: string; values: number[]; mode: LanguageSequenceDefinition['mode'] }) | null {
+  const match = line.match(/^__sequence\("([A-Za-z_]\w*)","([^"]*)","(order|random|walk|shuffle|reverse)"\)$/);
+  if (!match) return null;
+  return { name: match[1], values: match[2].split('|').filter(Boolean).map(Number), mode: match[3] as LanguageSequenceDefinition['mode'] };
+}
+
+function parseLanguageCycleDirective(line: string): ({ name: string; amount: number; unit: LanguageCycleDefinition['unit']; chance: number; drift: boolean; loose: boolean }) | null {
+  const match = line.match(/^__cycle\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false)\)$/);
+  if (!match) return null;
+  return {
+    name: match[1],
+    amount: Number(match[2]),
+    unit: match[3] as LanguageCycleDefinition['unit'],
+    chance: Number(match[4]),
+    drift: match[5] === 'true',
+    loose: match[6] === 'true',
+  };
+}
+
+function parseLanguageFromDirective(line: string): ({ target: string; property: string; source: string }) | null {
+  const match = line.match(/^__from\("([A-Za-z_]\w*)","(note|freq|cycle)","([A-Za-z_]\w*)"\)$/);
+  return match ? { target: match[1], property: match[2], source: match[3] } : null;
 }
 
 function parseStatements(source: string): Array<{ source: string; line: number }> {
