@@ -841,3 +841,56 @@ button, input, textarea { font: inherit; }
 
 .scope-legend-l { color: var(--scope-trace-1); }
 .scope-legend-r { color: var(--scope-trace-2); }
+
+/* Explicit Web Audio startup gate. */
+.audio-start-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  background: rgba(5, 6, 5, 0.78);
+  backdrop-filter: blur(1.5px);
+}
+
+.audio-start-card {
+  width: min(430px, calc(100vw - 36px));
+  padding: 20px;
+  border: 1px solid var(--line);
+  background: rgba(5, 6, 5, 0.98);
+  box-shadow: 0 0 34px rgba(215, 169, 46, 0.09);
+}
+
+.audio-start-title {
+  color: var(--phosphor);
+  letter-spacing: 0.12em;
+}
+
+.audio-start-copy {
+  margin: 14px 0 18px;
+  color: var(--phosphor-hot);
+  letter-spacing: 0.08em;
+}
+
+.audio-start-button {
+  min-width: 160px;
+  padding: 7px 14px;
+  border: 1px solid var(--phosphor);
+  background: transparent;
+  color: var(--phosphor);
+  cursor: pointer;
+  font: inherit;
+}
+
+.audio-start-button:hover,
+.audio-start-button:focus-visible {
+  color: var(--phosphor-hot);
+  border-color: var(--phosphor-hot);
+  outline: none;
+  box-shadow: 0 0 8px rgba(255, 231, 131, 0.12);
+}
+
+.audio-start-button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}

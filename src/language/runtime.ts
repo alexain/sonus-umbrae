@@ -2473,12 +2473,6 @@ function percentError(value: number, name: string): string | null {
     : null;
 }
 
-function parseSingleNumber(value: string): number | null {
-  if (!/^-?\d+(?:\.\d+)?$/.test(value)) return null;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
 function midiToFrequency(note: number): number {
   return 440 * 2 ** ((note - 69) / 12);
 }

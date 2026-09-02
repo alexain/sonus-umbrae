@@ -33,7 +33,7 @@ app.innerHTML = `
         <div class="system-title">CONFIGURATION</div>
         <div class="rule"></div>
         <div class="system-copy">NO CONFIGURABLE PARAMETERS IN ${VERSION}</div>
-        <div class="system-copy muted">ESC  RETURN TO LIVE</div>
+        <div class="system-copy muted">ESC  RETURN TO CODE</div>
       </div>
 
       <div id="help-screen" class="screen system-screen hidden" aria-hidden="true">
@@ -73,6 +73,16 @@ app.innerHTML = `
         <div class="scheme-hints">ESC / TAB&nbsp;&nbsp;LIVE</div>
       </div>
 
+      <div id="audio-start-overlay" class="audio-start-overlay" role="dialog" aria-modal="true" aria-label="Start audio engine">
+        <div class="audio-start-card">
+          <div class="audio-start-title">SONUS UMBRAE</div>
+          <div class="rule"></div>
+          <div class="audio-start-copy">AUDIO ENGINE SUSPENDED</div>
+          <button id="audio-start-button" class="audio-start-button" type="button">START AUDIO</button>
+          <div id="audio-start-status" class="system-copy muted">BROWSER REQUIRES USER INTERACTION</div>
+        </div>
+      </div>
+
       <div id="phosphor-layer" class="phosphor-layer" aria-hidden="true">
         <span id="error-overlays" class="error-overlays"></span>
         <span id="block-caret" class="block-caret hidden"></span>
@@ -90,7 +100,6 @@ app.innerHTML = `
 
 const editor = must<HTMLTextAreaElement>('editor');
 const syntaxLayer = must<HTMLElement>('syntax-layer');
-const lineGutter = must<HTMLElement>('line-gutter');
 const lineGutterContent = must<HTMLElement>('line-gutter-content');
 const commandbar = must<HTMLElement>('commandbar');
 const command = must<HTMLInputElement>('command');
@@ -102,6 +111,9 @@ const schemeViewport = must<HTMLElement>('scheme-viewport');
 const schemeWorld = must<HTMLElement>('scheme-world');
 const schemeEdges = must<SVGSVGElement>('scheme-edges');
 const schemeNodes = must<HTMLElement>('scheme-nodes');
+const audioStartOverlay = must<HTMLElement>('audio-start-overlay');
+const audioStartButton = must<HTMLButtonElement>('audio-start-button');
+const audioStartStatus = must<HTMLElement>('audio-start-status');
 const phosphorLayer = must<HTMLElement>('phosphor-layer');
 const message = must<HTMLElement>('message');
 const blockCaret = must<HTMLElement>('block-caret');
@@ -150,9 +162,33 @@ async function tryAutoStartAudio(): Promise<void> {
   }
 }
 
-function retryAutoStartFromGesture(): void {
-  if (!audioAutoStartPending) return;
-  void tryAutoStartAudio();
+async function startAudioFromOverlay(): Promise<void> {
+  if (!audioAutoStartPending) {
+    audioStartOverlay.classList.add('hidden');
+    return;
+  }
+
+  audioStartButton.disabled = true;
+  audioStartButton.textContent = 'STARTING...';
+  audioStartStatus.textContent = 'INITIALIZING AUDIO ENGINE';
+
+  try {
+    await tryAutoStartAudio();
+
+    if (audioEngine.snapshot().state !== 'running') {
+      throw new Error('audio start blocked');
+    }
+
+    audioStartOverlay.classList.add('hidden');
+    audioStartButton.disabled = false;
+    audioStartButton.textContent = 'START AUDIO';
+    audioStartStatus.textContent = 'BROWSER REQUIRES USER INTERACTION';
+    editor.focus();
+  } catch {
+    audioStartButton.disabled = false;
+    audioStartButton.textContent = 'RETRY AUDIO';
+    audioStartStatus.textContent = 'AUDIO START FAILED — TRY AGAIN';
+  }
 }
 
 audioEngine.subscribe((snapshot) => {
@@ -169,8 +205,10 @@ audioEngine.subscribe((snapshot) => {
 });
 
 editor.value = '';
-editor.focus();
-void tryAutoStartAudio();
+
+// Web Audio requires an explicit user gesture.
+// Keep the engine suspended until the user activates the startup gate.
+audioStartButton.focus();
 
 function must<T extends Element>(id: string): T {
   const el = document.getElementById(id);
@@ -1403,7 +1441,7 @@ function renderSyntaxLayer(): void {
   syntaxLayer.style.letterSpacing = editorStyle.letterSpacing;
   syntaxLayer.replaceChildren();
   const lines = source.split('\n');
-  lines.forEach((line, index) => {
+  lines.forEach((line) => {
     const row = document.createElement('div');
     row.className = 'syntax-line';
     const commentAt = commentStart(line);
@@ -1690,6 +1728,10 @@ async function loadSource(): Promise<void> {
   input.click();
 }
 
+audioStartButton.addEventListener('click', () => {
+  void startAudioFromOverlay();
+});
+
 document.addEventListener('selectionchange', () => requestAnimationFrame(positionBlockCaret));
 editor.addEventListener('input', () => {
   renderSyntaxLayer();
@@ -1711,7 +1753,6 @@ window.addEventListener('resize', () => {
   renderLineGutter();
   requestAnimationFrame(positionBlockCaret);
 });
-window.addEventListener('keydown', retryAutoStartFromGesture, { capture: true });
 
 editor.addEventListener('beforeinput', (event) => {
   const input = event as InputEvent;
@@ -1773,6 +1814,18 @@ command.addEventListener('keydown', (event) => {
 });
 
 document.addEventListener('keydown', (event) => {
+  if (!audioStartOverlay.classList.contains('hidden')) {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      void startAudioFromOverlay();
+    } else if (event.key === 'Tab') {
+      event.preventDefault();
+      audioStartButton.focus();
+    }
+    return;
+  }
+
   if (commandMode) return;
 
   if (event.key === 'Tab' && !event.shiftKey) {
@@ -1791,7 +1844,6 @@ document.addEventListener('keydown', (event) => {
 }, { capture: true });
 
 window.addEventListener('pointerdown', (event) => {
-  retryAutoStartFromGesture();
   if (screen !== 'live' || commandMode) return;
   if (event.target === editor || editor.contains(event.target as Node)) return;
   editor.focus();
