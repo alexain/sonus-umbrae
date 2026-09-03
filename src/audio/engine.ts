@@ -1398,6 +1398,20 @@ export class AudioEngine {
     for (const key of [...this.routes.keys()]) this.removeRoute(key);
   }
 
+  stopMusicalSources(): void {
+    // Disconnect only generator/modulator sources. Downstream processors and
+    // their routes stay alive, allowing reverb/delay/filter tails to decay.
+    const musicalSources = new Set([
+      ...this.oscillators.keys(),
+      ...this.voices.keys(),
+      ...this.swells.keys(),
+    ]);
+    for (const [key, route] of [...this.routes.entries()]) {
+      const sourceName = route.source.match(/^([A-Za-z_]\w*)\./)?.[1];
+      if (sourceName && musicalSources.has(sourceName)) this.removeRoute(key);
+    }
+  }
+
   panic(): void {
     this.stopTestTone();
     if (this.hardwareGain && this.context) {

@@ -53,7 +53,7 @@ app.innerHTML = `
           <span>:START</span><span>START / RESUME AUDIO ENGINE</span>
           <span>:STOP</span><span>SUSPEND AUDIO ENGINE</span>
           <span>:RUN</span><span>START / RELOAD LIVE CODE</span>
-          <span>:RUN STOP</span><span>STOP LIVE CODE</span>
+          <span>:RUN STOP</span><span>STOP TRANSPORT / KEEP FX TAILS</span>
           <span>:TEST 440</span><span>PLAY DIAGNOSTIC SINE TONE</span>
           <span>:TEST STOP</span><span>STOP DIAGNOSTIC TONE</span>
           <span>:CLOCK START</span><span>START MASTER CLOCK TRANSPORT</span>
@@ -61,7 +61,7 @@ app.innerHTML = `
           <span>:PANIC</span><span>STOP CURRENT AUDIO IMMEDIATELY</span>
           <span>ENTER</span><span>INSERT NEW LINE</span>
           <span>CMD/CTRL+ENTER</span><span>RECOMPILE / START LIVE CODE</span>
-          <span>CMD+BACKSPACE</span><span>STOP LIVE CODE</span>
+          <span>CMD/CTRL+BACKSPACE</span><span>STOP TRANSPORT / KEEP FX TAILS</span>
         </div>
         <div class="system-copy muted">ESC  RETURN TO LIVE</div>
       </div>
@@ -243,6 +243,8 @@ let inlineViewLastPaint = 0;
 let savedEditorSelection: { start: number; end: number; direction: 'forward' | 'backward' | 'none' } | null = null;
 let audioAutoStartPending = true;
 let codeRunning = false;
+let pendingLiveUpdate: { compiled: string; hasMasterClock: boolean } | null = null;
+let pendingLiveUpdateUnsubscribe: (() => void) | null = null;
 let diagnosticLines = new Set<number>();
 const PANEL_STATE_KEY = 'sonus-umbrae.monitor-panels';
 const panelCollapsed = new Map<string, boolean>();
@@ -482,11 +484,68 @@ function scheduleStoppedPreview(delay = 90): void {
   }, delay);
 }
 
+function cancelPendingLiveUpdate(): void {
+  pendingLiveUpdate = null;
+  pendingLiveUpdateUnsubscribe?.();
+  pendingLiveUpdateUnsubscribe = null;
+}
+
+function applyPendingLiveUpdate(): void {
+  const pending = pendingLiveUpdate;
+  if (!pending) return;
+  cancelPendingLiveUpdate();
+  try {
+    audioEngine.setClockTransport(pending.hasMasterClock);
+    const results = runtime.evaluate(pending.compiled, { hotReload: true });
+    clearDiagnostic();
+    syncViews();
+    notify(results.at(-1)?.message ? `updated · ${results.at(-1)!.message}` : 'updated');
+  } catch (error) {
+    if (error instanceof SonusEvaluationError) showDiagnostics(error.diagnostics);
+    else notify(error instanceof Error ? error.message : 'live update failed');
+    syncViews();
+  }
+}
+
+function queueLiveUpdate(): boolean {
+  try {
+    clearDiagnostic();
+    const source = sourceText();
+    const compiled = source.trim() ? compileLanguageSource(source) : '';
+    runtime.validate(compiled);
+    const hasMasterClock = /^\s*CLOCK\b/im.test(source);
+    pendingLiveUpdate = { compiled, hasMasterClock };
+    pendingLiveUpdateUnsubscribe?.();
+    pendingLiveUpdateUnsubscribe = null;
+
+    if (!audioEngine.getClockStatus().running) {
+      applyPendingLiveUpdate();
+      return true;
+    }
+
+    const unsubscribe = audioEngine.subscribeClockTrigger('Clock', () => {
+      unsubscribe();
+      if (pendingLiveUpdateUnsubscribe === unsubscribe) pendingLiveUpdateUnsubscribe = null;
+      applyPendingLiveUpdate();
+    });
+    pendingLiveUpdateUnsubscribe = unsubscribe;
+    notify('update pending · next beat');
+    return true;
+  } catch (error) {
+    if (error instanceof LanguageError) showDiagnostics(error.diagnostics);
+    else if (error instanceof SonusEvaluationError) showDiagnostics(error.diagnostics);
+    else notify(error instanceof Error ? error.message : 'evaluation failed');
+    syncViews();
+    return false;
+  }
+}
+
 function recompileLiveCode(): boolean {
   window.clearTimeout(previewTimer);
   previewTimer = 0;
+  if (codeRunning) return queueLiveUpdate();
   const applied = evaluateLiveSource();
-  if (applied && !codeRunning) {
+  if (applied) {
     setCodeRunning(true);
     notify('live code running');
   }
@@ -1995,11 +2054,12 @@ function flashAtCaret(text: string): void {
 }
 
 function stopLiveCode(): void {
-  runtime.stopExecution();
+  cancelPendingLiveUpdate();
+  runtime.stopExecution({ preserveTails: true });
   audioEngine.setClockTransport(false);
   setCodeRunning(false);
   syncViews();
-  notify('live code stopped');
+  notify('transport stopped · fx tails preserved');
 }
 
 async function runCommand(raw: string): Promise<void> {
@@ -2208,7 +2268,7 @@ editor.addEventListener('keydown', (event) => {
     return;
   }
 
-  if (event.key === 'Backspace' && event.metaKey) {
+  if (event.key === 'Backspace' && (event.metaKey || event.ctrlKey)) {
     event.preventDefault();
     event.stopPropagation();
     stopLiveCode();

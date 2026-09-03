@@ -424,6 +424,7 @@ interface LanguageInlineScalarDefinition {
 }
 
 type RuntimeWallJob = {
+  key: string;
   intervalMs: number;
   nextAtMs: number;
   callback: () => void;
@@ -431,6 +432,7 @@ type RuntimeWallJob = {
 };
 
 type RuntimeBeatJob = {
+  key: string;
   sourceName: string;
   everyBeats: number;
   counter: number;
@@ -445,35 +447,73 @@ class RuntimeScheduler {
   private epochMs = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
   private clockUnsubscribes: Array<() => void> = [];
+  private preservedBeatPhase = new Map<string, { sourceName: string; everyBeats: number; counter: number }>();
+  private preservedWallPhase = new Map<string, { intervalMs: number; remainingMs: number }>();
 
   constructor(private readonly audio: AudioEngine) {}
 
-  clear(): void {
+  clear(options: { preservePhase?: boolean } = {}): void {
+    if (options.preservePhase) {
+      const elapsed = this.epochMs > 0 ? performance.now() - this.epochMs : 0;
+      this.preservedBeatPhase = new Map(
+        this.beatJobs.map((job) => [
+          job.key,
+          { sourceName: job.sourceName, everyBeats: job.everyBeats, counter: job.counter },
+        ]),
+      );
+      this.preservedWallPhase = new Map(
+        this.wallJobs.map((job) => [
+          job.key,
+          {
+            intervalMs: job.intervalMs,
+            remainingMs: Math.max(1, job.nextAtMs - elapsed),
+          },
+        ]),
+      );
+    } else {
+      this.preservedBeatPhase.clear();
+      this.preservedWallPhase.clear();
+    }
+
     this.stop();
     this.wallJobs = [];
     this.beatJobs = [];
     this.deferred = [];
   }
 
-  addWallJob(intervalMs: number, callback: () => void, intervalFactory?: () => number): void {
+  addWallJob(
+    key: string,
+    intervalMs: number,
+    callback: () => void,
+    intervalFactory?: () => number,
+  ): void {
+    const preserved = this.preservedWallPhase.get(key);
+    const canRestore = preserved && Math.abs(preserved.intervalMs - intervalMs) < 0.001;
     this.wallJobs.push({
+      key,
       intervalMs,
-      nextAtMs: intervalMs,
+      nextAtMs: canRestore ? Math.min(intervalMs, preserved.remainingMs) : intervalMs,
       callback,
       intervalFactory,
     });
   }
 
   addBeatJob(
+    key: string,
     everyBeats: number,
     callback: () => void,
     loose = false,
     sourceName = 'Clock',
   ): void {
+    const preserved = this.preservedBeatPhase.get(key);
+    const canRestore = preserved
+      && preserved.sourceName === sourceName
+      && preserved.everyBeats === everyBeats;
     this.beatJobs.push({
+      key,
       sourceName,
       everyBeats,
-      counter: 0,
+      counter: canRestore ? Math.max(0, Math.min(everyBeats - 1, preserved.counter)) : 0,
       callback,
       loose,
     });
@@ -482,8 +522,6 @@ class RuntimeScheduler {
   start(): void {
     this.stop();
     this.epochMs = performance.now();
-    for (const job of this.wallJobs) job.nextAtMs = job.intervalMs;
-    for (const job of this.beatJobs) job.counter = 0;
 
     if (this.wallJobs.length > 0 || this.deferred.length > 0) {
       this.timer = setInterval(() => this.tickWallClock(), 10);
@@ -573,22 +611,52 @@ export class SonusRuntime {
 
   private whenUnsubscribers: Array<() => void> = [];
   private readonly scheduler: RuntimeScheduler;
+  private turingState = new Map<string, { register: number; current: number; length: number }>();
+  private voiceSequenceState = new Map<string, { cursor: number; walkCursor: number; direction: number; shuffleCursor: number }>();
+  private whenEventState = new Map<string, number>();
+  private randomState = 0x6d2b79f5;
 
   constructor(private readonly audio: AudioEngine) {
     this.scheduler = new RuntimeScheduler(audio);
   }
 
-  stopExecution(): void {
+  stopExecution(options: { preserveTails?: boolean } = {}): void {
     this.stopSchedulers();
     this.audio.setModTransport(false);
-    this.audio.stopProgramOutput();
-    this.audio.panic();
+    if (options.preserveTails) this.audio.stopMusicalSources();
+    else {
+      this.audio.stopProgramOutput();
+      this.audio.panic();
+    }
   }
 
-  private stopSchedulers(): void {
+  validate(source: string): EvaluationResult[] {
+    const saved = {
+      parameterViews: this.parameterViews,
+      variableViews: this.variableViews,
+      explicitSignalViews: this.explicitSignalViews,
+      moduleViews: this.moduleViews,
+      inlineViews: this.inlineViews,
+      turingViews: this.turingViews,
+      randomState: this.randomState,
+    };
+    try {
+      return this.evaluate(source, { applyAudio: false, hotReload: true });
+    } finally {
+      this.parameterViews = saved.parameterViews;
+      this.variableViews = saved.variableViews;
+      this.explicitSignalViews = saved.explicitSignalViews;
+      this.moduleViews = saved.moduleViews;
+      this.inlineViews = saved.inlineViews;
+      this.turingViews = saved.turingViews;
+      this.randomState = saved.randomState;
+    }
+  }
+
+  private stopSchedulers(preservePhase = false): void {
     for (const unsubscribe of this.whenUnsubscribers) unsubscribe();
     this.whenUnsubscribers = [];
-    this.scheduler.clear();
+    this.scheduler.clear({ preservePhase });
   }
 
   getParameterViews(): ParameterViewState[] {
@@ -630,8 +698,15 @@ export class SonusRuntime {
     };
   }
 
-  evaluate(source: string, options: { applyAudio?: boolean } = {}): EvaluationResult[] {
+  evaluate(source: string, options: { applyAudio?: boolean; hotReload?: boolean } = {}): EvaluationResult[] {
     const applyAudio = options.applyAudio ?? true;
+    const hotReload = options.hotReload ?? false;
+    if (applyAudio && !hotReload) {
+      this.turingState.clear();
+      this.voiceSequenceState.clear();
+      this.whenEventState.clear();
+      this.randomState = 0x6d2b79f5;
+    }
     const oscillators = new Map<string, OscillatorDefinition>();
     const gains = new Map<string, GainDefinition>();
     const voices = new Map<string, VoiceDefinition>();
@@ -650,15 +725,14 @@ export class SonusRuntime {
     const variables = new Map<string, ScalarValue>();
     const scalarExpressions = new Map<string, { expression: string; line: number }>();
     const generativeState = new Map<string, number | { x: number; y: number }>();
-    let randomState = 0x6d2b79f5;
     const random = (): number => {
-      // xorshift32: small, deterministic, and sufficient for musical/generative use.
-      let x = randomState | 0;
+      // Keep generative randomness continuous across hot reloads.
+      let x = this.randomState | 0;
       x ^= x << 13;
       x ^= x >>> 17;
       x ^= x << 5;
-      randomState = x >>> 0;
-      return randomState / 0x100000000;
+      this.randomState = x >>> 0;
+      return this.randomState / 0x100000000;
     };
     const results: EvaluationResult[] = [];
     const diagnostics: SonusDiagnostic[] = [];
@@ -1462,7 +1536,7 @@ export class SonusRuntime {
       if (match) {
         const seedValue = evalNumber(match[1], lineNumber, 'seed');
         if (seedValue === undefined) continue;
-        randomState = (Math.trunc(seedValue) >>> 0) || 0x6d2b79f5;
+        this.randomState = (Math.trunc(seedValue) >>> 0) || 0x6d2b79f5;
         generativeState.clear();
         results.push({ message: `seed ${Math.trunc(seedValue)}` });
         continue;
@@ -2580,6 +2654,23 @@ export class SonusRuntime {
       }
     };
 
+    if (hotReload) {
+      for (const [name, seq] of languageTurings) {
+        const previous = this.turingState.get(name);
+        if (!previous) continue;
+        const mask = seq.length >= 32 ? 0xffffffff : (2 ** seq.length - 1);
+        seq.register = previous.register >>> 0;
+        if (seq.length < 32) seq.register &= mask;
+        if (seq.values.length > 0) {
+          const normalized = seq.register / Math.max(1, mask);
+          const index = Math.min(seq.values.length - 1, Math.floor(normalized * seq.values.length));
+          seq.current = seq.values[index];
+        } else {
+          seq.current = previous.current;
+        }
+      }
+    }
+
     const turingViews = new Map<string, TuringViewState>();
     const turingBits = (value: number, length: number): number[] =>
       Array.from({ length }, (_, index) => (value >>> index) & 1);
@@ -2587,8 +2678,10 @@ export class SonusRuntime {
       const seq = languageTurings.get(name);
       if (!seq) continue;
       const mask = seq.length >= 32 ? 0xffffffff : (2 ** seq.length - 1);
-      seq.register = (Math.floor(random() * Math.max(1, mask)) || 1) >>> 0;
-      if (seq.length < 32) seq.register &= mask;
+      if (!hotReload || !this.turingState.has(name)) {
+        seq.register = (Math.floor(random() * Math.max(1, mask)) || 1) >>> 0;
+        if (seq.length < 32) seq.register &= mask;
+      }
       if (seq.values.length > 0) {
         const normalized = seq.register / Math.max(1, mask);
         const index = Math.min(seq.values.length - 1, Math.floor(normalized * seq.values.length));
@@ -2613,13 +2706,14 @@ export class SonusRuntime {
       .map(([signal, kind]) => ({ signal, kind: kind as SignalKind }));
     this.moduleViews = new Set(moduleViews);
     if (applyAudio) {
-      this.stopSchedulers();
+      this.stopSchedulers(hotReload);
       this.audio.applyProgram(program);
-    for (const [name, voice] of voices) {
-      if (voice.lpg) this.audio.triggerVoice(name);
+    if (!hotReload) {
+      for (const [name, voice] of voices) {
+        if (voice.lpg) this.audio.triggerVoice(name);
+      }
     }
 
-    this.scheduler.clear();
 
     for (const cycle of languageGenerativeCycles) {
       let base = evalNumber(cycle.expression, cycle.line, cycle.parameter);
@@ -2701,12 +2795,12 @@ export class SonusRuntime {
       };
 
       if (cycle.unit === 'beat') {
-        this.scheduler.addBeatJob(cycle.interval, updateGenerative, cycle.loose, cycle.clockSource);
+        this.scheduler.addBeatJob(`gen:${cycle.ownerKind}:${cycle.owner}:${cycle.parameter}`, cycle.interval, updateGenerative, cycle.loose, cycle.clockSource);
         continue;
       }
 
       const baseMs = cycle.unit === 'sec' ? cycle.interval * 1000 : cycle.interval;
-      this.scheduler.addWallJob(baseMs, updateGenerative, () => {
+      this.scheduler.addWallJob(`gen:${cycle.ownerKind}:${cycle.owner}:${cycle.parameter}`, baseMs, updateGenerative, () => {
         if (cycle.drift) {
           driftRatio += (random() - 0.5) * 0.06;
           driftRatio = Math.min(1.2, Math.max(0.8, driftRatio));
@@ -2733,10 +2827,10 @@ export class SonusRuntime {
       };
 
       if (clockSpec.unit === 'beat') {
-        this.scheduler.addBeatJob(clockSpec.amount, updateClock);
+        this.scheduler.addBeatJob('master-clock', clockSpec.amount, updateClock);
       } else {
         const intervalMs = clockSpec.unit === 'sec' ? clockSpec.amount * 1000 : clockSpec.amount;
-        this.scheduler.addWallJob(intervalMs, updateClock);
+        this.scheduler.addWallJob('master-clock', intervalMs, updateClock);
       }
     }
 
@@ -2756,12 +2850,12 @@ export class SonusRuntime {
       };
 
       if (cycle.unit === 'beat') {
-        this.scheduler.addBeatJob(cycle.amount, updateValue, cycle.loose);
+        this.scheduler.addBeatJob(`set:${name}`, cycle.amount, updateValue, cycle.loose);
         continue;
       }
 
       const baseMs = cycle.unit === 'sec' ? cycle.amount * 1000 : cycle.amount;
-      this.scheduler.addWallJob(baseMs, updateValue, () => {
+      this.scheduler.addWallJob(`set:${name}`, baseMs, updateValue, () => {
         if (cycle.drift) {
           driftRatio += (random() - 0.5) * 0.06;
           driftRatio = Math.min(1.2, Math.max(0.8, driftRatio));
@@ -2787,12 +2881,12 @@ export class SonusRuntime {
       };
 
       if (cycle.unit === 'beat') {
-        this.scheduler.addBeatJob(cycle.amount, updateParameter, cycle.loose, cycle.clockSource);
+        this.scheduler.addBeatJob(`voice-param:${cycle.voice}:${cycle.parameter}`, cycle.amount, updateParameter, cycle.loose, cycle.clockSource);
         continue;
       }
 
       const baseMs = cycle.unit === 'sec' ? cycle.amount * 1000 : cycle.amount;
-      this.scheduler.addWallJob(baseMs, updateParameter, () => {
+      this.scheduler.addWallJob(`voice-param:${cycle.voice}:${cycle.parameter}`, baseMs, updateParameter, () => {
         if (cycle.drift) {
           driftRatio += (random() - 0.5) * 0.06;
           driftRatio = Math.min(1.2, Math.max(0.8, driftRatio));
@@ -2827,11 +2921,11 @@ export class SonusRuntime {
       };
 
       if (cycle.unit === 'beat') {
-        this.scheduler.addBeatJob(cycle.amount, updateFxParameter, cycle.loose, cycle.clockSource);
+        this.scheduler.addBeatJob(`fx-param:${cycle.fx}:${cycle.parameter}`, cycle.amount, updateFxParameter, cycle.loose, cycle.clockSource);
         continue;
       }
       const baseMs = cycle.unit === 'sec' ? cycle.amount * 1000 : cycle.amount;
-      this.scheduler.addWallJob(baseMs, updateFxParameter, () => {
+      this.scheduler.addWallJob(`fx-param:${cycle.fx}:${cycle.parameter}`, baseMs, updateFxParameter, () => {
         if (cycle.drift) {
           driftRatio += (random() - 0.5) * 0.06;
           driftRatio = Math.min(1.2, Math.max(0.8, driftRatio));
@@ -2929,10 +3023,10 @@ export class SonusRuntime {
         this.audio.setFilterCutoff(sequence.filter, cutoff);
         updateInlinePiano('filter', sequence.filter, cutoff);
       };
-      if (sequence.unit === 'beat') this.scheduler.addBeatJob(sequence.interval, fire, sequence.loose, sequence.clockSource);
+      if (sequence.unit === 'beat') this.scheduler.addBeatJob(`filter-seq:${sequence.filter}`, sequence.interval, fire, sequence.loose, sequence.clockSource);
       else {
         const ms = sequence.unit === 'sec' ? sequence.interval * 1000 : sequence.interval;
-        this.scheduler.addWallJob(ms, fire);
+        this.scheduler.addWallJob(`filter-seq:${sequence.filter}`, ms, fire);
       }
     }
 
@@ -3034,11 +3128,11 @@ export class SonusRuntime {
       };
 
       if (cycle.unit === 'beat') {
-        this.scheduler.addBeatJob(cycle.amount, fire, cycle.loose, cycle.clockSource);
+        this.scheduler.addBeatJob(`fx-pitch:${name}`, cycle.amount, fire, cycle.loose, cycle.clockSource);
         continue;
       }
       const baseMs = cycle.unit === 'sec' ? cycle.amount * 1000 : cycle.amount;
-      this.scheduler.addWallJob(baseMs, fire, () => {
+      this.scheduler.addWallJob(`fx-pitch:${name}`, baseMs, fire, () => {
         if (cycle.drift) {
           driftRatio += (random() - 0.5) * 0.06;
           driftRatio = Math.min(1.2, Math.max(0.8, driftRatio));
@@ -3050,7 +3144,7 @@ export class SonusRuntime {
 
     if (languageFxModulations.length > 0) {
       // One control-rate scheduler job services every FX modulation route.
-      this.scheduler.addWallJob(1000 / 60, () => {
+      this.scheduler.addWallJob('fx-modulation-control', 1000 / 60, () => {
         for (const modulation of languageFxModulations) {
           const fx = mists.get(modulation.fx);
           if (!fx) continue;
@@ -3067,6 +3161,7 @@ export class SonusRuntime {
     }
 
     for (const [name, seq] of languageTurings) {
+      this.turingState.set(name, { register: seq.register, current: seq.current, length: seq.length });
       const timing = languageObjectEvery.get(name);
       if (!timing || seq.values.length === 0) continue;
       const mask = seq.length >= 32 ? 0xffffffff : (2 ** seq.length - 1);
@@ -3080,6 +3175,7 @@ export class SonusRuntime {
         const normalized = seq.register / Math.max(1, mask);
         const index = Math.min(seq.values.length - 1, Math.floor(normalized * seq.values.length));
         seq.current = seq.values[index];
+        this.turingState.set(name, { register: seq.register, current: seq.current, length: seq.length });
         const view = turingViews.get(name);
         if (view) {
           view.bits = turingBits(seq.register, seq.length);
@@ -3087,10 +3183,10 @@ export class SonusRuntime {
           view.revision += 1;
         }
       };
-      if (timing.unit === 'beat') this.scheduler.addBeatJob(timing.amount, advance, timing.loose, timing.clockSource);
+      if (timing.unit === 'beat') this.scheduler.addBeatJob(`turing:${name}`, timing.amount, advance, timing.loose, timing.clockSource);
       else {
         const baseMs = timing.unit === 'sec' ? timing.amount * 1000 : timing.amount;
-        this.scheduler.addWallJob(baseMs, advance);
+        this.scheduler.addWallJob(`turing:${name}`, baseMs, advance);
       }
     }
 
@@ -3098,10 +3194,11 @@ export class SonusRuntime {
       const voice = voices.get(name);
       if (!voice) continue;
       const sequence = languageSequences.get(name);
-      let cursor = 0;
-      let walkCursor = 0;
+      const previousSequenceState = hotReload ? this.voiceSequenceState.get(name) : undefined;
+      let cursor = previousSequenceState?.cursor ?? 0;
+      let walkCursor = previousSequenceState?.walkCursor ?? 0;
       let shuffleOrder: number[] = [];
-      let shuffleCursor = 0;
+      let shuffleCursor = previousSequenceState?.shuffleCursor ?? 0;
       let driftRatio = 1;
 
       const reshuffle = (): void => {
@@ -3114,7 +3211,7 @@ export class SonusRuntime {
         shuffleCursor = 0;
       };
 
-      let pendulumDirection = 1;
+      let pendulumDirection = previousSequenceState?.direction ?? 1;
       let repeatRemaining = 0;
       let repeatedValue = sequence?.values[0] ?? voice.frequency;
 
@@ -3164,6 +3261,9 @@ export class SonusRuntime {
           cursor = (cursor + 1) % values.length;
         }
 
+        this.voiceSequenceState.set(name, {
+          cursor, walkCursor, direction: pendulumDirection, shuffleCursor,
+        });
         const repeat = sequenceFavorForValue(next, sequence.favor, 'frequency')
           .find((entry) => entry.operator === 'repeat');
         if (repeat && repeat.amount > 1) {
@@ -3197,12 +3297,12 @@ export class SonusRuntime {
       };
 
       if (cycle.unit === 'beat') {
-        this.scheduler.addBeatJob(cycle.amount, fire, cycle.loose, cycle.clockSource);
+        this.scheduler.addBeatJob(`voice-seq:${name}`, cycle.amount, fire, cycle.loose, cycle.clockSource);
         continue;
       }
 
       const baseMs = cycle.unit === 'sec' ? cycle.amount * 1000 : cycle.amount;
-      this.scheduler.addWallJob(baseMs, fire, () => {
+      this.scheduler.addWallJob(`voice-seq:${name}`, baseMs, fire, () => {
         if (cycle.drift) {
           driftRatio += (random() - 0.5) * 0.06;
           driftRatio = Math.min(1.2, Math.max(0.8, driftRatio));
@@ -3217,9 +3317,11 @@ export class SonusRuntime {
     this.scheduler.start();
 
       for (const handler of whenHandlers) {
-        let eventIndex = 0;
+        const stateKey = `when:${handler.sourceName}:${handler.line}`;
+        let eventIndex = hotReload ? (this.whenEventState.get(stateKey) ?? 0) : 0;
         const unsubscribe = this.audio.subscribeClockTrigger(handler.sourceName, () => {
           eventIndex += 1;
+          this.whenEventState.set(stateKey, eventIndex);
           if (!matchesCycle(handler.cycle, eventIndex)) return;
           if (handler.probability < 100 && random() * 100 >= handler.probability) return;
 

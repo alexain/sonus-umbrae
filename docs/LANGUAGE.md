@@ -11,22 +11,16 @@ routing, and views are all declared textually.
 
 ## Evaluation and transport
 
-`Cmd+Enter` / `Ctrl+Enter` recompiles and starts the current live program.
+`Cmd+Enter` / `Ctrl+Enter` starts the program when LIVE is stopped. While LIVE is already running, it performs a quantized hot reload: the edited source is validated immediately and the new desired state is reconciled on the next master-clock beat. Existing DSP objects are retained where possible, so effect tails and persistent generative state do not restart just because a parameter or route changed.
 
-`RUN` starts the complete program transport.
+`RUN` follows the same rule: start when stopped, hot-reload when already running.
 
-`RUN STOP` stops the complete live program, including:
+`RUN STOP` is a musical transport stop. It stops master-clock transport, voice scheduling, parameter/beat jobs, and modulators, but leaves downstream FX routes alive so reverbs and delays can decay naturally. The full emergency cut remains `PANIC`.
 
-- voice scheduling;
-- master-clock transport;
-- parameter reevaluation jobs;
-- beat-based jobs;
-- local and global `MOD` objects.
-
-The current shortcut for `RUN STOP` on macOS is:
+The transport-stop shortcut is:
 
 ```text
-Cmd+Backspace
+Cmd+Backspace / Ctrl+Backspace
 ```
 
 The master clock does not start implicitly. A program that depends on beat
@@ -1182,3 +1176,7 @@ FX space:
 ```
 
 The upstream Valley sources are fetched by `npm run dsp:setup` and remain under their GPLv3 license.
+
+### Hot-reload timing continuity
+
+When live code is already running, `Cmd/Ctrl+Enter` applies the validated update on the next master beat. Matching `every` jobs preserve their current phase across that update: for example, an `every 4 beats` sequence already at beat 3 continues to its fourth beat instead of restarting a new four-beat cycle. The same rule applies to beat-based and wall-clock `every` jobs as long as their source and interval are unchanged. Changing the cadence intentionally starts a new phase. `when(..., cycle(...))` event positions are preserved as well.

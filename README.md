@@ -68,9 +68,7 @@ PLAY lead at 75
 MAIN level 80
 ```
 
-`RUN` starts the complete program transport. `RUN STOP` stops the clock,
-voices, schedulers, and modulators together. `Cmd+Backspace` is the current
-shortcut for `RUN STOP`.
+`RUN` starts the program when stopped and performs a next-beat hot reload when it is already live. `RUN STOP` / `Cmd+Backspace` (`Ctrl+Backspace` on Windows/Linux) stops clocks, schedulers, voices and modulators while leaving downstream effect tails alive. `PANIC` remains the immediate full cut.
 
 A generative Turing source can be shared by voices independently of their read
 rate:
