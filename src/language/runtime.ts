@@ -184,6 +184,7 @@ interface ClockDefinition {
 interface LanguageSequenceDefinition {
   values: number[];
   mode: 'order' | 'random' | 'walk' | 'shuffle' | 'reverse';
+  amount: number;
 }
 
 interface LanguageCycleDefinition {
@@ -192,6 +193,7 @@ interface LanguageCycleDefinition {
   chance: number;
   drift: boolean;
   loose: boolean;
+  clockSource: string;
 }
 
 interface LanguageSetCycleDefinition {
@@ -211,6 +213,7 @@ interface LanguageParameterCycleDefinition {
   chance: number;
   drift: boolean;
   loose: boolean;
+  clockSource: string;
   line: number;
 }
 
@@ -260,6 +263,7 @@ interface LanguageFxParameterCycleDefinition {
   chance: number;
   drift: boolean;
   loose: boolean;
+  clockSource: string;
   line: number;
 }
 
@@ -273,6 +277,7 @@ interface LanguageFxParameterDefaultDefinition {
 interface LanguageFxPitchSequenceDefinition {
   values: number[];
   mode: 'order' | 'random' | 'walk' | 'shuffle' | 'reverse';
+  amount: number;
 }
 
 interface LanguageFxModulationDefinition {
@@ -286,6 +291,27 @@ interface LanguageFxModulationDefinition {
 
 
 
+type LanguageGenerativeMode = 'wander' | 'trend' | 'scatter' | 'flutter';
+
+interface LanguageGenerativeDefaultDefinition {
+  ownerKind: 'voice' | 'fx';
+  owner: string;
+  parameter: string;
+  expression: string;
+  mode: LanguageGenerativeMode;
+  amount: number;
+  line: number;
+}
+
+interface LanguageGenerativeCycleDefinition extends LanguageGenerativeDefaultDefinition {
+  interval: number;
+  unit: 'ms' | 'sec' | 'beat';
+  chance: number;
+  drift: boolean;
+  loose: boolean;
+  clockSource: string;
+}
+
 type RuntimeWallJob = {
   intervalMs: number;
   nextAtMs: number;
@@ -294,8 +320,9 @@ type RuntimeWallJob = {
 };
 
 type RuntimeBeatJob = {
+  sourceName: string;
   everyBeats: number;
-  nextBeat: number;
+  counter: number;
   callback: () => void;
   loose: boolean;
 };
@@ -305,9 +332,8 @@ class RuntimeScheduler {
   private beatJobs: RuntimeBeatJob[] = [];
   private deferred: Array<{ dueAtMs: number; callback: () => void }> = [];
   private epochMs = 0;
-  private beatCounter = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
-  private clockUnsubscribe: (() => void) | null = null;
+  private clockUnsubscribes: Array<() => void> = [];
 
   constructor(private readonly audio: AudioEngine) {}
 
@@ -316,7 +342,6 @@ class RuntimeScheduler {
     this.wallJobs = [];
     this.beatJobs = [];
     this.deferred = [];
-    this.beatCounter = 0;
   }
 
   addWallJob(intervalMs: number, callback: () => void, intervalFactory?: () => number): void {
@@ -328,10 +353,16 @@ class RuntimeScheduler {
     });
   }
 
-  addBeatJob(everyBeats: number, callback: () => void, loose = false): void {
+  addBeatJob(
+    everyBeats: number,
+    callback: () => void,
+    loose = false,
+    sourceName = 'Clock',
+  ): void {
     this.beatJobs.push({
+      sourceName,
       everyBeats,
-      nextBeat: everyBeats,
+      counter: 0,
       callback,
       loose,
     });
@@ -340,16 +371,18 @@ class RuntimeScheduler {
   start(): void {
     this.stop();
     this.epochMs = performance.now();
-    this.beatCounter = 0;
     for (const job of this.wallJobs) job.nextAtMs = job.intervalMs;
-    for (const job of this.beatJobs) job.nextBeat = job.everyBeats;
+    for (const job of this.beatJobs) job.counter = 0;
 
     if (this.wallJobs.length > 0 || this.deferred.length > 0) {
       this.timer = setInterval(() => this.tickWallClock(), 10);
     }
 
-    if (this.beatJobs.length > 0) {
-      this.clockUnsubscribe = this.audio.subscribeClockTrigger('Clock', () => this.tickBeat());
+    const clockSources = new Set(this.beatJobs.map((job) => job.sourceName));
+    for (const sourceName of clockSources) {
+      this.clockUnsubscribes.push(
+        this.audio.subscribeClockTrigger(sourceName, () => this.tickBeat(sourceName)),
+      );
     }
   }
 
@@ -358,10 +391,8 @@ class RuntimeScheduler {
       clearInterval(this.timer);
       this.timer = null;
     }
-    if (this.clockUnsubscribe) {
-      this.clockUnsubscribe();
-      this.clockUnsubscribe = null;
-    }
+    for (const unsubscribe of this.clockUnsubscribes) unsubscribe();
+    this.clockUnsubscribes = [];
     this.deferred = [];
   }
 
@@ -389,12 +420,12 @@ class RuntimeScheduler {
     }
   }
 
-  private tickBeat(): void {
-    this.beatCounter += 1;
-
+  private tickBeat(sourceName: string): void {
     for (const job of this.beatJobs) {
-      if (this.beatCounter < job.nextBeat) continue;
-      job.nextBeat += job.everyBeats;
+      if (job.sourceName !== sourceName) continue;
+      job.counter += 1;
+      if (job.counter < job.everyBeats) continue;
+      job.counter = 0;
 
       if (!job.loose) {
         job.callback();
@@ -412,6 +443,7 @@ class RuntimeScheduler {
         this.timer = setInterval(() => this.tickWallClock(), 10);
       }
     }
+
   }
 }
 
@@ -513,6 +545,8 @@ export class SonusRuntime {
     const languageSetCycles = new Map<string, LanguageSetCycleDefinition>();
     const languageParameterCycles: LanguageParameterCycleDefinition[] = [];
     const languageParameterDefaults: LanguageParameterDefaultDefinition[] = [];
+    const languageGenerativeDefaults: LanguageGenerativeDefaultDefinition[] = [];
+    const languageGenerativeCycles: LanguageGenerativeCycleDefinition[] = [];
     const languageObjectEvery = new Map<string, LanguageObjectEveryDefinition>();
     const languageFxMeta = new Map<string, LanguageFxMetadata>();
     const languageFxParameterCycles: LanguageFxParameterCycleDefinition[] = [];
@@ -548,7 +582,7 @@ export class SonusRuntime {
 
       const fxSequence = parseLanguageFxPitchSequenceDirective(line);
       if (fxSequence) {
-        languageFxPitchSequences.set(fxSequence.name, { values: fxSequence.values, mode: fxSequence.mode });
+        languageFxPitchSequences.set(fxSequence.name, { values: fxSequence.values, mode: fxSequence.mode, amount: fxSequence.amount });
         continue;
       }
 
@@ -561,6 +595,18 @@ export class SonusRuntime {
       const fxModulation = parseLanguageFxModulationDirective(line, lineNumber);
       if (fxModulation) {
         languageFxModulations.push(fxModulation);
+        continue;
+      }
+
+      const generativeCycle = parseLanguageGenerativeCycleDirective(line, lineNumber);
+      if (generativeCycle) {
+        languageGenerativeCycles.push(generativeCycle);
+        continue;
+      }
+
+      const generativeDefault = parseLanguageGenerativeDefaultDirective(line, lineNumber);
+      if (generativeDefault) {
+        languageGenerativeDefaults.push(generativeDefault);
         continue;
       }
 
@@ -588,7 +634,7 @@ export class SonusRuntime {
         if (sequence.values.length === 0 || sequence.values.some((value) => !Number.isFinite(value) || value <= 0)) {
           diagnostics.push({ line: lineNumber, message: 'invalid internal sequence values' });
         } else {
-          languageSequences.set(sequence.name, { values: sequence.values, mode: sequence.mode });
+          languageSequences.set(sequence.name, { values: sequence.values, mode: sequence.mode, amount: sequence.amount });
         }
         continue;
       }
@@ -601,6 +647,7 @@ export class SonusRuntime {
           chance: cycle.chance,
           drift: cycle.drift,
           loose: cycle.loose,
+          clockSource: cycle.clockSource,
         });
       }
 
@@ -624,6 +671,7 @@ export class SonusRuntime {
           chance: objectEvery.chance,
           drift: objectEvery.drift,
           loose: objectEvery.loose,
+          clockSource: objectEvery.clockSource,
         });
         continue;
       }
@@ -680,13 +728,32 @@ export class SonusRuntime {
       if (timing) languageFxPitchCycles.set(name, { ...timing });
     }
 
+    const explicitGenerativeEvery = new Set(
+      languageGenerativeCycles.map((cycle) => `${cycle.ownerKind}:${cycle.owner}:${cycle.parameter}`),
+    );
+    for (const definition of languageGenerativeDefaults) {
+      const timing = languageObjectEvery.get(definition.owner);
+      if (!timing) continue;
+      const key = `${definition.ownerKind}:${definition.owner}:${definition.parameter}`;
+      if (explicitGenerativeEvery.has(key)) continue;
+      languageGenerativeCycles.push({
+        ...definition,
+        interval: timing.amount,
+        unit: timing.unit,
+        chance: timing.chance,
+        drift: timing.drift,
+        loose: timing.loose,
+        clockSource: timing.clockSource,
+      });
+    }
+
     // Pass 1: declarations. Objects are collected before the remaining statements
     // so the source remains declarative rather than execution-order dependent.
     for (const { source: line, line: lineNumber } of lines) {
       const clockDeclaration = parseClockDeclaration(line);
       if (clockDeclaration) {
         const { name, rate, label, calls } = clockDeclaration;
-        const reservationError = identifierReservationError(name);
+        const reservationError = name.startsWith('__clock_') ? null : identifierReservationError(name);
         if (reservationError) {
           diagnostics.push({ line: lineNumber, message: reservationError });
           continue;
@@ -974,7 +1041,7 @@ export class SonusRuntime {
     // source order. All module declarations already exist, so references between
     // modules are still independent from declaration order.
     for (const { source: line, line: lineNumber } of lines) {
-      if (parseLanguageFxMetadata(line) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
+      if (parseLanguageFxMetadata(line) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
 
       const oscillatorDeclaration = parseOscillatorDeclaration(line);
       if (oscillatorDeclaration) {
@@ -1583,6 +1650,78 @@ export class SonusRuntime {
       }
     }
 
+    for (const cycle of languageGenerativeCycles) {
+      let base = evalNumber(cycle.expression, cycle.line, cycle.parameter);
+      if (base === undefined) continue;
+      let current = base;
+      let direction = random() < 0.5 ? -1 : 1;
+      let driftRatio = 1;
+
+      const bounds = (): [number, number] => {
+        if (cycle.ownerKind === 'fx' && cycle.parameter === 'pitch') return [-48, 48];
+        return [0, 100];
+      };
+
+      const nextGeneratedValue = (): number => {
+        const [min, max] = bounds();
+        let next = current;
+
+        if (cycle.mode === 'wander') {
+          next = current + (random() * 2 - 1) * cycle.amount;
+        } else if (cycle.mode === 'trend') {
+          if (random() < 0.12) direction *= -1;
+          const step = cycle.amount * (0.25 + random() * 0.75);
+          next = current + direction * step;
+          if (next <= min) { next = min; direction = 1; }
+          if (next >= max) { next = max; direction = -1; }
+        } else if (cycle.mode === 'scatter') {
+          next = base + (random() * 2 - 1) * cycle.amount;
+        } else {
+          // flutter: triangular distribution keeps most movement close to base.
+          next = base + (random() + random() - 1) * cycle.amount;
+        }
+
+        current = Math.max(min, Math.min(max, next));
+        return current;
+      };
+
+      const updateGenerative = (): void => {
+        if (cycle.chance < 100 && random() * 100 >= cycle.chance) return;
+        const value = nextGeneratedValue();
+
+        if (cycle.ownerKind === 'voice') {
+          const voice = voices.get(cycle.owner);
+          if (!voice || !['harmo', 'timbre', 'morph'].includes(cycle.parameter)) return;
+          const parameter = cycle.parameter as 'harmo' | 'timbre' | 'morph';
+          voice[parameter] = value;
+          this.audio.setVoiceParameter(cycle.owner, parameter, value);
+          return;
+        }
+
+        const fx = mists.get(cycle.owner);
+        if (!fx) return;
+        const parameter = cycle.parameter as LanguageFxParameter;
+        if (!(parameter in fx)) return;
+        fx[parameter] = value;
+        this.audio.setMistParameter(cycle.owner, parameter, value);
+      };
+
+      if (cycle.unit === 'beat') {
+        this.scheduler.addBeatJob(cycle.interval, updateGenerative, cycle.loose, cycle.clockSource);
+        continue;
+      }
+
+      const baseMs = cycle.unit === 'sec' ? cycle.interval * 1000 : cycle.interval;
+      this.scheduler.addWallJob(baseMs, updateGenerative, () => {
+        if (cycle.drift) {
+          driftRatio += (random() - 0.5) * 0.06;
+          driftRatio = Math.min(1.2, Math.max(0.8, driftRatio));
+        } else driftRatio = 1;
+        const looseRatio = cycle.loose ? 0.94 + random() * 0.12 : 1;
+        return baseMs * driftRatio * looseRatio;
+      });
+    }
+
     for (const cycle of languageParameterCycles) {
       if (!voices.has(cycle.voice)) {
         diagnostics.push({ line: cycle.line, message: `parameter cycle references unknown Voice: ${cycle.voice}` });
@@ -1591,6 +1730,14 @@ export class SonusRuntime {
 
     for (const cycle of languageFxParameterCycles) {
       if (!mists.has(cycle.fx)) diagnostics.push({ line: cycle.line, message: `FX parameter timing references unknown FX: ${cycle.fx}` });
+    }
+    for (const cycle of languageGenerativeCycles) {
+      if (cycle.ownerKind === 'voice' && !voices.has(cycle.owner)) {
+        diagnostics.push({ line: cycle.line, message: `generative parameter references unknown VOICE: ${cycle.owner}` });
+      }
+      if (cycle.ownerKind === 'fx' && !mists.has(cycle.owner)) {
+        diagnostics.push({ line: cycle.line, message: `generative parameter references unknown FX: ${cycle.owner}` });
+      }
     }
     for (const modulation of languageFxModulations) {
       if (!mists.has(modulation.fx)) diagnostics.push({ line: modulation.line, message: `FX modulation references unknown FX: ${modulation.fx}` });
@@ -1763,7 +1910,9 @@ export class SonusRuntime {
       });
     }
     for (const [name] of mists) variableViews.push({ name, value: languageFxMeta.has(name) ? 'Fx' : 'Mist' });
-    for (const [name] of clockSources) variableViews.push({ name, value: 'Clock' });
+    for (const [name] of clockSources) {
+      if (!name.startsWith('__clock_')) variableViews.push({ name, value: 'Clock' });
+    }
     for (const [name] of oscillators) variableViews.push({ name, value: 'Osc' });
     for (const [name] of gains) variableViews.push({ name, value: 'Gain' });
     for (const [name, value] of variables) variableViews.push({ name, value: formatScalar(value) });
@@ -1879,7 +2028,9 @@ export class SonusRuntime {
 
     const schemeNodes: SchemeNode[] = [
       { id: 'Clock', label: 'CLOCK', kind: 'module' as const, parameters: clockBpm > 0 ? [{ name: 'BPM', value: formatNumber(clockBpm) }] : [], views: embeddedViews.get('Clock') },
-      ...[...clockSources.entries()].map(([name, definition]) => ({ id: name, label: `${name.toUpperCase()} : CLOCK`, kind: 'module' as const, parameters: [...definition.parameters.entries()].map(([parameterName, value]) => ({ name: parameterName, value })), views: embeddedViews.get(name) })),
+      ...[...clockSources.entries()]
+        .filter(([name]) => !name.startsWith('__clock_'))
+        .map(([name, definition]) => ({ id: name, label: `${name.toUpperCase()} : CLOCK`, kind: 'module' as const, parameters: [...definition.parameters.entries()].map(([parameterName, value]) => ({ name: parameterName, value })), views: embeddedViews.get(name) })),
       ...[...oscillators.entries()].map(([name, definition]) => ({
         id: name,
         label: `${name.toUpperCase()} : OSC`,
@@ -2142,7 +2293,7 @@ export class SonusRuntime {
       };
 
       if (cycle.unit === 'beat') {
-        this.scheduler.addBeatJob(cycle.amount, updateParameter, cycle.loose);
+        this.scheduler.addBeatJob(cycle.amount, updateParameter, cycle.loose, cycle.clockSource);
         continue;
       }
 
@@ -2182,7 +2333,7 @@ export class SonusRuntime {
       };
 
       if (cycle.unit === 'beat') {
-        this.scheduler.addBeatJob(cycle.amount, updateFxParameter, cycle.loose);
+        this.scheduler.addBeatJob(cycle.amount, updateFxParameter, cycle.loose, cycle.clockSource);
         continue;
       }
       const baseMs = cycle.unit === 'sec' ? cycle.amount * 1000 : cycle.amount;
@@ -2220,9 +2371,14 @@ export class SonusRuntime {
         if (values.length === 1) return values[0];
         if (sequence.mode === 'random') return values[Math.floor(random() * values.length)];
         if (sequence.mode === 'walk') {
-          walkCursor += random() < 0.5 ? -1 : 1;
-          if (walkCursor < 0) walkCursor = 1;
-          if (walkCursor >= values.length) walkCursor = Math.max(0, values.length - 2);
+          const span = Math.max(1, Math.round(sequence.amount || 1));
+          const direction = random() < 0.5 ? -1 : 1;
+          const step = 1 + Math.floor(random() * span);
+          walkCursor += direction * step;
+          while (walkCursor < 0 || walkCursor >= values.length) {
+            if (walkCursor < 0) walkCursor = -walkCursor;
+            if (walkCursor >= values.length) walkCursor = (values.length - 1) - (walkCursor - (values.length - 1));
+          }
           return values[walkCursor];
         }
         if (sequence.mode === 'shuffle') {
@@ -2245,7 +2401,7 @@ export class SonusRuntime {
       };
 
       if (cycle.unit === 'beat') {
-        this.scheduler.addBeatJob(cycle.amount, fire, cycle.loose);
+        this.scheduler.addBeatJob(cycle.amount, fire, cycle.loose, cycle.clockSource);
         continue;
       }
       const baseMs = cycle.unit === 'sec' ? cycle.amount * 1000 : cycle.amount;
@@ -2304,10 +2460,14 @@ export class SonusRuntime {
 
         if (sequence.mode === 'random') return values[Math.floor(random() * values.length)];
         if (sequence.mode === 'walk') {
+          const span = Math.max(1, Math.round(sequence.amount || 1));
           const direction = random() < 0.5 ? -1 : 1;
-          walkCursor += direction;
-          if (walkCursor < 0) walkCursor = 1;
-          if (walkCursor >= values.length) walkCursor = Math.max(0, values.length - 2);
+          const step = 1 + Math.floor(random() * span);
+          walkCursor += direction * step;
+          while (walkCursor < 0 || walkCursor >= values.length) {
+            if (walkCursor < 0) walkCursor = -walkCursor;
+            if (walkCursor >= values.length) walkCursor = (values.length - 1) - (walkCursor - (values.length - 1));
+          }
           return values[walkCursor];
         }
         if (sequence.mode === 'shuffle') {
@@ -2332,7 +2492,7 @@ export class SonusRuntime {
       };
 
       if (cycle.unit === 'beat') {
-        this.scheduler.addBeatJob(cycle.amount, fire, cycle.loose);
+        this.scheduler.addBeatJob(cycle.amount, fire, cycle.loose, cycle.clockSource);
         continue;
       }
 
@@ -2574,14 +2734,27 @@ function matchesCycle(condition: CycleCondition | null, eventIndex: number): boo
   return ((eventIndex - 1) % condition.length!) + 1 === condition.position;
 }
 
-function parseLanguageSequenceDirective(line: string): ({ name: string; values: number[]; mode: LanguageSequenceDefinition['mode'] }) | null {
-  const match = line.match(/^__sequence\("([A-Za-z_]\w*)","([^"]*)","(order|random|walk|shuffle|reverse)"\)$/);
+function parseLanguageSequenceDirective(
+  line: string,
+): ({ name: string; values: number[]; mode: LanguageSequenceDefinition['mode']; amount: number }) | null {
+  const match = line.match(
+    /^__sequence\("([A-Za-z_]\w*)","([^"]*)","(order|random|walk|shuffle|reverse)",(\d+(?:\.\d+)?)\)$/,
+  );
   if (!match) return null;
-  return { name: match[1], values: match[2].split('|').filter(Boolean).map(Number), mode: match[3] as LanguageSequenceDefinition['mode'] };
+  return {
+    name: match[1],
+    values: match[2].split('|').filter(Boolean).map(Number),
+    mode: match[3] as LanguageSequenceDefinition['mode'],
+    amount: Number(match[4]),
+  };
 }
 
-function parseLanguageCycleDirective(line: string): ({ name: string; amount: number; unit: LanguageCycleDefinition['unit']; chance: number; drift: boolean; loose: boolean }) | null {
-  const match = line.match(/^__cycle\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false)\)$/);
+function parseLanguageCycleDirective(
+  line: string,
+): ({ name: string } & LanguageCycleDefinition) | null {
+  const match = line.match(
+    /^__cycle\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/,
+  );
   if (!match) return null;
   return {
     name: match[1],
@@ -2590,6 +2763,7 @@ function parseLanguageCycleDirective(line: string): ({ name: string; amount: num
     chance: Number(match[4]),
     drift: match[5] === 'true',
     loose: match[6] === 'true',
+    clockSource: match[7],
   };
 }
 
@@ -2603,7 +2777,7 @@ function parseLanguageFxParameterCycleDirective(
   lineNumber: number,
 ): LanguageFxParameterCycleDefinition | null {
   const match = line.match(
-    /^__fxparamcycle\("([A-Za-z_]\w*)","(position|size|pitch|density|texture|mix|spread|feedback|reverb)","((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false)\)$/,
+    /^__fxparamcycle\("([A-Za-z_]\w*)","(position|size|pitch|density|texture|mix|spread|feedback|reverb)","((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/,
   );
   if (!match) return null;
   let expression: string;
@@ -2617,6 +2791,7 @@ function parseLanguageFxParameterCycleDirective(
     chance: Number(match[6]),
     drift: match[7] === 'true',
     loose: match[8] === 'true',
+    clockSource: match[9],
     line: lineNumber,
   };
 }
@@ -2637,19 +2812,24 @@ function parseLanguageFxParameterDefaultDirective(
 function parseLanguageFxPitchSequenceDirective(
   line: string,
 ): ({ name: string } & LanguageFxPitchSequenceDefinition) | null {
-  const match = line.match(/^__fxsequence\("([A-Za-z_]\w*)","([^"]*)","(order|random|walk|shuffle|reverse)"\)$/);
+  const match = line.match(
+    /^__fxsequence\("([A-Za-z_]\w*)","([^"]*)","(order|random|walk|shuffle|reverse)",(\d+(?:\.\d+)?)\)$/,
+  );
   if (!match) return null;
   return {
     name: match[1],
     values: match[2].split('|').filter(Boolean).map(Number),
     mode: match[3] as LanguageFxPitchSequenceDefinition['mode'],
+    amount: Number(match[4]),
   };
 }
 
 function parseLanguageFxPitchCycleDirective(
   line: string,
 ): { name: string; timing: LanguageCycleDefinition } | null {
-  const match = line.match(/^__fxpitchcycle\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false)\)$/);
+  const match = line.match(
+    /^__fxpitchcycle\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/,
+  );
   if (!match) return null;
   return {
     name: match[1],
@@ -2659,6 +2839,7 @@ function parseLanguageFxPitchCycleDirective(
       chance: Number(match[4]),
       drift: match[5] === 'true',
       loose: match[6] === 'true',
+      clockSource: match[7],
     },
   };
 }
@@ -2726,12 +2907,60 @@ function parseLanguageMasterClockDirective(line: string, lineNumber: number): La
   };
 }
 
+function parseLanguageGenerativeDefaultDirective(
+  line: string,
+  lineNumber: number,
+): LanguageGenerativeDefaultDefinition | null {
+  const match = line.match(
+    /^__genparamdefault\("(voice|fx)","([A-Za-z_]\w*)","([A-Za-z_]\w*)","((?:[^"\\]|\\.)*)","(wander|trend|scatter|flutter)",(\d+(?:\.\d+)?)\)$/,
+  );
+  if (!match) return null;
+  let expression: string;
+  try { expression = JSON.parse(`"${match[4]}"`) as string; } catch { return null; }
+  return {
+    ownerKind: match[1] as 'voice' | 'fx',
+    owner: match[2],
+    parameter: match[3],
+    expression,
+    mode: match[5] as LanguageGenerativeMode,
+    amount: Number(match[6]),
+    line: lineNumber,
+  };
+}
+
+function parseLanguageGenerativeCycleDirective(
+  line: string,
+  lineNumber: number,
+): LanguageGenerativeCycleDefinition | null {
+  const match = line.match(
+    /^__genparamcycle\("(voice|fx)","([A-Za-z_]\w*)","([A-Za-z_]\w*)","((?:[^"\\]|\\.)*)","(wander|trend|scatter|flutter)",(\d+(?:\.\d+)?),(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/,
+  );
+  if (!match) return null;
+  let expression: string;
+  try { expression = JSON.parse(`"${match[4]}"`) as string; } catch { return null; }
+  return {
+    ownerKind: match[1] as 'voice' | 'fx',
+    owner: match[2],
+    parameter: match[3],
+    expression,
+    mode: match[5] as LanguageGenerativeMode,
+    amount: Number(match[6]),
+    interval: Number(match[7]),
+    unit: match[8] as LanguageGenerativeCycleDefinition['unit'],
+    chance: Number(match[9]),
+    drift: match[10] === 'true',
+    loose: match[11] === 'true',
+    clockSource: match[12],
+    line: lineNumber,
+  };
+}
+
 function parseLanguageParameterCycleDirective(
   line: string,
   lineNumber: number,
 ): LanguageParameterCycleDefinition | null {
   const match = line.match(
-    /^__paramcycle\("([A-Za-z_]\w*)","(harmo|timbre|morph)","((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false)\)$/,
+    /^__paramcycle\("([A-Za-z_]\w*)","(harmo|timbre|morph)","((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/,
   );
   if (!match) return null;
 
@@ -2751,6 +2980,7 @@ function parseLanguageParameterCycleDirective(
     chance: Number(match[6]),
     drift: match[7] === 'true',
     loose: match[8] === 'true',
+    clockSource: match[9],
     line: lineNumber,
   };
 }
@@ -2783,7 +3013,7 @@ function parseLanguageObjectEveryDirective(
   line: string,
 ): ({ name: string } & LanguageObjectEveryDefinition) | null {
   const match = line.match(
-    /^__objectevery\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false)\)$/,
+    /^__objectevery\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/,
   );
   if (!match) return null;
   return {
@@ -2793,6 +3023,7 @@ function parseLanguageObjectEveryDirective(
     chance: Number(match[4]),
     drift: match[5] === 'true',
     loose: match[6] === 'true',
+    clockSource: match[7],
   };
 }
 

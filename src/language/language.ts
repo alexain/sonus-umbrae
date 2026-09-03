@@ -13,11 +13,12 @@ export class LanguageError extends Error {
   }
 }
 
-type SourceKind = 'voice' | 'note' | 'freq' | 'time' | 'trigger' | 'scalar' | 'scale';
+type SourceKind = 'voice' | 'note' | 'freq' | 'time' | 'clock' | 'trigger' | 'scalar' | 'scale';
 
 type SourceDefinition =
   | { kind: 'scalar' }
   | { kind: 'time'; amount: number; unit: 'ms' | 'sec' | 'beat'; display: string }
+  | { kind: 'clock'; internalName: string; rateLabel: string; display: string }
   | { kind: 'freq'; values: number[]; display: string }
   | { kind: 'note'; values: number[]; display: string }
   | { kind: 'scale'; values: number[]; display: string };
@@ -60,6 +61,8 @@ type ModSourceDefinition = {
 
 
 type SelectionMode = 'order' | 'random' | 'walk' | 'shuffle' | 'reverse';
+
+type SelectionSpec = { mode: SelectionMode; amount: number };
 
 type TimingModifiers = {
   chance: number;
@@ -259,7 +262,7 @@ function parseScaleSpec(
   value: string,
   line: number,
   allowSelection: boolean,
-): { values: number[]; display: string; mode: SelectionMode } | null {
+): { values: number[]; display: string; mode: SelectionMode; amount: number } | null {
   const head = value.match(/^([A-Ga-g][#b]?)\s+([A-Za-z]+)(?:\s+with\s+(.+))?$/i);
   if (!head) return null;
   if (!MODE_INTERVALS[head[2].toLowerCase()]) return null;
@@ -267,6 +270,7 @@ function parseScaleSpec(
   let rangeStart: string | null = null;
   let rangeEnd: string | null = null;
   let mode: SelectionMode = 'order';
+  let amount = 0;
   let selectionSeen = false;
 
   const modifiers = (head[3] ?? '')
@@ -285,8 +289,8 @@ function parseScaleSpec(
       continue;
     }
 
-    const normalized = modifier.toLowerCase();
-    if (['random', 'walk', 'shuffle', 'reverse'].includes(normalized)) {
+    const selection = parseSelectionMode([modifier], line, 'scale');
+    if (selection.mode !== 'order') {
       if (!allowSelection) {
         throw new LanguageError([{
           line,
@@ -296,16 +300,15 @@ function parseScaleSpec(
       if (selectionSeen) {
         throw new LanguageError([{ line, message: 'scale accepts only one sequencing modifier' }]);
       }
-      mode = normalized as SelectionMode;
+      mode = selection.mode;
+      amount = selection.amount;
       selectionSeen = true;
       continue;
     }
-
-    throw new LanguageError([{ line, message: `scale does not support modifier '${modifier}'` }]);
   }
 
   const scale = scaleValues(head[1], head[2], rangeStart, rangeEnd, line);
-  return { ...scale, mode };
+  return { ...scale, mode, amount };
 }
 
 function parseScaleSource(value: string, line: number): { values: number[]; display: string } | null {
@@ -313,8 +316,8 @@ function parseScaleSource(value: string, line: number): { values: number[]; disp
   return parsed ? { values: parsed.values, display: parsed.display } : null;
 }
 
-function sourceSequenceCode(voiceName: string, values: number[], mode: SelectionMode = 'order'): string {
-  const directive = values.length > 1 ? ` ${sequenceDirective(voiceName, values, mode)}` : '';
+function sourceSequenceCode(voiceName: string, values: number[], mode: SelectionMode = 'order', amount = 0): string {
+  const directive = values.length > 1 ? ` ${sequenceDirective(voiceName, values, mode, amount)}` : '';
   return `${voiceName}.freq(${values[0]});${directive}`;
 }
 
@@ -354,22 +357,41 @@ function splitWith(value: string): { base: string; modifiers: string[] } {
   };
 }
 
-function parseSelectionMode(modifiers: string[], line: number, property: string): SelectionMode {
+function parseSelectionMode(modifiers: string[], line: number, property: string): SelectionSpec {
   let mode: SelectionMode = 'order';
+  let amount = 0;
   let explicit = false;
 
   for (const modifier of modifiers) {
     const normalized = modifier.toLowerCase();
-    if (!['random', 'walk', 'shuffle', 'reverse'].includes(normalized)) {
-      throw new LanguageError([{ line, message: `${property} does not support modifier '${modifier}'` }]);
+
+    if (['random', 'shuffle', 'reverse'].includes(normalized)) {
+      if (explicit) {
+        throw new LanguageError([{ line, message: `${property} accepts only one selection modifier` }]);
+      }
+      mode = normalized as SelectionMode;
+      explicit = true;
+      continue;
     }
-    if (explicit) {
-      throw new LanguageError([{ line, message: `${property} accepts only one selection modifier` }]);
+
+    const walk = modifier.match(/^walk(?:\s+(\d+(?:\.\d+)?))?$/i);
+    if (walk) {
+      if (explicit) {
+        throw new LanguageError([{ line, message: `${property} accepts only one selection modifier` }]);
+      }
+      amount = walk[1] === undefined ? 1 : numberValue(walk[1], line, 'walk');
+      if (amount <= 0) {
+        throw new LanguageError([{ line, message: 'walk amount must be greater than 0' }]);
+      }
+      mode = 'walk';
+      explicit = true;
+      continue;
     }
-    mode = normalized as SelectionMode;
-    explicit = true;
+
+    throw new LanguageError([{ line, message: `${property} does not support modifier '${modifier}'` }]);
   }
-  return mode;
+
+  return { mode, amount };
 }
 
 function parseTimingModifiers(modifiers: string[], line: number, unit: string): TimingModifiers {
@@ -404,8 +426,8 @@ function parseTimingModifiers(modifiers: string[], line: number, unit: string): 
   return result;
 }
 
-function sequenceDirective(name: string, values: number[], mode: SelectionMode): string {
-  return `__sequence(${JSON.stringify(name)},${JSON.stringify(values.join('|'))},${JSON.stringify(mode)});`;
+function sequenceDirective(name: string, values: number[], mode: SelectionMode, amount = 0): string {
+  return `__sequence(${JSON.stringify(name)},${JSON.stringify(values.join('|'))},${JSON.stringify(mode)},${amount});`;
 }
 
 function compileFrom(
@@ -453,6 +475,24 @@ function compileFrom(
   return sourceSequenceCode(voice.name, definition.values);
 }
 
+type GenerativeMode = 'wander' | 'trend' | 'scatter' | 'flutter';
+
+type GenerativeSpec = {
+  base: string;
+  mode: GenerativeMode | null;
+  amount: number;
+};
+
+function parseGenerativeValue(value: string, line: number): GenerativeSpec {
+  const match = value.match(/^(.*?)\s+with\s+(wander|trend|scatter|flutter)\s+(\d+(?:\.\d+)?)$/i);
+  if (!match) return { base: value.trim(), mode: null, amount: 0 };
+  const amount = numberValue(match[3], line, match[2].toLowerCase());
+  if (amount <= 0) {
+    throw new LanguageError([{ line, message: `${match[2].toLowerCase()} amount must be greater than 0` }]);
+  }
+  return { base: match[1].trim(), mode: match[2].toLowerCase() as GenerativeMode, amount };
+}
+
 function compileVoiceProperty(
   voice: VoiceState,
   property: string,
@@ -497,7 +537,7 @@ function compileVoiceProperty(
         .split(',')
         .map((item) => item.trim())
         .filter(Boolean);
-      const mode = parseSelectionMode(modifiers, line, 'scale');
+      const selection = parseSelectionMode(modifiers, line, 'scale');
       const sourceName = match[1];
       const actual = sourceKinds.get(sourceName);
       const definition = sourceDefinitions.get(sourceName);
@@ -507,7 +547,7 @@ function compileVoiceProperty(
       if (definition.kind !== 'scale') {
         throw new LanguageError([{ line, message: `source '${sourceName}' is ${actual}, expected scale source for scale` }]);
       }
-      return sourceSequenceCode(voice.name, definition.values, mode);
+      return sourceSequenceCode(voice.name, definition.values, selection.mode, selection.amount);
     }
 
     const sourceName = value.replace(/^from\s+/i, '').trim();
@@ -521,9 +561,19 @@ function compileVoiceProperty(
     }
 
     const split = splitEveryClause(value);
-    const expression = split.base.trim();
+    const generative = parseGenerativeValue(split.base, line);
+    const expression = generative.base;
     if (!expression) {
       throw new LanguageError([{ line, message: `${key} expects a numeric expression` }]);
+    }
+
+    if (generative.mode) {
+      if (split.every === null) {
+        return `${voice.name}.${key}(${expression}); __genparamdefault("voice",${JSON.stringify(voice.name)},${JSON.stringify(key)},${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount});`;
+      }
+      const timing = parseEverySpec(split.every, line, sourceDefinitions);
+      const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+      return `${voice.name}.${key}(${expression}); ${prefix}__genparamcycle("voice",${JSON.stringify(voice.name)},${JSON.stringify(key)},${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
     }
 
     if (split.every === null) {
@@ -531,7 +581,8 @@ function compileVoiceProperty(
     }
 
     const timing = parseEverySpec(split.every, line, sourceDefinitions);
-    return `${voice.name}.${key}(${expression}); __paramcycle(${JSON.stringify(voice.name)},${JSON.stringify(key)},${JSON.stringify(expression)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose});`;
+    const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+    return `${voice.name}.${key}(${expression}); ${prefix}__paramcycle(${JSON.stringify(voice.name)},${JSON.stringify(key)},${JSON.stringify(expression)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
   }
 
   switch (key) {
@@ -572,11 +623,11 @@ function compileVoiceProperty(
         if (midi === null) throw new LanguageError([{ line, message: `invalid note '${note}'` }]);
         return midiToFrequency(midi);
       });
-      const mode = parseSelectionMode(modifiers, line, 'note');
+      const selection = parseSelectionMode(modifiers, line, 'note');
       if (frequencies.length === 1 && modifiers.length > 0) {
         throw new LanguageError([{ line, message: 'note selection modifiers require a list' }]);
       }
-      const sequence = frequencies.length > 1 ? ` ${sequenceDirective(voice.name, frequencies, mode)}` : '';
+      const sequence = frequencies.length > 1 ? ` ${sequenceDirective(voice.name, frequencies, selection.mode, selection.amount)}` : '';
       const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
       return `${voice.name}.freq(${frequencies[0]});${sequence}${every}`;
     }
@@ -588,11 +639,11 @@ function compileVoiceProperty(
       if (values.some((item) => item <= 0)) {
         throw new LanguageError([{ line, message: 'freq must be greater than 0' }]);
       }
-      const mode = parseSelectionMode(modifiers, line, 'freq');
+      const selection = parseSelectionMode(modifiers, line, 'freq');
       if (values.length === 1 && modifiers.length > 0) {
         throw new LanguageError([{ line, message: 'freq selection modifiers require a list' }]);
       }
-      const sequence = values.length > 1 ? ` ${sequenceDirective(voice.name, values, mode)}` : '';
+      const sequence = values.length > 1 ? ` ${sequenceDirective(voice.name, values, selection.mode, selection.amount)}` : '';
       const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
       return `${voice.name}.freq(${values[0]});${sequence}${every}`;
     }
@@ -607,12 +658,13 @@ function compileVoiceProperty(
         }]);
       }
       const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
-      return `${sourceSequenceCode(voice.name, parsed.values, parsed.mode)}${every}`;
+      return `${sourceSequenceCode(voice.name, parsed.values, parsed.mode, parsed.amount)}${every}`;
     }
 
     case 'every': {
       const timing = parseEverySpec(value, line, sourceDefinitions);
-      return `__objectevery(${JSON.stringify(voice.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose});`;
+      const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+      return `${prefix}__objectevery(${JSON.stringify(voice.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
     }
 
     case 'cycle':
@@ -638,6 +690,8 @@ type EverySpec = {
   chance: number;
   drift: boolean;
   loose: boolean;
+  clockSource: string;
+  clockPrelude: string;
 };
 
 function splitEveryClause(value: string): { base: string; every: string | null } {
@@ -677,12 +731,50 @@ function parseEverySpec(
     throw new LanguageError([{ line, message: 'beat timing currently requires a whole number of beats' }]);
   }
 
-  const timing = parseTimingModifiers(modifiers, line, unit);
-  return { amount, unit, ...timing };
+  let clockSource = 'Clock';
+  let clockPrelude = '';
+  const timingModifiers: string[] = [];
+
+  for (const modifier of modifiers) {
+    const clock = modifier.match(/^clock\s+(.+)$/i);
+    if (!clock) {
+      timingModifiers.push(modifier);
+      continue;
+    }
+    if (unit !== 'beat') {
+      throw new LanguageError([{ line, message: 'with clock is available only for beat-based every clauses' }]);
+    }
+    const clockValue = clock[1].trim();
+    const rate = clockValue.match(/^([/*])\s*(\d+(?:\.\d+)?)$/);
+    if (rate) {
+      const n = Number(rate[2]);
+      if (!Number.isFinite(n) || n <= 0) {
+        throw new LanguageError([{ line, message: 'clock divisor/multiplier must be greater than 0' }]);
+      }
+      const label = `${rate[1]}${formatSourceNumber(n)}`;
+      const safe = label.replace('/', 'div_').replace('*', 'mul_').replace('.', '_');
+      clockSource = `__clock_${line}_${safe}`;
+      clockPrelude = `${clockSource} = Clock.rate(${JSON.stringify(label)});`;
+      continue;
+    }
+    if (!IDENTIFIER.test(clockValue)) {
+      throw new LanguageError([{ line, message: `invalid clock source '${clockValue}'` }]);
+    }
+    const definition = sourceDefinitions.get(clockValue);
+    if (!definition) throw new LanguageError([{ line, message: `unknown clock source '${clockValue}'` }]);
+    if (definition.kind !== 'clock') {
+      throw new LanguageError([{ line, message: `source '${clockValue}' is ${definition.kind}, expected clock source` }]);
+    }
+    clockSource = definition.internalName;
+  }
+
+  const timing = parseTimingModifiers(timingModifiers, line, unit);
+  return { amount, unit, ...timing, clockSource, clockPrelude };
 }
 
 function everyDirective(name: string, spec: EverySpec): string {
-  return `__cycle(${JSON.stringify(name)},${spec.amount},${JSON.stringify(spec.unit)},${spec.chance},${spec.drift},${spec.loose});`;
+  const prefix = spec.clockPrelude ? `${spec.clockPrelude} ` : '';
+  return `${prefix}__cycle(${JSON.stringify(name)},${spec.amount},${JSON.stringify(spec.unit)},${spec.chance},${spec.drift},${spec.loose},${JSON.stringify(spec.clockSource)});`;
 }
 
 function compileSet(
@@ -704,6 +796,18 @@ function compileSet(
   }
 
   const body = match[2].trim();
+
+  const clockAlias = body.match(/^clock\s+([/*])\s*(\d+(?:\.\d+)?)(?:\s+with\s+(view))?$/i);
+  if (clockAlias) {
+    const n = numberValue(clockAlias[2], line, 'clock rate');
+    if (n <= 0) throw new LanguageError([{ line, message: 'clock divisor/multiplier must be greater than 0' }]);
+    const label = `${clockAlias[1]}${formatSourceNumber(n)}`;
+    scalarNames.add(name);
+    sourceKinds.set(name, 'clock');
+    sourceDefinitions.set(name, { kind: 'clock', internalName: name, rateLabel: label, display: `clock ${label}` });
+    const view = clockAlias[3] ? '.view()' : '';
+    return `${name} = Clock.rate(${JSON.stringify(label)})${view};`;
+  }
 
   const scale = parseScaleSource(body, line);
   if (scale) {
@@ -1015,8 +1119,8 @@ function semitonesFromFrequency(frequency: number): number {
   return 12 * Math.log2(frequency / c4);
 }
 
-function fxPitchSequenceDirective(name: string, values: number[], mode: SelectionMode): string {
-  return `__fxsequence(${JSON.stringify(name)},${JSON.stringify(values.join('|'))},${JSON.stringify(mode)});`;
+function fxPitchSequenceDirective(name: string, values: number[], mode: SelectionMode, amount = 0): string {
+  return `__fxsequence(${JSON.stringify(name)},${JSON.stringify(values.join('|'))},${JSON.stringify(mode)},${amount});`;
 }
 
 function compileFxProperty(
@@ -1041,7 +1145,8 @@ function compileFxProperty(
 
   if (key === 'every') {
     const timing = parseEverySpec(value, line, sourceDefinitions);
-    return `__objectevery(${JSON.stringify(fx.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose});`;
+    const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+    return `${prefix}__objectevery(${JSON.stringify(fx.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
   }
 
   if (!fx.modelId) {
@@ -1065,6 +1170,7 @@ function compileFxProperty(
     const split = splitEveryClause(value);
     let pitchValues: number[] = [];
     let mode: SelectionMode = 'order';
+    let selectionAmount = 0;
 
     if (key === 'note') {
       const parsed = splitWith(split.base);
@@ -1074,7 +1180,7 @@ function compileFxProperty(
         if (midi === null) throw new LanguageError([{ line, message: `invalid note '${note}'` }]);
         return midi - 60;
       });
-      mode = parseSelectionMode(parsed.modifiers, line, 'note');
+      { const selection = parseSelectionMode(parsed.modifiers, line, 'note'); mode = selection.mode; selectionAmount = selection.amount; }
     } else if (key === 'freq') {
       const parsed = splitWith(split.base);
       const frequencies = parseList(parsed.base, line, 'freq').map((item) => numberValue(item, line, 'freq'));
@@ -1082,23 +1188,25 @@ function compileFxProperty(
         throw new LanguageError([{ line, message: 'freq must be greater than 0' }]);
       }
       pitchValues = frequencies.map(semitonesFromFrequency);
-      mode = parseSelectionMode(parsed.modifiers, line, 'freq');
+      { const selection = parseSelectionMode(parsed.modifiers, line, 'freq'); mode = selection.mode; selectionAmount = selection.amount; }
     } else {
       const parsed = parseScaleSpec(split.base, line, true);
       if (!parsed) throw new LanguageError([{ line, message: 'scale expects root and mode with optional range and sequencing modifier' }]);
       pitchValues = parsed.values.map(semitonesFromFrequency);
       mode = parsed.mode;
+      selectionAmount = parsed.amount;
     }
 
     if (pitchValues.some((pitch) => pitch < -48 || pitch > 48)) {
       throw new LanguageError([{ line, message: 'FX musical pitch must resolve inside -48..48 semitones relative to C4' }]);
     }
 
-    const sequence = pitchValues.length > 1 ? ` ${fxPitchSequenceDirective(fx.name, pitchValues, mode)}` : '';
+    const sequence = pitchValues.length > 1 ? ` ${fxPitchSequenceDirective(fx.name, pitchValues, mode, selectionAmount)}` : '';
     const every = split.every
       ? (() => {
           const timing = parseEverySpec(split.every!, line, sourceDefinitions);
-          return ` __fxpitchcycle(${JSON.stringify(fx.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose});`;
+          const prefix = timing.clockPrelude ? ` ${timing.clockPrelude}` : '';
+          return `${prefix} __fxpitchcycle(${JSON.stringify(fx.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
         })()
       : '';
     return `${fx.name}.pitch(${pitchValues[0]});${sequence}${every}`;
@@ -1113,7 +1221,8 @@ function compileFxProperty(
   if (modulation) return modulation;
 
   const split = splitEveryClause(value);
-  const expression = split.base;
+  const generative = parseGenerativeValue(split.base, line);
+  const expression = generative.base;
   if (!expression) throw new LanguageError([{ line, message: `${parameter} expects a value` }]);
 
   if (parameter === 'pitch') {
@@ -1124,9 +1233,19 @@ function compileFxProperty(
   }
 
   const initial = `${fx.name}.${parameter}(${expression});`;
+  if (generative.mode) {
+    if (split.every) {
+      const timing = parseEverySpec(split.every, line, sourceDefinitions);
+      const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+      return `${initial} ${prefix}__genparamcycle("fx",${JSON.stringify(fx.name)},${JSON.stringify(parameter)},${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
+    }
+    return `${initial} __genparamdefault("fx",${JSON.stringify(fx.name)},${JSON.stringify(parameter)},${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount});`;
+  }
+
   if (split.every) {
     const timing = parseEverySpec(split.every, line, sourceDefinitions);
-    return `${initial} __fxparamcycle(${JSON.stringify(fx.name)},${JSON.stringify(parameter)},${JSON.stringify(expression)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose});`;
+    const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+    return `${initial} ${prefix}__fxparamcycle(${JSON.stringify(fx.name)},${JSON.stringify(parameter)},${JSON.stringify(expression)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
   }
   return `${initial} __fxparamdefault(${JSON.stringify(fx.name)},${JSON.stringify(parameter)},${JSON.stringify(expression)});`;
 }
