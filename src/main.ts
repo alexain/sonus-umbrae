@@ -390,8 +390,16 @@ function notify(text: string): void {
 function normalizeLanguageCommandCase(): void {
   const normalized = editor.value
     .replace(
-      /^(\s*)(voice|fx|mod|play|set|clock|main)\b/gim,
+      /^(\s*)(voice|fx|filter|play|set|clock|main)(?=\s|$)/gim,
       (_match, indentation: string, commandName: string) => `${indentation}${commandName.toUpperCase()}`,
+    )
+    .replace(
+      /^(\s*)mod(?=\s+[A-Za-z_]\w*(?:\s+with\s+view)?\s*:)/gim,
+      (_match, indentation: string) => `${indentation}MOD`,
+    )
+    .replace(
+      /^(\s+)model(?=\s)/gim,
+      (_match, indentation: string) => `${indentation}model`,
     )
     .replace(
       /^(\s*PLAY\s+[A-Za-z_]\w*(?:\.(?:out|aux))?\s+through\s+)main(?:\.([lr]))?/gim,
@@ -2181,7 +2189,7 @@ editor.addEventListener('keydown', (event) => {
 
     let indentation = currentIndent;
     if (!trimmed) indentation = currentIndent.length >= 4 ? currentIndent.slice(0, -4) : '';
-    else if (/^(VOICE|FX|MOD)\b.*:\s*$/i.test(trimmed)) indentation = `${currentIndent}    `;
+    else if (/^(VOICE|FX|FILTER|MOD)\b.*:\s*$/i.test(trimmed)) indentation = `${currentIndent}    `;
     else if (/^PLAY\b/i.test(trimmed) && !/\bthrough\b/i.test(trimmed)) indentation = `${currentIndent}    `;
     else if (currentIndent.length > 0 && /^(through|then)\b/i.test(trimmed)) indentation = currentIndent;
 

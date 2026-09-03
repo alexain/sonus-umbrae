@@ -7,6 +7,7 @@ SUPERPARASITES="$ROOT/vendor/superparasites"
 VOICE_OUTPUT="$ROOT/public/dsp/voice.wasm"
 SWELL_OUTPUT="$ROOT/public/dsp/swell.wasm"
 MIST_OUTPUT="$ROOT/public/dsp/mist.wasm"
+LIQUID_OUTPUT="$ROOT/public/dsp/liquid.wasm"
 
 if ! command -v em++ >/dev/null 2>&1; then
   echo "em++ not found. Install/activate Emscripten (emsdk) before building the DSP." >&2
@@ -95,3 +96,18 @@ em++ \
   -o "$MIST_OUTPUT"
 
 echo "Built $MIST_OUTPUT (SuperParasites 8-mode backend)"
+
+
+em++ \
+  -std=c++17 \
+  -O3 \
+  "$ROOT/dsp/liquid_bridge.cc" \
+  -s STANDALONE_WASM=1 \
+  -s ALLOW_MEMORY_GROWTH=0 \
+  -s INITIAL_MEMORY=2097152 \
+  -s FILESYSTEM=0 \
+  -s EXPORTED_FUNCTIONS='["_su_liquid_create","_su_liquid_destroy","_su_liquid_set_sample_rate","_su_liquid_set_cutoff","_su_liquid_set_resonance","_su_liquid_in","_su_liquid_bp12","_su_liquid_lp12","_su_liquid_lp24","_su_liquid_process"]' \
+  -Wl,--no-entry \
+  -o "$LIQUID_OUTPUT"
+
+echo "Built $LIQUID_OUTPUT (Ripples VA backend)"

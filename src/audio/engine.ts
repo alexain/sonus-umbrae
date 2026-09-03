@@ -56,6 +56,14 @@ export interface AudioProgram {
     reverse: boolean;
     mode: number;
   }>;
+  filters: Array<{
+    name: string;
+    model: 'liquid.mono';
+    ownerVoice: string | null;
+    displayName: string;
+    cutoff: number;
+    resonance: number;
+  }>;
   gains: Array<{
     name: string;
     level: number;
@@ -144,6 +152,18 @@ interface MistVoice {
   mode: number;
 }
 
+interface LiquidFilterVoice {
+  node: AudioWorkletNode;
+  input: GainNode;
+  lp12Out: GainNode;
+  bp12Out: GainNode;
+  lp24Out: GainNode;
+  ownerVoice: string | null;
+  displayName: string;
+  cutoff: number;
+  resonance: number;
+}
+
 interface SignalSource {
   node: AudioNode;
   output: number;
@@ -193,6 +213,7 @@ export class AudioEngine {
   private voices = new Map<string, MacroVoice>();
   private swells = new Map<string, SwellVoice>();
   private mists = new Map<string, MistVoice>();
+  private filters = new Map<string, LiquidFilterVoice>();
   private clocks = new Map<string, ClockSource>();
   private clockTriggerListeners = new Map<string, Set<() => void>>();
   private masterClockBpm = 0;
@@ -200,9 +221,11 @@ export class AudioEngine {
   private voiceWasmBytes: ArrayBuffer | null = null;
   private swellWasmBytes: ArrayBuffer | null = null;
   private mistWasmBytes: ArrayBuffer | null = null;
+  private liquidWasmBytes: ArrayBuffer | null = null;
   private voiceWorkletLoaded = false;
   private swellWorkletLoaded = false;
   private mistWorkletLoaded = false;
+  private liquidWorkletLoaded = false;
   private clockWorkletLoaded = false;
   private pendingProgram: AudioProgram | null = null;
   private routes = new Map<string, AudioRoute>();
@@ -220,7 +243,7 @@ export class AudioEngine {
           : 'suspended',
       sampleRate: this.context?.sampleRate ?? null,
       testFrequency: this.testOscillator?.frequency.value ?? null,
-      objectCount: this.oscillators.size + this.gains.size + this.voices.size + this.swells.size + this.clocks.size,
+      objectCount: this.oscillators.size + this.gains.size + this.voices.size + this.swells.size + this.filters.size + this.clocks.size,
       routeCount: this.routes.size,
     };
   }
@@ -236,6 +259,7 @@ export class AudioEngine {
     await this.ensureVoiceRuntime();
     await this.ensureSwellRuntime();
     await this.ensureMistRuntime();
+    await this.ensureLiquidRuntime();
     await this.ensureClockRuntime();
     if (context.state !== 'running') await context.resume();
     if (this.pendingProgram) {
@@ -256,7 +280,8 @@ export class AudioEngine {
   applyProgram(program: AudioProgram): void {
     if ((program.voices.length > 0 && !this.voiceWorkletLoaded) ||
         (program.swells.length > 0 && !this.swellWorkletLoaded) ||
-        (program.mists.length > 0 && !this.mistWorkletLoaded)) {
+        (program.mists.length > 0 && !this.mistWorkletLoaded) ||
+        (program.filters.length > 0 && !this.liquidWorkletLoaded)) {
       this.pendingProgram = program;
       return;
     }
@@ -273,6 +298,7 @@ export class AudioEngine {
     const desiredVoices = new Map(program.voices.map((definition) => [definition.name, definition]));
     const desiredSwells = new Map(program.swells.map((definition) => [definition.name, definition]));
     const desiredMists = new Map(program.mists.map((definition) => [definition.name, definition]));
+    const desiredFilters = new Map(program.filters.map((definition) => [definition.name, definition]));
     const desiredGains = new Map(program.gains.map((definition) => [definition.name, definition]));
     const desiredRoutes = new Map(program.routes.map((route) => [`${route.source}->${route.destination}`, route]));
     const desiredViews = new Map(program.monitorViews.map((view) => [view.signal, view]));
@@ -295,6 +321,10 @@ export class AudioEngine {
 
     for (const [name] of this.gains) {
       if (!desiredGains.has(name)) this.removeGain(name);
+    }
+
+    for (const [name] of this.filters) {
+      if (!desiredFilters.has(name)) this.removeFilter(name);
     }
 
     for (const [name] of this.voices) {
@@ -321,6 +351,11 @@ export class AudioEngine {
     for (const definition of program.voices) {
       this.createVoice(definition);
       this.updateVoice(definition);
+    }
+
+    for (const definition of program.filters) {
+      this.createFilter(definition);
+      this.updateFilter(definition);
     }
 
     for (const definition of program.swells) {
@@ -442,6 +477,73 @@ export class AudioEngine {
       timbre: definition.timbre / 100,
       morph: definition.morph / 100,
     });
+  }
+
+  private createFilter(definition: AudioProgram['filters'][number]): void {
+    if (this.filters.has(definition.name)) return;
+    if (!this.liquidWorkletLoaded || !this.liquidWasmBytes) {
+      throw new Error('Liquid FILTER DSP is not ready; run :start after building the DSP');
+    }
+    const context = this.ensureContext();
+    const node = new AudioWorkletNode(context, 'sonus-liquid', {
+      numberOfInputs: 1,
+      numberOfOutputs: 3,
+      outputChannelCount: [1,1,1],
+      processorOptions: { wasmBytes: this.liquidWasmBytes.slice(0) },
+    });
+    const input = context.createGain();
+    const lp12Out = context.createGain();
+    const bp12Out = context.createGain();
+    const lp24Out = context.createGain();
+    input.connect(node,0,0);
+    node.connect(lp12Out,0,0);
+    node.connect(bp12Out,1,0);
+    node.connect(lp24Out,2,0);
+
+    this.filters.set(definition.name, {
+      node,input,lp12Out,bp12Out,lp24Out,
+      ownerVoice: definition.ownerVoice,
+      displayName: definition.displayName,
+      cutoff: definition.cutoff,
+      resonance: definition.resonance,
+    });
+
+    if (definition.ownerVoice) {
+      const voice = this.voices.get(definition.ownerVoice);
+      if (!voice) throw new Error(`embedded FILTER '${definition.displayName}' references unknown VOICE '${definition.ownerVoice}'`);
+      voice.outGain.connect(input);
+      voice.auxGain.connect(input);
+    }
+  }
+
+  private updateFilter(definition: AudioProgram['filters'][number]): void {
+    const filter = this.filters.get(definition.name);
+    if (!filter) return;
+    filter.cutoff = definition.cutoff;
+    filter.resonance = definition.resonance;
+    filter.node.port.postMessage({
+      type: 'params',
+      cutoff: definition.cutoff,
+      resonance: definition.resonance / 100,
+    });
+  }
+
+  setFilterCutoff(name: string, cutoff: number): void {
+    const filter = this.filters.get(name);
+    if (!filter) throw new Error(`unknown FILTER object: ${name}`);
+    if (!Number.isFinite(cutoff) || cutoff < 20 || cutoff > 20000) throw new RangeError('FILTER cutoff must be 20..20000 Hz');
+    filter.cutoff = cutoff;
+    filter.node.port.postMessage({ type: 'params', cutoff });
+  }
+
+  setFilterResonance(name: string, resonance: number): void {
+    const filter = this.filters.get(name);
+    if (!filter) throw new Error(`unknown FILTER object: ${name}`);
+    if (!Number.isFinite(resonance) || resonance < 0 || resonance > 100) {
+      throw new RangeError('FILTER resonance must be 0..100');
+    }
+    filter.resonance = resonance;
+    filter.node.port.postMessage({ type: 'params', resonance: resonance / 100 });
   }
 
   private createSwell(definition: AudioProgram['swells'][number]): void {
@@ -823,6 +925,16 @@ export class AudioEngine {
       return { node: mistOutput[2] === 'out_R' ? mist.outputR : mist.outputL, output: 0 };
     }
 
+    const filterOutput = signal.match(/^([A-Za-z_]\w*)\.(lp12|bp12|lp24)$/);
+    if (filterOutput) {
+      const [, name, port] = filterOutput;
+      let filter = this.filters.get(name);
+      if (!filter) filter = [...this.filters.values()].find((candidate) => candidate.ownerVoice === name);
+      if (!filter) throw new Error(`unknown FILTER output: ${signal}`);
+      const node = port === 'lp12' ? filter.lp12Out : port === 'bp12' ? filter.bp12Out : filter.lp24Out;
+      return { node, output: 0 };
+    }
+
     const match = signal.match(/^([A-Za-z_]\w*)\.(out|aux)$/);
     if (!match) throw new Error(`unknown signal: ${signal}`);
     const [, name, port] = match;
@@ -899,6 +1011,11 @@ export class AudioEngine {
           ? voice.timbreInput
           : voice.morphInput;
       return { node: input, input: 0 };
+    }
+
+    const filterInput = port.match(/^([A-Za-z_]\w*)\.in$/);
+    if (filterInput && this.filters.has(filterInput[1])) {
+      return { node: this.filters.get(filterInput[1])!.input, input: 0 };
     }
 
     const match = port.match(/^([A-Za-z_]\w*)\.in$/);
@@ -1237,6 +1354,24 @@ export class AudioEngine {
   }
 
 
+  private removeFilter(name: string): void {
+    const filter = this.filters.get(name);
+    if (!filter) return;
+    if (filter.ownerVoice) {
+      const voice = this.voices.get(filter.ownerVoice);
+      if (voice) {
+        try { voice.outGain.disconnect(filter.input); } catch {}
+        try { voice.auxGain.disconnect(filter.input); } catch {}
+      }
+    }
+    for (const node of [filter.input,filter.lp12Out,filter.bp12Out,filter.lp24Out]) {
+      try { node.disconnect(); } catch {}
+    }
+    try { filter.node.disconnect(); } catch {}
+    filter.node.port.close();
+    this.filters.delete(name);
+  }
+
   private removeMist(name: string): void {
     const mist = this.mists.get(name);
     if (!mist) return;
@@ -1268,6 +1403,9 @@ export class AudioEngine {
     if (!voice) return;
     this.removeView(`${name}.out`);
     this.removeView(`${name}.aux`);
+    this.removeView(`${name}.lp12`);
+    this.removeView(`${name}.bp12`);
+    this.removeView(`${name}.lp24`);
     const controlMonitor = this.controlMonitors.get(`${name}.v_oct`);
     if (controlMonitor) {
       voice.vOctInput.disconnect(controlMonitor);
@@ -1326,6 +1464,16 @@ export class AudioEngine {
     this.mistWasmBytes = await response.arrayBuffer();
     await context.audioWorklet.addModule('/worklets/mist-processor.js');
     this.mistWorkletLoaded = true;
+  }
+
+  private async ensureLiquidRuntime(): Promise<void> {
+    if (this.liquidWorkletLoaded && this.liquidWasmBytes) return;
+    const context = this.ensureContext();
+    const response = await fetch('/dsp/liquid.wasm');
+    if (!response.ok) throw new Error('Liquid DSP missing. Run npm run dsp:build.');
+    this.liquidWasmBytes = await response.arrayBuffer();
+    await context.audioWorklet.addModule('/worklets/liquid-processor.js');
+    this.liquidWorkletLoaded = true;
   }
 
   private async ensureClockRuntime(): Promise<void> {

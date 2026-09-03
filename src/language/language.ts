@@ -20,15 +20,17 @@ type SourceDefinition =
   | { kind: 'time'; amount: number; unit: 'ms' | 'sec' | 'beat'; display: string }
   | { kind: 'clock'; internalName: string; rateLabel: string; display: string }
   | { kind: 'freq'; values: number[]; display: string }
-  | { kind: 'note'; values: number[]; display: string }
+  | { kind: 'note'; values: number[]; display: string; favor: SequenceFavorEntry[] }
   | { kind: 'scale'; values: number[]; display: string };
 
 type VoiceState = {
   name: string;
   line: number;
+  indentation: number;
   hasSound: boolean;
   soundId: string | null;
   pitchProperty: 'note' | 'scale' | 'freq' | null;
+  embeddedFilter: string | null;
 };
 
 type FxState = {
@@ -39,6 +41,16 @@ type FxState = {
   modelId: string | null;
   pitchProperty: 'note' | 'scale' | 'freq' | null;
 };
+type FilterState = {
+  name: string;
+  internalName: string;
+  line: number;
+  indentation: number;
+  ownerVoice: string | null;
+  hasModel: boolean;
+};
+
+
 
 type FxParameter = 'position' | 'size' | 'pitch' | 'density' | 'texture' | 'mix' | 'spread' | 'feedback' | 'reverb';
 
@@ -340,7 +352,7 @@ function parseScaleSource(value: string, line: number): { values: number[]; disp
 }
 
 function inlinePianoDirective(
-  ownerKind: 'voice' | 'fx',
+  ownerKind: 'voice' | 'fx' | 'filter',
   owner: string,
   property: 'note' | 'scale',
   line: number,
@@ -350,7 +362,7 @@ function inlinePianoDirective(
 }
 
 function inlineScalarDirective(
-  ownerKind: 'voice' | 'fx',
+  ownerKind: 'voice' | 'fx' | 'filter',
   owner: string,
   property: string,
   line: number,
@@ -571,19 +583,32 @@ function parseSelectionMode(modifiers: string[], line: number, property: string)
 
 function parseTimingModifiers(modifiers: string[], line: number, unit: string): TimingModifiers {
   const result: TimingModifiers = { chance: 100, drift: false, loose: false };
+  let probabilityModifier: 'chance' | 'coin' | null = null;
 
   for (const modifier of modifiers) {
     const chance = modifier.match(/^chance\s+(.+)$/i);
     if (chance) {
+      if (probabilityModifier) {
+        throw new LanguageError([{ line, message: `timing cannot combine ${probabilityModifier} with chance` }]);
+      }
       const value = numberValue(chance[1], line, 'chance');
       if (value < 0 || value > 100) {
         throw new LanguageError([{ line, message: 'chance must be between 0 and 100' }]);
       }
       result.chance = value;
+      probabilityModifier = 'chance';
       continue;
     }
 
     const normalized = modifier.toLowerCase();
+    if (normalized === 'coin') {
+      if (probabilityModifier) {
+        throw new LanguageError([{ line, message: `timing cannot combine ${probabilityModifier} with coin` }]);
+      }
+      result.chance = 50;
+      probabilityModifier = 'coin';
+      continue;
+    }
     if (normalized === 'drift') {
       if (unit === 'beat') {
         throw new LanguageError([{ line, message: 'drift is available only for sec/ms timing; beat timing stays locked to the master clock' }]);
@@ -748,32 +773,72 @@ function compileVoiceProperty(
 
 
   if ((key === 'note' || key === 'freq' || key === 'scale' || key === 'cycle') && /^from\s+/i.test(value)) {
-    if (key === 'note' || key === 'scale' || key === 'freq') claimPitchProperty(voice, key, line, 'VOICE');
+    if (key === 'cycle') {
+      const sourceName = value.replace(/^from\s+/i, '').trim();
+      return compileFrom(voice, key, sourceName, line, sourceKinds, sourceDefinitions);
+    }
+
+    claimPitchProperty(voice, key, line, 'VOICE');
+
+    const split = splitEveryClause(value);
+    const from = split.base.match(/^from\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(.+))?$/i);
+    if (!from) {
+      throw new LanguageError([{ line, message: `${key} from expects a source name and optional sequencing modifier` }]);
+    }
+
+    const sourceName = from[1];
+    const actual = sourceKinds.get(sourceName);
+    const definition = sourceDefinitions.get(sourceName);
+    if (!actual || !definition) {
+      throw new LanguageError([{ line, message: `unknown source '${sourceName}'` }]);
+    }
+
+    const modifiers = (from[2] ?? '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const view = modifiers.some((modifier) => /^view$/i.test(modifier));
+    const selection = parseSelectionMode(modifiers.filter((modifier) => !/^view$/i.test(modifier)), line, key);
+
+    let values: number[];
+    let storedFavor: SequenceFavorEntry[] = [];
+
     if (key === 'scale') {
-      const match = value.match(/^from\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(.+))?$/i);
-      if (!match) {
-        throw new LanguageError([{ line, message: 'scale from expects a source name and optional sequencing modifier' }]);
-      }
-      const modifiers = (match[2] ?? '')
-        .split(',')
-        .map((item) => item.trim())
-        .filter(Boolean);
-      const scaleView = modifiers.some((modifier) => /^view$/i.test(modifier));
-      const selection = parseSelectionMode(modifiers.filter((modifier) => !/^view$/i.test(modifier)), line, 'scale');
-      const sourceName = match[1];
-      const actual = sourceKinds.get(sourceName);
-      const definition = sourceDefinitions.get(sourceName);
-      if (!actual || !definition) {
-        throw new LanguageError([{ line, message: `unknown source '${sourceName}'` }]);
-      }
       if (definition.kind !== 'scale') {
         throw new LanguageError([{ line, message: `source '${sourceName}' is ${actual}, expected scale source for scale` }]);
       }
-      return sourceSequenceCode(voice.name, definition.values, selection.mode, selection.amount, selection.favor, scaleView, line);
+      values = definition.values;
+    } else if (key === 'note') {
+      if (definition.kind !== 'note' && definition.kind !== 'scale') {
+        throw new LanguageError([{ line, message: `source '${sourceName}' is ${actual}, expected note or scale source for note` }]);
+      }
+      values = definition.values;
+      if (definition.kind === 'note') storedFavor = definition.favor;
+    } else {
+      if (definition.kind !== 'freq') {
+        throw new LanguageError([{ line, message: `source '${sourceName}' is ${actual}, expected frequency source for freq` }]);
+      }
+      values = definition.values;
     }
 
-    const sourceName = value.replace(/^from\s+/i, '').trim();
-    return compileFrom(voice, key, sourceName, line, sourceKinds, sourceDefinitions);
+    const favor = mergeFavor(storedFavor, selection.favor);
+    validateFavorForMode(favor, selection.mode, line, key);
+
+    if (values.length === 1 && modifiers.length > 0) {
+      throw new LanguageError([{ line, message: `${key} selection modifiers require a list source` }]);
+    }
+
+    const sequence = values.length > 1
+      ? ` ${sequenceDirective(voice.name, values, selection.mode, selection.amount, favor)}`
+      : '';
+    const every = split.every
+      ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}`
+      : '';
+    const piano = view && (key === 'note' || key === 'scale')
+      ? ` ${inlinePianoDirective('voice', voice.name, key, line, values)}`
+      : '';
+
+    return `${voice.name}.freq(${values[0]});${sequence}${every}${piano}`;
   }
 
   if (['harmo', 'timbre', 'morph'].includes(key)) {
@@ -1054,12 +1119,16 @@ function compileSet(
   const noteList = body.match(/^\[([^\]]+)\]$/);
   if (noteList) {
     const items = noteList[1].trim().split(/\s+/).filter(Boolean);
-    if (items.length > 0 && items.every((item) => midiFromNote(item) !== null)) {
-      const values = items.map((item) => midiToFrequency(midiFromNote(item)!));
-      scalarNames.add(name);
-      sourceKinds.set(name, 'note');
-      sourceDefinitions.set(name, { kind: 'note', values, display: `[${items.join(' ')}]` });
-      return `${name} = ${JSON.stringify(`[${items.join(' ')}]`)};`;
+    if (items.length > 0) {
+      const parsed = items.map((item) => parseNoteSequenceToken(item, line));
+      if (parsed.every((item) => midiFromNote(item.note) !== null)) {
+        const values = parsed.map((item) => midiToFrequency(midiFromNote(item.note)!));
+        const favor = parsed.flatMap((item) => item.favor ? [item.favor] : []);
+        scalarNames.add(name);
+        sourceKinds.set(name, 'note');
+        sourceDefinitions.set(name, { kind: 'note', values, display: `[${items.join(' ')}]`, favor });
+        return `${name} = ${JSON.stringify(`[${items.join(' ')}]`)};`;
+      }
     }
   }
 
@@ -1083,7 +1152,7 @@ function compileSet(
     const frequency = midiToFrequency(midi);
     scalarNames.add(name);
     sourceKinds.set(name, 'note');
-    sourceDefinitions.set(name, { kind: 'note', values: [frequency], display: note[1] });
+    sourceDefinitions.set(name, { kind: 'note', values: [frequency], display: note[1], favor: [] });
     return `${name} = ${JSON.stringify(note[1])};`;
   }
 
@@ -1402,20 +1471,73 @@ function compileFxProperty(
     return `${fx.name}.${key}(${enabled});`;
   }
 
-  if (key === 'note' || key === 'scale' || key === 'freq') {
-    claimPitchProperty(fx, key, line, 'FX');
+  const pitchModeMatch = key === 'pitch'
+    ? value.match(/^(note|scale|freq)\s+(.+)$/i)
+    : null;
+  const musicalPitchKey = pitchModeMatch
+    ? pitchModeMatch[1].toLowerCase() as 'note' | 'scale' | 'freq'
+    : (key === 'note' || key === 'scale' || key === 'freq' ? key : null);
+  const musicalPitchValue = pitchModeMatch ? pitchModeMatch[2].trim() : value;
+
+  if (musicalPitchKey) {
+    claimPitchProperty(fx, musicalPitchKey, line, 'FX');
     if (!schema.musicalPitch) {
-      throw new LanguageError([{ line, message: `${key} is not available for ${fx.modelId}` }]);
+      throw new LanguageError([{ line, message: `${musicalPitchKey} pitch is not available for ${fx.modelId}` }]);
     }
 
-    const split = splitEveryClause(value);
+    const split = splitEveryClause(musicalPitchValue);
     let pitchValues: number[] = [];
     let mode: SelectionMode = 'order';
     let selectionAmount = 0;
     let pitchFavor: SequenceFavorEntry[] = [];
     let pitchView = false;
 
-    if (key === 'note') {
+    const fromSource = split.base.match(/^from\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(.+))?$/i);
+    if (fromSource) {
+      const sourceName = fromSource[1];
+      const definition = sourceDefinitions.get(sourceName);
+      if (!definition) {
+        throw new LanguageError([{ line, message: `unknown source '${sourceName}'` }]);
+      }
+
+      const modifiers = (fromSource[2] ?? '')
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean);
+      pitchView = modifiers.some((modifier) => /^view$/i.test(modifier));
+      const selection = parseSelectionMode(
+        modifiers.filter((modifier) => !/^view$/i.test(modifier)),
+        line,
+        `pitch ${musicalPitchKey}`,
+      );
+      mode = selection.mode;
+      selectionAmount = selection.amount;
+
+      if (musicalPitchKey === 'note') {
+        if (definition.kind !== 'note' && definition.kind !== 'scale') {
+          throw new LanguageError([{ line, message: `source '${sourceName}' is ${definition.kind}, expected note or scale source for pitch note` }]);
+        }
+        pitchValues = definition.values.map(semitonesFromFrequency);
+        const storedFavor = definition.kind === 'note' ? definition.favor : [];
+        pitchFavor = mergeFavor(storedFavor, selection.favor);
+        validateFavorForMode(pitchFavor, mode, line, 'pitch note');
+      } else if (musicalPitchKey === 'scale') {
+        if (definition.kind !== 'scale') {
+          throw new LanguageError([{ line, message: `source '${sourceName}' is ${definition.kind}, expected scale source for pitch scale` }]);
+        }
+        pitchValues = definition.values.map(semitonesFromFrequency);
+        pitchFavor = selection.favor;
+        validateFavorForMode(pitchFavor, mode, line, 'pitch scale');
+      } else {
+        if (definition.kind !== 'freq') {
+          throw new LanguageError([{ line, message: `source '${sourceName}' is ${definition.kind}, expected frequency source for pitch freq` }]);
+        }
+        pitchValues = definition.values.map(semitonesFromFrequency);
+        pitchFavor = selection.favor;
+        validateFavorForMode(pitchFavor, mode, line, 'pitch freq');
+      }
+    } else
+    if (musicalPitchKey === 'note') {
       const parsed = splitWith(split.base);
       pitchView = parsed.modifiers.some((modifier) => /^view$/i.test(modifier));
       const pitchModifiers = parsed.modifiers.filter((modifier) => !/^view$/i.test(modifier));
@@ -1428,7 +1550,7 @@ function compileFxProperty(
         return midi - 60;
       });
       { const selection = parseSelectionMode(pitchModifiers, line, 'note'); mode = selection.mode; selectionAmount = selection.amount; pitchFavor = mergeFavor(inlineFavor, selection.favor); validateFavorForMode(pitchFavor, mode, line, 'note'); }
-    } else if (key === 'freq') {
+    } else if (musicalPitchKey === 'freq') {
       const parsed = splitWith(split.base);
       const frequencies = parseList(parsed.base, line, 'freq').map((item) => numberValue(item, line, 'freq'));
       if (frequencies.some((frequency) => frequency <= 0)) {
@@ -1451,7 +1573,7 @@ function compileFxProperty(
     }
 
     const sequence = pitchValues.length > 1 ? ` ${fxPitchSequenceDirective(fx.name, pitchValues, mode, selectionAmount, pitchFavor)}` : '';
-    const pianoProperty = key === 'note' ? 'note' : key === 'scale' ? 'scale' : null;
+    const pianoProperty = musicalPitchKey === 'note' ? 'note' : musicalPitchKey === 'scale' ? 'scale' : null;
     const piano = pitchView && pianoProperty
       ? ` ${inlinePianoDirective('fx', fx.name, pianoProperty, line, pitchValues.map((pitch) => midiToFrequency(60 + pitch)))}`
       : '';
@@ -1508,17 +1630,17 @@ function compileFxProperty(
 type PlayEndpoint = {
   name: string;
   channel: 'L' | 'R' | null;
-  port: 'out' | 'aux' | null;
+  port: 'out' | 'aux' | 'lp12' | 'bp12' | 'lp24' | null;
   amount: number;
 };
 
 function parsePlayEndpoint(raw: string, line: number): PlayEndpoint {
-  const match = raw.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\.(out|aux|L|R))?(?:\s+at\s+(.+))?$/i);
+  const match = raw.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\.(out|aux|lp12|bp12|lp24|L|R))?(?:\s+at\s+(.+))?$/i);
   if (!match) throw new LanguageError([{ line, message: `invalid PLAY endpoint '${raw.trim()}'` }]);
   const suffix = match[2]?.toLowerCase() ?? null;
   return {
     name: match[1],
-    port: suffix === 'out' || suffix === 'aux' ? suffix : null,
+    port: suffix === 'out' || suffix === 'aux' || suffix === 'lp12' || suffix === 'bp12' || suffix === 'lp24' ? suffix : null,
     channel: suffix === 'l' ? 'L' : suffix === 'r' ? 'R' : null,
     amount: match[3] === undefined ? 100 : normalizedAmount(match[3].trim(), line),
   };
@@ -1529,6 +1651,8 @@ function compilePlay(
   line: number,
   voices: Set<string>,
   fxs: Set<string>,
+  filters: Set<string>,
+  voiceEmbeddedFilters: Map<string, string>,
 ): string {
   const body = lineText.trim().replace(/^PLAY\s+/i, '');
   if (body === lineText.trim()) throw new LanguageError([{ line, message: 'PLAY expects a source' }]);
@@ -1548,9 +1672,10 @@ function compilePlay(
     throw new LanguageError([{ line, message: "after the first 'through', PLAY chains use 'then'" }]);
   }
 
-  const kindOf = (name: string): 'voice' | 'fx' | 'main' => {
+  const kindOf = (name: string): 'voice' | 'fx' | 'filter' | 'main' => {
     if (voices.has(name)) return 'voice';
     if (fxs.has(name)) return 'fx';
+    if (filters.has(name)) return 'filter';
     if (name.toUpperCase() === 'MAIN') return 'main';
     throw new LanguageError([{ line, message: `unknown PLAY object '${name}'` }]);
   };
@@ -1563,15 +1688,35 @@ function compilePlay(
     const targetKind = kindOf(target.name);
     if (sourceKind === 'main') throw new LanguageError([{ line, message: 'MAIN cannot be used as a PLAY source' }]);
     if (targetKind === 'voice') throw new LanguageError([{ line, message: 'VOICE cannot be used as an audio destination' }]);
-    if (target.port) throw new LanguageError([{ line, message: 'destination uses .L/.R channel selectors, not .out/.aux' }]);
-    if (sourceKind === 'fx' && source.port) throw new LanguageError([{ line, message: 'FX outputs use .L/.R, not .out/.aux' }]);
-    if (sourceKind === 'voice' && source.channel) throw new LanguageError([{ line, message: 'VOICE outputs use .out/.aux; .L/.R are for stereo FX' }]);
+
+    const embeddedFilter = sourceKind === 'voice' ? voiceEmbeddedFilters.get(source.name) : undefined;
+    if (sourceKind === 'voice') {
+      if (source.channel) throw new LanguageError([{ line, message: 'VOICE outputs are mono ports; .L/.R are not valid' }]);
+      if (embeddedFilter) {
+        if (!source.port || !['lp12','bp12','lp24'].includes(source.port)) {
+          throw new LanguageError([{ line, message: `VOICE '${source.name}' contains FILTER '${embeddedFilter}'; available outputs are .lp12, .bp12, .lp24` }]);
+        }
+      } else if (source.port && ['lp12','bp12','lp24'].includes(source.port)) {
+        throw new LanguageError([{ line, message: `VOICE '${source.name}' has no embedded FILTER; use .out or .aux` }]);
+      }
+    }
+    if (sourceKind === 'filter') {
+      if (source.channel) throw new LanguageError([{ line, message: 'FILTER outputs are mono; .L/.R are not valid' }]);
+      if (!source.port || !['lp12','bp12','lp24'].includes(source.port)) {
+        throw new LanguageError([{ line, message: `FILTER '${source.name}' source must select .lp12, .bp12, or .lp24` }]);
+      }
+    }
+    if (sourceKind === 'fx' && source.port) throw new LanguageError([{ line, message: 'FX outputs use .L/.R, not named mono ports' }]);
+    if (targetKind === 'filter' && (target.port || target.channel)) throw new LanguageError([{ line, message: 'FILTER destination does not select an output port' }]);
+    if (targetKind === 'fx' && target.port) throw new LanguageError([{ line, message: 'FX destination uses .L/.R channel selectors' }]);
 
     const amount = source.amount;
-    const sourceMono = sourceKind === 'voice' || source.channel !== null;
+    const sourceMono = sourceKind === 'voice' || sourceKind === 'filter' || source.channel !== null;
     const sourceMonoSignal = sourceKind === 'voice'
-      ? `${source.name}.${source.port ?? 'out'}`
-      : `${source.name}.${source.channel === 'R' ? 'out_R' : 'out_L'}`;
+      ? `${source.name}.${embeddedFilter ? source.port : (source.port ?? 'out')}`
+      : sourceKind === 'filter'
+        ? `${source.name}.${source.port}`
+        : `${source.name}.${source.channel === 'R' ? 'out_R' : 'out_L'}`;
 
     if (targetKind === 'main') {
       if (target.channel) {
@@ -1586,12 +1731,16 @@ function compilePlay(
       continue;
     }
 
-    // Target is stereo FX.
+    if (targetKind === 'filter') {
+      if (!sourceMono) throw new LanguageError([{ line, message: `stereo FX '${source.name}' must select .L or .R before mono FILTER '${target.name}'` }]);
+      routes.push(`${sourceMonoSignal}(${amount}) -> ${target.name}.in;`);
+      continue;
+    }
+
     if (target.channel) {
       if (!sourceMono) throw new LanguageError([{ line, message: `stereo FX '${source.name}' must select .L or .R when routing to ${target.name}.${target.channel}` }]);
       routes.push(`${sourceMonoSignal}(${amount}) -> ${target.name}.in${target.channel};`);
     } else if (sourceMono) {
-      // Mono convenience input duplicates to both channels in the Mist engine.
       routes.push(`${sourceMonoSignal}(${amount}) -> ${target.name}.in;`);
     } else {
       routes.push(`${source.name}.out_L(${amount}) -> ${target.name}.inL;`);
@@ -1606,6 +1755,139 @@ function compilePlay(
   return routes.join('\n');
 }
 
+
+function compileFilterProperty(
+  filter: FilterState,
+  property: string,
+  rawValue: string,
+  line: number,
+  sourceDefinitions: Map<string, SourceDefinition>,
+): string {
+  const key = property.toLowerCase();
+  const value = rawValue.trim();
+
+  if (key === 'every') {
+    const timing = parseEverySpec(value, line, sourceDefinitions);
+    const prefix = timing.clockPrelude ? `${timing.clockPrelude}\n` : '';
+    return `${prefix}__objectevery(${JSON.stringify(filter.internalName)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
+  }
+
+  if (key === 'model') {
+    if (!/^liquid(?:\.mono)?$/i.test(value)) {
+      throw new LanguageError([{ line, message: "FILTER model expects liquid" }]);
+    }
+    filter.hasModel = true;
+    return `${filter.internalName}.model("liquid.mono");`;
+  }
+  if (!filter.hasModel) throw new LanguageError([{ line, message: `FILTER '${filter.name}' requires model before parameters` }]);
+
+  if (key === 'resonance') {
+    const split = splitEveryClause(value);
+    const generative = parseGenerativeValue(split.base, line);
+    const expression = generative.base;
+    const literal = Number(expression);
+    if (Number.isFinite(literal) && (literal < 0 || literal > 100)) {
+      throw new LanguageError([{ line, message: 'resonance expects 0..100' }]);
+    }
+    const initial = `${filter.internalName}.resonance(${expression});`;
+    if (generative.mode) {
+      if (split.every) {
+        const timing = parseEverySpec(split.every, line, sourceDefinitions);
+        const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+        const inline = generative.view ? ` ${inlineScalarDirective('filter', filter.internalName, 'resonance', line, expression)}` : '';
+        return `${initial} ${prefix}__genparamcycle("filter",${JSON.stringify(filter.internalName)},"resonance",${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});${inline}`;
+      }
+      const inline = generative.view ? ` ${inlineScalarDirective('filter', filter.internalName, 'resonance', line, expression)}` : '';
+      return `${initial} __genparamdefault("filter",${JSON.stringify(filter.internalName)},"resonance",${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount});${inline}`;
+    }
+    if (split.every) throw new LanguageError([{ line, message: 'resonance every requires a generative modifier' }]);
+    return initial;
+  }
+  if (key !== 'cutoff') throw new LanguageError([{ line, message: `unknown FILTER property '${property}'` }]);
+
+  const split = splitEveryClause(value);
+  const base = split.base.trim();
+
+  const note = base.match(/^note\s+(.+)$/i);
+  if (note) {
+    const parsed = splitWith(note[1].trim());
+    const view = parsed.modifiers.some((modifier) => /^view$/i.test(modifier));
+    const selectionModifiers = parsed.modifiers.filter((modifier) => !/^view$/i.test(modifier));
+    const tokens = parseList(parsed.base, line, 'cutoff note').map((token) => parseNoteSequenceToken(token, line));
+    const values = tokens.map((token) => {
+      const midi = midiFromNote(token.note);
+      if (midi === null) throw new LanguageError([{ line, message: `invalid cutoff note '${token.note}'` }]);
+      return midiToFrequency(midi);
+    });
+    const inlineFavor = tokens.flatMap((token) => token.favor ? [token.favor] : []);
+    const selection = parseSelectionMode(selectionModifiers, line, 'cutoff note');
+    const favor = mergeFavor(inlineFavor, selection.favor);
+    validateFavorForMode(favor, selection.mode, line, 'cutoff note');
+    if (values.length === 1) {
+      if (split.every) throw new LanguageError([{ line, message: 'single cutoff note does not use every' }]);
+      return `${filter.internalName}.cutoff(${values[0]});`;
+    }
+    if (!split.every) throw new LanguageError([{ line, message: 'cutoff note list requires every <time>' }]);
+    const every = parseEverySpec(split.every, line, sourceDefinitions);
+    const prelude = every.clockPrelude ? `${every.clockPrelude}\n` : '';
+    const piano = view ? `\n${inlinePianoDirective('filter', filter.internalName, 'note', line, values)}` : '';
+    return `${filter.internalName}.cutoff(${values[0]});\n${prelude}__filtersequence(${JSON.stringify(filter.internalName)},${JSON.stringify(values.join('|'))},${JSON.stringify(selection.mode)},${selection.amount},${JSON.stringify(JSON.stringify(favor))},${every.amount},${JSON.stringify(every.unit)},${every.chance},${every.drift},${every.loose},${JSON.stringify(every.clockSource)});${piano}`;
+  }
+
+  const scale = base.match(/^scale\s+(.+)$/i);
+  if (scale) {
+    const parsed = parseScaleSpec(scale[1], line, true);
+    if (!parsed) throw new LanguageError([{ line, message: 'invalid cutoff scale' }]);
+    if (!split.every) throw new LanguageError([{ line, message: 'cutoff scale requires every <time>' }]);
+    const every = parseEverySpec(split.every, line, sourceDefinitions);
+    const prelude = every.clockPrelude ? `${every.clockPrelude}\n` : '';
+    const piano = parsed.view ? `\n${inlinePianoDirective('filter', filter.internalName, 'scale', line, parsed.values)}` : '';
+    return `${filter.internalName}.cutoff(${parsed.values[0]});\n${prelude}__filtersequence(${JSON.stringify(filter.internalName)},${JSON.stringify(parsed.values.join('|'))},${JSON.stringify(parsed.mode)},${parsed.amount},${JSON.stringify(JSON.stringify(parsed.favor))},${every.amount},${JSON.stringify(every.unit)},${every.chance},${every.drift},${every.loose},${JSON.stringify(every.clockSource)});${piano}`;
+  }
+
+  const freq = base.match(/^freq\s+(.+)$/i);
+  if (freq) {
+    const parsed = splitWith(freq[1].trim());
+    const values = parseList(parsed.base, line, 'cutoff freq').map((item) => {
+      const hz = numberValue(item, line, 'cutoff freq');
+      if (hz < 20 || hz > 20000) throw new LanguageError([{ line, message: 'cutoff freq expects 20..20000 Hz' }]);
+      return hz;
+    });
+    const selection = parseSelectionMode(parsed.modifiers, line, 'cutoff freq');
+    if (values.length === 1) {
+      if (split.every) throw new LanguageError([{ line, message: 'single cutoff freq does not use every' }]);
+      return `${filter.internalName}.cutoff(${values[0]});`;
+    }
+    if (!split.every) throw new LanguageError([{ line, message: 'cutoff freq list requires every <time>' }]);
+    const every = parseEverySpec(split.every, line, sourceDefinitions);
+    const prelude = every.clockPrelude ? `${every.clockPrelude}\n` : '';
+    return `${filter.internalName}.cutoff(${values[0]});\n${prelude}__filtersequence(${JSON.stringify(filter.internalName)},${JSON.stringify(values.join('|'))},${JSON.stringify(selection.mode)},${selection.amount},${JSON.stringify(JSON.stringify(selection.favor))},${every.amount},${JSON.stringify(every.unit)},${every.chance},${every.drift},${every.loose},${JSON.stringify(every.clockSource)});`;
+  }
+
+  const generative = parseGenerativeValue(split.base, line);
+  const expression = generative.base;
+  const literal = Number(expression);
+  if (Number.isFinite(literal) && (literal < 0 || literal > 100)) {
+    throw new LanguageError([{ line, message: 'cutoff expects 0..100, or cutoff freq/note/scale' }]);
+  }
+  const initial = `${filter.internalName}.cutoffPercent(${expression});`;
+  if (generative.mode) {
+    if (split.every) {
+      const timing = parseEverySpec(split.every, line, sourceDefinitions);
+      const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+      const inline = generative.view ? ` ${inlineScalarDirective('filter', filter.internalName, 'cutoff', line, expression)}` : '';
+      return `${initial} ${prefix}__genparamcycle("filter",${JSON.stringify(filter.internalName)},"cutoff",${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});${inline}`;
+    }
+    const inline = generative.view ? ` ${inlineScalarDirective('filter', filter.internalName, 'cutoff', line, expression)}` : '';
+    return `${initial} __genparamdefault("filter",${JSON.stringify(filter.internalName)},"cutoff",${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount});${inline}`;
+  }
+  if (split.every) throw new LanguageError([{ line, message: 'numeric cutoff every requires a generative modifier' }]);
+  return initial;
+}
+
+function requireFilterModel(filter: FilterState | null, diagnostics: LanguageDiagnostic[]): void {
+  if (filter && !filter.hasModel) diagnostics.push({ line: filter.line, message: `FILTER '${filter.name}' requires model` });
+}
 
 function requireVoiceSound(voice: VoiceState | null, diagnostics: LanguageDiagnostic[]): void {
   if (voice && !voice.hasSound) {
@@ -1638,12 +1920,15 @@ export function compileLanguageSource(source: string): string {
   const diagnostics: LanguageDiagnostic[] = [];
   const voices = new Set<string>();
   const fxs = new Set<string>();
+  const filters = new Set<string>();
+  const voiceEmbeddedFilters = new Map<string, string>();
   const scalarNames = new Set<string>();
   const sourceKinds = new Map<string, SourceKind>();
   const sourceDefinitions = new Map<string, SourceDefinition>();
   const modSources = new Map<string, ModSourceDefinition>();
   let currentVoice: VoiceState | null = null;
   let currentFx: FxState | null = null;
+  let currentFilter: FilterState | null = null;
   let currentMod: ModState | null = null;
 
   for (let index = 0; index < lines.length; index += 1) {
@@ -1661,6 +1946,10 @@ export function compileLanguageSource(source: string): string {
 
     try {
       if (currentMod && indentation <= currentMod.indentation) currentMod = null;
+      if (currentFilter && indentation <= currentFilter.indentation) {
+        requireFilterModel(currentFilter, diagnostics);
+        currentFilter = null;
+      }
 
       const modMatch = trimmed.match(/^MOD\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
       if (modMatch) {
@@ -1676,7 +1965,7 @@ export function compileLanguageSource(source: string): string {
           requireFxModel(currentFx, diagnostics);
           currentVoice = null;
           currentFx = null;
-          if (voices.has(name) || fxs.has(name) || scalarNames.has(name)) {
+          if (voices.has(name) || fxs.has(name) || filters.has(name) || scalarNames.has(name)) {
             throw new LanguageError([{ line: lineNumber, message: `MOD '${name}' conflicts with an existing object or variable` }]);
           }
         }
@@ -1697,6 +1986,32 @@ export function compileLanguageSource(source: string): string {
         continue;
       }
 
+      const filterMatch = trimmed.match(/^FILTER\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*$/i);
+      if (filterMatch) {
+        const name = filterMatch[1];
+        const embedded = indentation > 0 && currentVoice !== null;
+        if (indentation > 0 && !embedded) throw new LanguageError([{ line: lineNumber, message: 'FILTER can be top-level or directly inside a VOICE' }]);
+
+        if (embedded) {
+          if (currentVoice!.embeddedFilter) throw new LanguageError([{ line: lineNumber, message: `VOICE '${currentVoice!.name}' already contains FILTER '${currentVoice!.embeddedFilter}'` }]);
+          currentVoice!.embeddedFilter = name;
+          voiceEmbeddedFilters.set(currentVoice!.name, name);
+        } else {
+          requireVoiceSound(currentVoice, diagnostics);
+          requireFxModel(currentFx, diagnostics);
+          currentVoice = null; currentFx = null; currentMod = null;
+          if (filters.has(name) || voices.has(name) || fxs.has(name) || scalarNames.has(name)) {
+            throw new LanguageError([{ line: lineNumber, message: `FILTER '${name}' is already defined` }]);
+          }
+          filters.add(name);
+        }
+
+        const internalName = embedded ? `__filter_${currentVoice!.name}_${name}` : name;
+        currentFilter = { name, internalName, line: lineNumber, indentation, ownerVoice: embedded ? currentVoice!.name : null, hasModel: false };
+        output[index] = `${internalName} = Filter();\n${internalName}.owner(${JSON.stringify(currentFilter.ownerVoice ?? '')});\n${internalName}.displayName(${JSON.stringify(name)});`;
+        continue;
+      }
+
       const fxMatch = trimmed.match(/^FX\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
       if (fxMatch) {
         if (indentation > 0) throw new LanguageError([{ line: lineNumber, message: 'FX declarations are top-level only' }]);
@@ -1705,7 +2020,7 @@ export function compileLanguageSource(source: string): string {
         currentVoice = null;
         currentMod = null;
         const name = fxMatch[1];
-        if (fxs.has(name) || voices.has(name) || scalarNames.has(name)) {
+        if (fxs.has(name) || voices.has(name) || filters.has(name) || scalarNames.has(name)) {
           throw new LanguageError([{ line: lineNumber, message: `FX '${name}' is already defined` }]);
         }
         fxs.add(name);
@@ -1726,7 +2041,7 @@ export function compileLanguageSource(source: string): string {
         }
         voices.add(name);
         sourceKinds.set(name, 'voice');
-        currentVoice = { name, line: lineNumber, hasSound: false, soundId: null, pitchProperty: null };
+        currentVoice = { name, line: lineNumber, indentation, hasSound: false, soundId: null, pitchProperty: null, embeddedFilter: null };
         output[index] = voiceMatch[2] ? `${name} = Voice();\n${name}.view();` : `${name} = Voice();`;
         continue;
       }
@@ -1751,7 +2066,7 @@ export function compileLanguageSource(source: string): string {
           sourceKinds,
           sourceDefinitions,
           scalarNames,
-          new Set([...voices, ...fxs]),
+          new Set([...voices, ...fxs, ...filters]),
         );
         continue;
       }
@@ -1774,7 +2089,14 @@ export function compileLanguageSource(source: string): string {
         requireFxModel(currentFx, diagnostics);
         currentVoice = null;
         currentFx = null;
-        output[index] = compilePlay(trimmed, lineNumber, voices, fxs);
+        output[index] = compilePlay(trimmed, lineNumber, voices, fxs, filters, voiceEmbeddedFilters);
+        continue;
+      }
+
+      if (currentFilter && indentation > currentFilter.indentation) {
+        const propertyMatch = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s+(.+)$/);
+        if (!propertyMatch) throw new LanguageError([{ line: lineNumber, message: 'expected FILTER property and value' }]);
+        output[index] = compileFilterProperty(currentFilter, propertyMatch[1], propertyMatch[2], lineNumber, sourceDefinitions);
         continue;
       }
 
@@ -1798,12 +2120,12 @@ export function compileLanguageSource(source: string): string {
       }
 
       if (/^[A-Za-z_][A-Za-z0-9_]*\s*:/.test(trimmed)) {
-        throw new LanguageError([{ line: lineNumber, message: 'only VOICE, FX and MOD blocks are supported' }]);
+        throw new LanguageError([{ line: lineNumber, message: 'only VOICE, FX, FILTER and MOD blocks are supported' }]);
       }
 
       throw new LanguageError([{
         line: lineNumber,
-        message: 'each top-level statement must begin with VOICE, FX, MOD, SET, CLOCK, MAIN, or PLAY',
+        message: 'each top-level statement must begin with VOICE, FX, FILTER, MOD, SET, CLOCK, MAIN, or PLAY',
       }]);
     } catch (error) {
       if (error instanceof LanguageError) diagnostics.push(...error.diagnostics);
@@ -1813,6 +2135,7 @@ export function compileLanguageSource(source: string): string {
 
   requireVoiceSound(currentVoice, diagnostics);
   requireFxModel(currentFx, diagnostics);
+  requireFilterModel(currentFilter, diagnostics);
 
   if (diagnostics.length > 0) throw new LanguageError(diagnostics);
   return output.join('\n');
