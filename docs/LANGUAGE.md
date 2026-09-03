@@ -146,6 +146,81 @@ CLOCK set rnd(110,120) bpm
 The timing system is shared by all objects. Wall-clock timing and beat timing
 are handled by the same runtime scheduler.
 
+### Derived clocks
+
+Beat-based `every` clauses can use a clock derived from the master clock.
+
+A divider:
+
+```text
+SET half: clock /2
+```
+
+A multiplier:
+
+```text
+SET double: clock *2
+```
+
+These clocks remain phase-locked to the master clock. They are not independent
+timers.
+
+A derived clock can be used by name:
+
+```text
+VOICE lead:
+    sound macro.fm
+    scale C minor every 2 beats with clock half
+```
+
+or directly:
+
+```text
+VOICE lead:
+    sound macro.fm
+    scale C minor every 2 beats with clock /2
+```
+
+The `every` count is measured in steps of the selected clock. Therefore:
+
+```text
+every 2 beats with clock /2
+```
+
+means one update every two ticks of the `/2` clock, which corresponds to four
+master-clock beats.
+
+Likewise:
+
+```text
+every 3 beats with clock *2
+```
+
+means one update every three ticks of a clock running at twice the master rate.
+
+Clock selection is a timing modifier and is written after `every`:
+
+```text
+morph 50 every 2 beats with clock /4
+```
+
+It can be combined with other timing modifiers:
+
+```text
+morph 50 every 2 beats with clock /2, loose, chance 80
+```
+
+A named derived clock does not create a visualizer automatically. Request one
+explicitly when needed:
+
+```text
+SET half: clock /2 with view
+```
+
+The resulting view uses the same trigger-particle vocabulary as the master
+clock. Direct anonymous clock expressions used only inside `every` remain
+runtime-internal and do not appear as separate Scheme nodes.
+
 ## VOICE
 
 A voice is declared with:
@@ -814,25 +889,135 @@ Session files remain text-based and suitable for version control.
 
 ## Expression and generative helpers
 
-The language already uses small expression helpers in dynamic parameter
-contexts.
-
-Examples:
+The language supports direct random expressions such as:
 
 ```text
 rnd(10,50)
 ```
 
-and dynamic parameters such as:
+`rnd()` is stateless: each evaluation simply chooses a new value from the
+requested range.
+
+Sonus Umbrae also provides **generative modifiers**. These describe the musical
+character of a changing value rather than exposing the mathematical algorithm
+used internally.
+
+The initial vocabulary is:
+
+| Modifier | Character | Meaning of amount |
+| --- | --- | --- |
+| `wander` | gradual correlated movement | maximum freedom of movement per update |
+| `trend` | persistent directional movement with inertia | strength of the current trend |
+| `scatter` | independent jumps around the base value | maximum deviation from the base |
+| `flutter` | small irregular movement concentrated near the base | maximum microvariation |
+
+Examples:
 
 ```text
-morph rnd(30,70) every 1 sec
+morph 50 with wander 20 every 1 beat
+timbre 60 with trend 15 every 2 beats
+harmo 40 with scatter 30 every 4 beats
+position 50 with flutter 8 every 0.25 sec
 ```
 
-The broader generative/event language is still evolving. Syntax documented in
-older prototypes such as low-level object construction, direct `->` patching,
-or `when (...) { ... }` should not be treated as part of the current 0.1.0
-high-level language unless it is reintroduced explicitly.
+The amount is interpreted in the natural domain of the parameter. For ordinary
+0..100 parameters:
+
+```text
+morph 50 with wander 20 every 1 beat
+```
+
+starts from 50 and allows the wandering process to move with an intensity of
+20 while always respecting the legal 0..100 range.
+
+The modifiers are intentionally different:
+
+```text
+morph 50 with wander 20 every 1 beat
+```
+
+depends on the previous generated value, producing a random walk.
+
+```text
+morph 50 with trend 20 every 1 beat
+```
+
+develops a direction and tends to continue in that direction for several
+updates before gradually reversing.
+
+```text
+morph 50 with scatter 20 every 1 beat
+```
+
+does not walk from the previous value; each update is a new deviation around
+the base value 50.
+
+```text
+morph 50 with flutter 20 every 1 beat
+```
+
+also remains centered on the base but concentrates most changes closer to it,
+producing smaller irregular fluctuations.
+
+All generative modifiers are stateful for the lifetime of the running program.
+`RUN STOP` and a subsequent fresh run reinitialize their state.
+
+### Sequence movement
+
+`wander`, `trend`, `scatter`, and `flutter` apply only to scalar parameters.
+They are not sequencing modes for note lists or scales.
+
+Discrete musical sequences keep their own vocabulary:
+
+```text
+random
+walk
+shuffle
+reverse
+```
+
+`walk` can optionally take an amount:
+
+```text
+scale C minor with walk every 1 beat
+scale C minor with walk 3 every 1 beat
+```
+
+Without an amount, `walk` moves by one sequence step at a time. With an amount,
+the runtime may move forward or backward by up to that many sequence steps on
+each update.
+
+For a scale, these are scale degrees/list positions rather than semitones.
+
+```text
+scale C minor with range C2 C5, walk 2 every 1 beat
+```
+
+remains inside the declared C2..C5 range.
+
+This distinction is intentional:
+
+- `walk` answers **which item comes next in a discrete sequence**;
+- `wander`, `trend`, `scatter`, and `flutter` answer **how a scalar value
+  evolves over time**.
+
+
+### Generative modifiers and derived clocks
+
+Generative behavior composes with normal timing:
+
+```text
+SET slow: clock /2
+
+VOICE lead:
+    sound macro.fm
+    scale C minor with range C3 C5, walk 2 every 2 beats with clock slow
+    morph 50 with trend 20 every 1 beat with clock /4
+```
+
+The generator determines **how** the value changes. `every` determines **when**
+it changes. `with clock ...` determines which clock provides those beat steps.
+
 
 ## Current implementation boundary
 

@@ -28,6 +28,7 @@ type VoiceState = {
   line: number;
   hasSound: boolean;
   soundId: string | null;
+  pitchProperty: 'note' | 'scale' | 'freq' | null;
 };
 
 type FxState = {
@@ -36,6 +37,7 @@ type FxState = {
   indentation: number;
   hasModel: boolean;
   modelId: string | null;
+  pitchProperty: 'note' | 'scale' | 'freq' | null;
 };
 
 type FxParameter = 'position' | 'size' | 'pitch' | 'density' | 'texture' | 'mix' | 'spread' | 'feedback' | 'reverb';
@@ -60,9 +62,19 @@ type ModSourceDefinition = {
 };
 
 
-type SelectionMode = 'order' | 'random' | 'walk' | 'shuffle' | 'reverse';
+type SelectionMode = 'order' | 'random' | 'walk' | 'shuffle' | 'reverse' | 'pendulum';
 
-type SelectionSpec = { mode: SelectionMode; amount: number };
+type SequenceFavorEntry = {
+  target: string;
+  operator: 'weight' | 'repeat' | 'retrig';
+  amount: number;
+};
+
+type SelectionSpec = {
+  mode: SelectionMode;
+  amount: number;
+  favor: SequenceFavorEntry[];
+};
 
 type TimingModifiers = {
   chance: number;
@@ -262,7 +274,7 @@ function parseScaleSpec(
   value: string,
   line: number,
   allowSelection: boolean,
-): { values: number[]; display: string; mode: SelectionMode; amount: number } | null {
+): { values: number[]; display: string; mode: SelectionMode; amount: number; favor: SequenceFavorEntry[]; view: boolean } | null {
   const head = value.match(/^([A-Ga-g][#b]?)\s+([A-Za-z]+)(?:\s+with\s+(.+))?$/i);
   if (!head) return null;
   if (!MODE_INTERVALS[head[2].toLowerCase()]) return null;
@@ -271,6 +283,8 @@ function parseScaleSpec(
   let rangeEnd: string | null = null;
   let mode: SelectionMode = 'order';
   let amount = 0;
+  let favor: SequenceFavorEntry[] = [];
+  let view = false;
   let selectionSeen = false;
 
   const modifiers = (head[3] ?? '')
@@ -289,26 +303,35 @@ function parseScaleSpec(
       continue;
     }
 
+    if (/^view$/i.test(modifier)) {
+      view = true;
+      continue;
+    }
+
     const selection = parseSelectionMode([modifier], line, 'scale');
-    if (selection.mode !== 'order') {
+    if (selection.mode !== 'order' || selection.favor.length > 0 || /^order$/i.test(modifier)) {
       if (!allowSelection) {
         throw new LanguageError([{
           line,
           message: `SET scale does not store sequencing modifier '${modifier}'; apply it where the scale is used`,
         }]);
       }
-      if (selectionSeen) {
-        throw new LanguageError([{ line, message: 'scale accepts only one sequencing modifier' }]);
+      if (selection.mode !== 'order' || /^order$/i.test(modifier)) {
+        if (selectionSeen) {
+          throw new LanguageError([{ line, message: 'scale accepts only one sequencing modifier' }]);
+        }
+        mode = selection.mode;
+        amount = selection.amount;
+        selectionSeen = true;
       }
-      mode = selection.mode;
-      amount = selection.amount;
-      selectionSeen = true;
+      if (selection.favor.length > 0) favor = selection.favor;
       continue;
     }
   }
 
+  validateFavorForMode(favor, mode, line, 'scale');
   const scale = scaleValues(head[1], head[2], rangeStart, rangeEnd, line);
-  return { ...scale, mode, amount };
+  return { ...scale, mode, amount, favor, view };
 }
 
 function parseScaleSource(value: string, line: number): { values: number[]; display: string } | null {
@@ -316,9 +339,38 @@ function parseScaleSource(value: string, line: number): { values: number[]; disp
   return parsed ? { values: parsed.values, display: parsed.display } : null;
 }
 
-function sourceSequenceCode(voiceName: string, values: number[], mode: SelectionMode = 'order', amount = 0): string {
-  const directive = values.length > 1 ? ` ${sequenceDirective(voiceName, values, mode, amount)}` : '';
-  return `${voiceName}.freq(${values[0]});${directive}`;
+function inlinePianoDirective(
+  ownerKind: 'voice' | 'fx',
+  owner: string,
+  property: 'note' | 'scale',
+  line: number,
+  values: number[],
+): string {
+  return `__inlinepiano(${JSON.stringify(ownerKind)},${JSON.stringify(owner)},${JSON.stringify(property)},${line},${JSON.stringify(values.join('|'))});`;
+}
+
+function inlineScalarDirective(
+  ownerKind: 'voice' | 'fx',
+  owner: string,
+  property: string,
+  line: number,
+  base: string,
+): string {
+  return `__inlinescalar(${JSON.stringify(ownerKind)},${JSON.stringify(owner)},${JSON.stringify(property)},${line},${JSON.stringify(base)});`;
+}
+
+function sourceSequenceCode(
+  voiceName: string,
+  values: number[],
+  mode: SelectionMode = 'order',
+  amount = 0,
+  favor: SequenceFavorEntry[] = [],
+  view = false,
+  line = 0,
+): string {
+  const directive = values.length > 1 ? ` ${sequenceDirective(voiceName, values, mode, amount, favor)}` : '';
+  const piano = view ? ` ${inlinePianoDirective('voice', voiceName, 'scale', line, values)}` : '';
+  return `${voiceName}.freq(${values[0]});${directive}${piano}`;
 }
 
 function parseList(value: string, line: number, property: string): string[] {
@@ -330,6 +382,51 @@ function parseList(value: string, line: number, property: string): string[] {
     throw new LanguageError([{ line, message: `${property} list cannot be empty` }]);
   }
   return content.split(/\s+/);
+}
+
+function parseNoteSequenceToken(
+  token: string,
+  line: number,
+): { note: string; favor: SequenceFavorEntry | null } {
+  const weighted = token.match(/^([A-Ga-g][#b]?-?\d+)!(\d+(?:\.\d+)?)$/);
+  if (weighted) {
+    const amount = numberValue(weighted[2], line, 'note weight');
+    if (amount < 0 || amount > 100) {
+      throw new LanguageError([{ line, message: 'note weights must be between 0 and 100' }]);
+    }
+    return { note: weighted[1], favor: { target: weighted[1], operator: 'weight', amount } };
+  }
+
+  const retrig = token.match(/^([A-Ga-g][#b]?-?\d+)\*\*(\d+)$/);
+  if (retrig) {
+    const amount = numberValue(retrig[2], line, 'retrig');
+    if (!Number.isInteger(amount) || amount < 2) {
+      throw new LanguageError([{ line, message: 'retrig count must be an integer >= 2' }]);
+    }
+    return { note: retrig[1], favor: { target: retrig[1], operator: 'retrig', amount } };
+  }
+
+  const repeated = token.match(/^([A-Ga-g][#b]?-?\d+)\*(\d+)$/);
+  if (repeated) {
+    const amount = numberValue(repeated[2], line, 'repeat');
+    if (!Number.isInteger(amount) || amount < 2) {
+      throw new LanguageError([{ line, message: 'repeat count must be an integer >= 2' }]);
+    }
+    return { note: repeated[1], favor: { target: repeated[1], operator: 'repeat', amount } };
+  }
+
+  return { note: token, favor: null };
+}
+
+function mergeFavor(
+  inlineFavor: SequenceFavorEntry[],
+  modifierFavor: SequenceFavorEntry[],
+): SequenceFavorEntry[] {
+  const merged = new Map<string, SequenceFavorEntry>();
+  for (const entry of [...inlineFavor, ...modifierFavor]) {
+    merged.set(`${entry.target.toLowerCase()}:${entry.operator}`, entry);
+  }
+  return [...merged.values()];
 }
 
 function numberValue(value: string, line: number, label: string): number {
@@ -357,15 +454,92 @@ function splitWith(value: string): { base: string; modifiers: string[] } {
   };
 }
 
+function parseFavorEntries(
+  modifier: string,
+  line: number,
+  property: string,
+): SequenceFavorEntry[] {
+  const match = modifier.match(/^favor\s+\[(.*)\]$/i);
+  if (!match) return [];
+
+  const content = match[1].trim();
+  if (!content) throw new LanguageError([{ line, message: `${property} favor list cannot be empty` }]);
+
+  return content.split(/\s+/).map((token) => {
+    const weighted = token.match(/^([A-Ga-g][#b]?-?\d*)!(\d+(?:\.\d+)?)$/);
+    if (weighted) {
+      const amount = numberValue(weighted[2], line, 'favor weight');
+      if (amount < 0 || amount > 100) {
+        throw new LanguageError([{ line, message: 'favor weights must be between 0 and 100' }]);
+      }
+      return { target: weighted[1], operator: 'weight' as const, amount };
+    }
+
+    const retrig = token.match(/^([A-Ga-g][#b]?-?\d*)\*\*(\d+)$/);
+    if (retrig) {
+      const amount = numberValue(retrig[2], line, 'retrig');
+      if (!Number.isInteger(amount) || amount < 2) {
+        throw new LanguageError([{ line, message: 'retrig count must be an integer >= 2' }]);
+      }
+      return { target: retrig[1], operator: 'retrig' as const, amount };
+    }
+
+    const repeated = token.match(/^([A-Ga-g][#b]?-?\d*)\*(\d+)$/);
+    if (repeated) {
+      const amount = numberValue(repeated[2], line, 'repeat');
+      if (!Number.isInteger(amount) || amount < 2) {
+        throw new LanguageError([{ line, message: 'repeat count must be an integer >= 2' }]);
+      }
+      return { target: repeated[1], operator: 'repeat' as const, amount };
+    }
+
+    throw new LanguageError([{ line, message: `invalid favor entry '${token}'` }]);
+  });
+}
+
+function validateFavorForMode(
+  favor: SequenceFavorEntry[],
+  mode: SelectionMode,
+  line: number,
+  property: string,
+): void {
+  if (favor.length === 0) return;
+
+  if (mode === 'random') {
+    if (favor.some((entry) => entry.operator !== 'weight')) {
+      throw new LanguageError([{ line, message: `${property} random favor accepts only ! weights` }]);
+    }
+    return;
+  }
+
+  if (mode === 'order' || mode === 'reverse' || mode === 'pendulum') {
+    if (favor.some((entry) => entry.operator === 'weight')) {
+      throw new LanguageError([{ line, message: `${property} ${mode} favor accepts only * repeats and ** retrigs` }]);
+    }
+    return;
+  }
+
+  throw new LanguageError([{ line, message: `${property} favor is not available with ${mode}` }]);
+}
+
 function parseSelectionMode(modifiers: string[], line: number, property: string): SelectionSpec {
   let mode: SelectionMode = 'order';
   let amount = 0;
   let explicit = false;
+  let favor: SequenceFavorEntry[] = [];
 
   for (const modifier of modifiers) {
     const normalized = modifier.toLowerCase();
 
-    if (['random', 'shuffle', 'reverse'].includes(normalized)) {
+    if (/^favor\s+\[/i.test(modifier)) {
+      if (favor.length > 0) {
+        throw new LanguageError([{ line, message: `${property} accepts only one favor modifier` }]);
+      }
+      favor = parseFavorEntries(modifier, line, property);
+      continue;
+    }
+
+    if (['random', 'shuffle', 'reverse', 'pendulum', 'order'].includes(normalized)) {
       if (explicit) {
         throw new LanguageError([{ line, message: `${property} accepts only one selection modifier` }]);
       }
@@ -391,7 +565,8 @@ function parseSelectionMode(modifiers: string[], line: number, property: string)
     throw new LanguageError([{ line, message: `${property} does not support modifier '${modifier}'` }]);
   }
 
-  return { mode, amount };
+  validateFavorForMode(favor, mode, line, property);
+  return { mode, amount, favor };
 }
 
 function parseTimingModifiers(modifiers: string[], line: number, unit: string): TimingModifiers {
@@ -426,8 +601,14 @@ function parseTimingModifiers(modifiers: string[], line: number, unit: string): 
   return result;
 }
 
-function sequenceDirective(name: string, values: number[], mode: SelectionMode, amount = 0): string {
-  return `__sequence(${JSON.stringify(name)},${JSON.stringify(values.join('|'))},${JSON.stringify(mode)},${amount});`;
+function sequenceDirective(
+  name: string,
+  values: number[],
+  mode: SelectionMode,
+  amount = 0,
+  favor: SequenceFavorEntry[] = [],
+): string {
+  return `__sequence(${JSON.stringify(name)},${JSON.stringify(values.join('|'))},${JSON.stringify(mode)},${amount},${JSON.stringify(JSON.stringify(favor))});`;
 }
 
 function compileFrom(
@@ -483,14 +664,53 @@ type GenerativeSpec = {
   amount: number;
 };
 
-function parseGenerativeValue(value: string, line: number): GenerativeSpec {
-  const match = value.match(/^(.*?)\s+with\s+(wander|trend|scatter|flutter)\s+(\d+(?:\.\d+)?)$/i);
-  if (!match) return { base: value.trim(), mode: null, amount: 0 };
-  const amount = numberValue(match[3], line, match[2].toLowerCase());
-  if (amount <= 0) {
-    throw new LanguageError([{ line, message: `${match[2].toLowerCase()} amount must be greater than 0` }]);
+function parseGenerativeValue(value: string, line: number): GenerativeSpec & { view: boolean } {
+  const withMatch = value.match(/^(.*?)\s+with\s+(.+)$/i);
+  if (!withMatch) return { base: value.trim(), mode: null, amount: 0, view: false };
+
+  const modifiers = withMatch[2].split(',').map((item) => item.trim()).filter(Boolean);
+  let mode: GenerativeMode | null = null;
+  let amount = 0;
+  let view = false;
+
+  for (const modifier of modifiers) {
+    if (/^view$/i.test(modifier)) {
+      view = true;
+      continue;
+    }
+    const generative = modifier.match(/^(wander|trend|scatter|flutter)\s+(\d+(?:\.\d+)?)$/i);
+    if (!generative) {
+      return { base: value.trim(), mode: null, amount: 0, view: false };
+    }
+    if (mode) throw new LanguageError([{ line, message: 'only one generative modifier is allowed' }]);
+    amount = numberValue(generative[2], line, generative[1].toLowerCase());
+    if (amount <= 0) {
+      throw new LanguageError([{ line, message: `${generative[1].toLowerCase()} amount must be greater than 0` }]);
+    }
+    mode = generative[1].toLowerCase() as GenerativeMode;
   }
-  return { base: match[1].trim(), mode: match[2].toLowerCase() as GenerativeMode, amount };
+
+  if (!mode && view) {
+    throw new LanguageError([{ line, message: 'inline scalar view currently requires wander, trend, scatter, or flutter' }]);
+  }
+
+  return { base: withMatch[1].trim(), mode, amount, view };
+}
+
+
+function claimPitchProperty(
+  owner: VoiceState | FxState,
+  property: 'note' | 'scale' | 'freq',
+  line: number,
+  label: 'VOICE' | 'FX',
+): void {
+  if (owner.pitchProperty && owner.pitchProperty !== property) {
+    throw new LanguageError([{
+      line,
+      message: `${label} '${owner.name}' already uses ${owner.pitchProperty}; only one of note, scale, or freq can define pitch`,
+    }]);
+  }
+  owner.pitchProperty = property;
 }
 
 function compileVoiceProperty(
@@ -528,6 +748,7 @@ function compileVoiceProperty(
 
 
   if ((key === 'note' || key === 'freq' || key === 'scale' || key === 'cycle') && /^from\s+/i.test(value)) {
+    if (key === 'note' || key === 'scale' || key === 'freq') claimPitchProperty(voice, key, line, 'VOICE');
     if (key === 'scale') {
       const match = value.match(/^from\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(.+))?$/i);
       if (!match) {
@@ -537,7 +758,8 @@ function compileVoiceProperty(
         .split(',')
         .map((item) => item.trim())
         .filter(Boolean);
-      const selection = parseSelectionMode(modifiers, line, 'scale');
+      const scaleView = modifiers.some((modifier) => /^view$/i.test(modifier));
+      const selection = parseSelectionMode(modifiers.filter((modifier) => !/^view$/i.test(modifier)), line, 'scale');
       const sourceName = match[1];
       const actual = sourceKinds.get(sourceName);
       const definition = sourceDefinitions.get(sourceName);
@@ -547,7 +769,7 @@ function compileVoiceProperty(
       if (definition.kind !== 'scale') {
         throw new LanguageError([{ line, message: `source '${sourceName}' is ${actual}, expected scale source for scale` }]);
       }
-      return sourceSequenceCode(voice.name, definition.values, selection.mode, selection.amount);
+      return sourceSequenceCode(voice.name, definition.values, selection.mode, selection.amount, selection.favor, scaleView, line);
     }
 
     const sourceName = value.replace(/^from\s+/i, '').trim();
@@ -569,11 +791,13 @@ function compileVoiceProperty(
 
     if (generative.mode) {
       if (split.every === null) {
-        return `${voice.name}.${key}(${expression}); __genparamdefault("voice",${JSON.stringify(voice.name)},${JSON.stringify(key)},${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount});`;
+        const inline = generative.view ? ` ${inlineScalarDirective('voice', voice.name, key, line, expression)}` : '';
+      return `${voice.name}.${key}(${expression}); __genparamdefault("voice",${JSON.stringify(voice.name)},${JSON.stringify(key)},${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount});${inline}`;
       }
       const timing = parseEverySpec(split.every, line, sourceDefinitions);
       const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
-      return `${voice.name}.${key}(${expression}); ${prefix}__genparamcycle("voice",${JSON.stringify(voice.name)},${JSON.stringify(key)},${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
+      const inline = generative.view ? ` ${inlineScalarDirective('voice', voice.name, key, line, expression)}` : '';
+      return `${voice.name}.${key}(${expression}); ${prefix}__genparamcycle("voice",${JSON.stringify(voice.name)},${JSON.stringify(key)},${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});${inline}`;
     }
 
     if (split.every === null) {
@@ -615,24 +839,33 @@ function compileVoiceProperty(
     }
 
     case 'note': {
+      claimPitchProperty(voice, 'note', line, 'VOICE');
       const split = splitEveryClause(value);
       const { base, modifiers } = splitWith(split.base);
-      const notes = parseList(base, line, 'note');
+      const noteView = modifiers.some((modifier) => /^view$/i.test(modifier));
+      const selectionModifiers = modifiers.filter((modifier) => !/^view$/i.test(modifier));
+      const noteTokens = parseList(base, line, 'note').map((token) => parseNoteSequenceToken(token, line));
+      const notes = noteTokens.map((token) => token.note);
+      const inlineFavor = noteTokens.flatMap((token) => token.favor ? [token.favor] : []);
       const frequencies = notes.map((note) => {
         const midi = midiFromNote(note);
         if (midi === null) throw new LanguageError([{ line, message: `invalid note '${note}'` }]);
         return midiToFrequency(midi);
       });
-      const selection = parseSelectionMode(modifiers, line, 'note');
-      if (frequencies.length === 1 && modifiers.length > 0) {
+      const selection = parseSelectionMode(selectionModifiers, line, 'note');
+      const favor = mergeFavor(inlineFavor, selection.favor);
+      validateFavorForMode(favor, selection.mode, line, 'note');
+      if (frequencies.length === 1 && selectionModifiers.length > 0) {
         throw new LanguageError([{ line, message: 'note selection modifiers require a list' }]);
       }
-      const sequence = frequencies.length > 1 ? ` ${sequenceDirective(voice.name, frequencies, selection.mode, selection.amount)}` : '';
+      const sequence = frequencies.length > 1 ? ` ${sequenceDirective(voice.name, frequencies, selection.mode, selection.amount, favor)}` : '';
       const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
-      return `${voice.name}.freq(${frequencies[0]});${sequence}${every}`;
+      const piano = noteView ? ` ${inlinePianoDirective('voice', voice.name, 'note', line, frequencies)}` : '';
+      return `${voice.name}.freq(${frequencies[0]});${sequence}${every}${piano}`;
     }
 
     case 'freq': {
+      claimPitchProperty(voice, 'freq', line, 'VOICE');
       const split = splitEveryClause(value);
       const { base, modifiers } = splitWith(split.base);
       const values = parseList(base, line, 'freq').map((item) => numberValue(item, line, 'freq'));
@@ -649,6 +882,7 @@ function compileVoiceProperty(
     }
 
     case 'scale': {
+      claimPitchProperty(voice, 'scale', line, 'VOICE');
       const split = splitEveryClause(value);
       const parsed = parseScaleSpec(split.base, line, true);
       if (!parsed) {
@@ -658,7 +892,7 @@ function compileVoiceProperty(
         }]);
       }
       const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
-      return `${sourceSequenceCode(voice.name, parsed.values, parsed.mode, parsed.amount)}${every}`;
+      return `${sourceSequenceCode(voice.name, parsed.values, parsed.mode, parsed.amount, parsed.favor, parsed.view, line)}${every}`;
     }
 
     case 'every': {
@@ -1119,8 +1353,14 @@ function semitonesFromFrequency(frequency: number): number {
   return 12 * Math.log2(frequency / c4);
 }
 
-function fxPitchSequenceDirective(name: string, values: number[], mode: SelectionMode, amount = 0): string {
-  return `__fxsequence(${JSON.stringify(name)},${JSON.stringify(values.join('|'))},${JSON.stringify(mode)},${amount});`;
+function fxPitchSequenceDirective(
+  name: string,
+  values: number[],
+  mode: SelectionMode,
+  amount = 0,
+  favor: SequenceFavorEntry[] = [],
+): string {
+  return `__fxsequence(${JSON.stringify(name)},${JSON.stringify(values.join('|'))},${JSON.stringify(mode)},${amount},${JSON.stringify(JSON.stringify(favor))});`;
 }
 
 function compileFxProperty(
@@ -1163,6 +1403,7 @@ function compileFxProperty(
   }
 
   if (key === 'note' || key === 'scale' || key === 'freq') {
+    claimPitchProperty(fx, key, line, 'FX');
     if (!schema.musicalPitch) {
       throw new LanguageError([{ line, message: `${key} is not available for ${fx.modelId}` }]);
     }
@@ -1171,16 +1412,22 @@ function compileFxProperty(
     let pitchValues: number[] = [];
     let mode: SelectionMode = 'order';
     let selectionAmount = 0;
+    let pitchFavor: SequenceFavorEntry[] = [];
+    let pitchView = false;
 
     if (key === 'note') {
       const parsed = splitWith(split.base);
-      const notes = parseList(parsed.base, line, 'note');
+      pitchView = parsed.modifiers.some((modifier) => /^view$/i.test(modifier));
+      const pitchModifiers = parsed.modifiers.filter((modifier) => !/^view$/i.test(modifier));
+      const noteTokens = parseList(parsed.base, line, 'note').map((token) => parseNoteSequenceToken(token, line));
+      const notes = noteTokens.map((token) => token.note);
+      const inlineFavor = noteTokens.flatMap((token) => token.favor ? [token.favor] : []);
       pitchValues = notes.map((note) => {
         const midi = midiFromNote(note);
         if (midi === null) throw new LanguageError([{ line, message: `invalid note '${note}'` }]);
         return midi - 60;
       });
-      { const selection = parseSelectionMode(parsed.modifiers, line, 'note'); mode = selection.mode; selectionAmount = selection.amount; }
+      { const selection = parseSelectionMode(pitchModifiers, line, 'note'); mode = selection.mode; selectionAmount = selection.amount; pitchFavor = mergeFavor(inlineFavor, selection.favor); validateFavorForMode(pitchFavor, mode, line, 'note'); }
     } else if (key === 'freq') {
       const parsed = splitWith(split.base);
       const frequencies = parseList(parsed.base, line, 'freq').map((item) => numberValue(item, line, 'freq'));
@@ -1188,20 +1435,26 @@ function compileFxProperty(
         throw new LanguageError([{ line, message: 'freq must be greater than 0' }]);
       }
       pitchValues = frequencies.map(semitonesFromFrequency);
-      { const selection = parseSelectionMode(parsed.modifiers, line, 'freq'); mode = selection.mode; selectionAmount = selection.amount; }
+      { const selection = parseSelectionMode(parsed.modifiers, line, 'freq'); mode = selection.mode; selectionAmount = selection.amount; pitchFavor = selection.favor; }
     } else {
       const parsed = parseScaleSpec(split.base, line, true);
       if (!parsed) throw new LanguageError([{ line, message: 'scale expects root and mode with optional range and sequencing modifier' }]);
       pitchValues = parsed.values.map(semitonesFromFrequency);
       mode = parsed.mode;
       selectionAmount = parsed.amount;
+      pitchFavor = parsed.favor;
+      pitchView = parsed.view;
     }
 
     if (pitchValues.some((pitch) => pitch < -48 || pitch > 48)) {
       throw new LanguageError([{ line, message: 'FX musical pitch must resolve inside -48..48 semitones relative to C4' }]);
     }
 
-    const sequence = pitchValues.length > 1 ? ` ${fxPitchSequenceDirective(fx.name, pitchValues, mode, selectionAmount)}` : '';
+    const sequence = pitchValues.length > 1 ? ` ${fxPitchSequenceDirective(fx.name, pitchValues, mode, selectionAmount, pitchFavor)}` : '';
+    const pianoProperty = key === 'note' ? 'note' : key === 'scale' ? 'scale' : null;
+    const piano = pitchView && pianoProperty
+      ? ` ${inlinePianoDirective('fx', fx.name, pianoProperty, line, pitchValues.map((pitch) => midiToFrequency(60 + pitch)))}`
+      : '';
     const every = split.every
       ? (() => {
           const timing = parseEverySpec(split.every!, line, sourceDefinitions);
@@ -1209,7 +1462,7 @@ function compileFxProperty(
           return `${prefix} __fxpitchcycle(${JSON.stringify(fx.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
         })()
       : '';
-    return `${fx.name}.pitch(${pitchValues[0]});${sequence}${every}`;
+    return `${fx.name}.pitch(${pitchValues[0]});${sequence}${every}${piano}`;
   }
 
   if (!schema.parameters.has(key as FxParameter)) {
@@ -1237,9 +1490,11 @@ function compileFxProperty(
     if (split.every) {
       const timing = parseEverySpec(split.every, line, sourceDefinitions);
       const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
-      return `${initial} ${prefix}__genparamcycle("fx",${JSON.stringify(fx.name)},${JSON.stringify(parameter)},${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
+      const inline = generative.view ? ` ${inlineScalarDirective('fx', fx.name, parameter, line, expression)}` : '';
+      return `${initial} ${prefix}__genparamcycle("fx",${JSON.stringify(fx.name)},${JSON.stringify(parameter)},${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});${inline}`;
     }
-    return `${initial} __genparamdefault("fx",${JSON.stringify(fx.name)},${JSON.stringify(parameter)},${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount});`;
+    const inline = generative.view ? ` ${inlineScalarDirective('fx', fx.name, parameter, line, expression)}` : '';
+    return `${initial} __genparamdefault("fx",${JSON.stringify(fx.name)},${JSON.stringify(parameter)},${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount});${inline}`;
   }
 
   if (split.every) {
@@ -1454,7 +1709,7 @@ export function compileLanguageSource(source: string): string {
           throw new LanguageError([{ line: lineNumber, message: `FX '${name}' is already defined` }]);
         }
         fxs.add(name);
-        currentFx = { name, line: lineNumber, indentation, hasModel: false, modelId: null };
+        currentFx = { name, line: lineNumber, indentation, hasModel: false, modelId: null, pitchProperty: null };
         const viewDirective = fxMatch[2] ? `\n${name}.view();` : '';
         output[index] = `${name} = Mist();\n__fxmeta(${JSON.stringify(name)});${viewDirective}`;
         continue;
@@ -1471,7 +1726,7 @@ export function compileLanguageSource(source: string): string {
         }
         voices.add(name);
         sourceKinds.set(name, 'voice');
-        currentVoice = { name, line: lineNumber, hasSound: false, soundId: null };
+        currentVoice = { name, line: lineNumber, hasSound: false, soundId: null, pitchProperty: null };
         output[index] = voiceMatch[2] ? `${name} = Voice();\n${name}.view();` : `${name} = Voice();`;
         continue;
       }

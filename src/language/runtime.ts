@@ -81,6 +81,33 @@ export interface VariableViewState {
   value: string;
 }
 
+export interface InlinePianoViewState {
+  id: string;
+  kind: 'piano';
+  line: number;
+  ownerKind: 'voice' | 'fx';
+  owner: string;
+  property: 'note' | 'scale';
+  availableMidi: number[];
+  currentMidi: number;
+}
+
+export interface InlineScalarViewState {
+  id: string;
+  kind: 'scalar';
+  line: number;
+  ownerKind: 'voice' | 'fx';
+  owner: string;
+  property: string;
+  base: number;
+  current: number;
+  min: number;
+  max: number;
+  history: number[];
+}
+
+export type InlineViewState = InlinePianoViewState | InlineScalarViewState;
+
 export interface SchemeEmbeddedView {
   signal: string;
   signals?: string[];
@@ -181,10 +208,17 @@ interface ClockDefinition {
   parameters: Map<string, string>;
 }
 
+interface LanguageSequenceFavorEntry {
+  target: string;
+  operator: 'weight' | 'repeat' | 'retrig';
+  amount: number;
+}
+
 interface LanguageSequenceDefinition {
   values: number[];
-  mode: 'order' | 'random' | 'walk' | 'shuffle' | 'reverse';
+  mode: 'order' | 'random' | 'walk' | 'shuffle' | 'reverse' | 'pendulum';
   amount: number;
+  favor: LanguageSequenceFavorEntry[];
 }
 
 interface LanguageCycleDefinition {
@@ -276,8 +310,9 @@ interface LanguageFxParameterDefaultDefinition {
 
 interface LanguageFxPitchSequenceDefinition {
   values: number[];
-  mode: 'order' | 'random' | 'walk' | 'shuffle' | 'reverse';
+  mode: 'order' | 'random' | 'walk' | 'shuffle' | 'reverse' | 'pendulum';
   amount: number;
+  favor: LanguageSequenceFavorEntry[];
 }
 
 interface LanguageFxModulationDefinition {
@@ -310,6 +345,22 @@ interface LanguageGenerativeCycleDefinition extends LanguageGenerativeDefaultDef
   drift: boolean;
   loose: boolean;
   clockSource: string;
+}
+
+interface LanguageInlinePianoDefinition {
+  ownerKind: 'voice' | 'fx';
+  owner: string;
+  property: 'note' | 'scale';
+  line: number;
+  values: number[];
+}
+
+interface LanguageInlineScalarDefinition {
+  ownerKind: 'voice' | 'fx';
+  owner: string;
+  property: string;
+  line: number;
+  expression: string;
 }
 
 type RuntimeWallJob = {
@@ -452,6 +503,7 @@ export class SonusRuntime {
   private variableViews: VariableViewState[] = [];
   private explicitSignalViews: Array<{ signal: string; kind: SignalKind }> = [];
   private moduleViews = new Set<string>();
+  private inlineViews = new Map<string, InlineViewState>();
 
   private scheme: SchemeModel = {
     nodes: [{ id: 'Audio', label: 'AUDIO OUT', kind: 'module', parameters: [] }],
@@ -492,6 +544,14 @@ export class SonusRuntime {
 
   getModuleViews(): string[] {
     return [...this.moduleViews];
+  }
+
+  getInlineViews(): InlineViewState[] {
+    return [...this.inlineViews.values()].map((view) =>
+      view.kind === 'piano'
+        ? { ...view, availableMidi: [...view.availableMidi] }
+        : { ...view, history: [...view.history] },
+    );
   }
 
   getSchemeModel(): SchemeModel {
@@ -547,6 +607,8 @@ export class SonusRuntime {
     const languageParameterDefaults: LanguageParameterDefaultDefinition[] = [];
     const languageGenerativeDefaults: LanguageGenerativeDefaultDefinition[] = [];
     const languageGenerativeCycles: LanguageGenerativeCycleDefinition[] = [];
+    const languageInlinePianos: LanguageInlinePianoDefinition[] = [];
+    const languageInlineScalars: LanguageInlineScalarDefinition[] = [];
     const languageObjectEvery = new Map<string, LanguageObjectEveryDefinition>();
     const languageFxMeta = new Map<string, LanguageFxMetadata>();
     const languageFxParameterCycles: LanguageFxParameterCycleDefinition[] = [];
@@ -558,6 +620,18 @@ export class SonusRuntime {
     const languageModSets: LanguageModSetDirective[] = [];
     let languageMasterClock: LanguageMasterClockDefinition | null = null;
     for (const { source: line, line: lineNumber } of lines) {
+      const inlinePiano = parseLanguageInlinePianoDirective(line);
+      if (inlinePiano) {
+        languageInlinePianos.push(inlinePiano);
+        continue;
+      }
+
+      const inlineScalar = parseLanguageInlineScalarDirective(line);
+      if (inlineScalar) {
+        languageInlineScalars.push(inlineScalar);
+        continue;
+      }
+
       const fxMetadata = parseLanguageFxMetadata(line);
       if (fxMetadata) {
         const existing = languageFxMeta.get(fxMetadata.name);
@@ -582,7 +656,7 @@ export class SonusRuntime {
 
       const fxSequence = parseLanguageFxPitchSequenceDirective(line);
       if (fxSequence) {
-        languageFxPitchSequences.set(fxSequence.name, { values: fxSequence.values, mode: fxSequence.mode, amount: fxSequence.amount });
+        languageFxPitchSequences.set(fxSequence.name, { values: fxSequence.values, mode: fxSequence.mode, amount: fxSequence.amount, favor: fxSequence.favor });
         continue;
       }
 
@@ -634,7 +708,7 @@ export class SonusRuntime {
         if (sequence.values.length === 0 || sequence.values.some((value) => !Number.isFinite(value) || value <= 0)) {
           diagnostics.push({ line: lineNumber, message: 'invalid internal sequence values' });
         } else {
-          languageSequences.set(sequence.name, { values: sequence.values, mode: sequence.mode, amount: sequence.amount });
+          languageSequences.set(sequence.name, { values: sequence.values, mode: sequence.mode, amount: sequence.amount, favor: sequence.favor });
         }
         continue;
       }
@@ -1041,7 +1115,7 @@ export class SonusRuntime {
     // source order. All module declarations already exist, so references between
     // modules are still independent from declaration order.
     for (const { source: line, line: lineNumber } of lines) {
-      if (parseLanguageFxMetadata(line) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
+      if (parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageFxMetadata(line) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
 
       const oscillatorDeclaration = parseOscillatorDeclaration(line);
       if (oscillatorDeclaration) {
@@ -1650,77 +1724,6 @@ export class SonusRuntime {
       }
     }
 
-    for (const cycle of languageGenerativeCycles) {
-      let base = evalNumber(cycle.expression, cycle.line, cycle.parameter);
-      if (base === undefined) continue;
-      let current = base;
-      let direction = random() < 0.5 ? -1 : 1;
-      let driftRatio = 1;
-
-      const bounds = (): [number, number] => {
-        if (cycle.ownerKind === 'fx' && cycle.parameter === 'pitch') return [-48, 48];
-        return [0, 100];
-      };
-
-      const nextGeneratedValue = (): number => {
-        const [min, max] = bounds();
-        let next = current;
-
-        if (cycle.mode === 'wander') {
-          next = current + (random() * 2 - 1) * cycle.amount;
-        } else if (cycle.mode === 'trend') {
-          if (random() < 0.12) direction *= -1;
-          const step = cycle.amount * (0.25 + random() * 0.75);
-          next = current + direction * step;
-          if (next <= min) { next = min; direction = 1; }
-          if (next >= max) { next = max; direction = -1; }
-        } else if (cycle.mode === 'scatter') {
-          next = base + (random() * 2 - 1) * cycle.amount;
-        } else {
-          // flutter: triangular distribution keeps most movement close to base.
-          next = base + (random() + random() - 1) * cycle.amount;
-        }
-
-        current = Math.max(min, Math.min(max, next));
-        return current;
-      };
-
-      const updateGenerative = (): void => {
-        if (cycle.chance < 100 && random() * 100 >= cycle.chance) return;
-        const value = nextGeneratedValue();
-
-        if (cycle.ownerKind === 'voice') {
-          const voice = voices.get(cycle.owner);
-          if (!voice || !['harmo', 'timbre', 'morph'].includes(cycle.parameter)) return;
-          const parameter = cycle.parameter as 'harmo' | 'timbre' | 'morph';
-          voice[parameter] = value;
-          this.audio.setVoiceParameter(cycle.owner, parameter, value);
-          return;
-        }
-
-        const fx = mists.get(cycle.owner);
-        if (!fx) return;
-        const parameter = cycle.parameter as LanguageFxParameter;
-        if (!(parameter in fx)) return;
-        fx[parameter] = value;
-        this.audio.setMistParameter(cycle.owner, parameter, value);
-      };
-
-      if (cycle.unit === 'beat') {
-        this.scheduler.addBeatJob(cycle.interval, updateGenerative, cycle.loose, cycle.clockSource);
-        continue;
-      }
-
-      const baseMs = cycle.unit === 'sec' ? cycle.interval * 1000 : cycle.interval;
-      this.scheduler.addWallJob(baseMs, updateGenerative, () => {
-        if (cycle.drift) {
-          driftRatio += (random() - 0.5) * 0.06;
-          driftRatio = Math.min(1.2, Math.max(0.8, driftRatio));
-        } else driftRatio = 1;
-        const looseRatio = cycle.loose ? 0.94 + random() * 0.12 : 1;
-        return baseMs * driftRatio * looseRatio;
-      });
-    }
 
     for (const cycle of languageParameterCycles) {
       if (!voices.has(cycle.voice)) {
@@ -2029,7 +2032,7 @@ export class SonusRuntime {
     const schemeNodes: SchemeNode[] = [
       { id: 'Clock', label: 'CLOCK', kind: 'module' as const, parameters: clockBpm > 0 ? [{ name: 'BPM', value: formatNumber(clockBpm) }] : [], views: embeddedViews.get('Clock') },
       ...[...clockSources.entries()]
-        .filter(([name]) => !name.startsWith('__clock_'))
+        .filter(([name]) => name.toLowerCase() !== 'clock' && !name.startsWith('__clock_'))
         .map(([name, definition]) => ({ id: name, label: `${name.toUpperCase()} : CLOCK`, kind: 'module' as const, parameters: [...definition.parameters.entries()].map(([parameterName, value]) => ({ name: parameterName, value })), views: embeddedViews.get(name) })),
       ...[...oscillators.entries()].map(([name, definition]) => ({
         id: name,
@@ -2208,6 +2211,86 @@ export class SonusRuntime {
       })(),
     };
 
+    const inlineViews = new Map<string, InlineViewState>();
+    const frequencyToMidi = (frequency: number): number =>
+      Math.round(69 + 12 * Math.log2(frequency / 440));
+
+    for (const definition of languageInlinePianos) {
+      const availableMidi = [...new Set(
+        definition.values
+          .filter((value) => Number.isFinite(value) && value > 0)
+          .map(frequencyToMidi),
+      )].sort((a, b) => a - b);
+      if (availableMidi.length === 0) continue;
+      const id = `${definition.ownerKind}:${definition.owner}:${definition.property}:${definition.line}`;
+      inlineViews.set(id, {
+        id,
+        kind: 'piano',
+        line: definition.line,
+        ownerKind: definition.ownerKind,
+        owner: definition.owner,
+        property: definition.property,
+        availableMidi,
+        currentMidi: availableMidi[0],
+      });
+    }
+
+    for (const definition of languageInlineScalars) {
+      const base = evalNumber(definition.expression, definition.line, definition.property);
+      if (base === undefined || !Number.isFinite(base)) continue;
+      const min = definition.ownerKind === 'fx' && definition.property === 'pitch' ? -48 : 0;
+      const max = definition.ownerKind === 'fx' && definition.property === 'pitch' ? 48 : 100;
+      const current = Math.max(min, Math.min(max, base));
+      const id = `${definition.ownerKind}:${definition.owner}:${definition.property}:${definition.line}`;
+      inlineViews.set(id, {
+        id,
+        kind: 'scalar',
+        line: definition.line,
+        ownerKind: definition.ownerKind,
+        owner: definition.owner,
+        property: definition.property,
+        base,
+        current,
+        min,
+        max,
+        history: [current],
+      });
+    }
+
+    const updateInlinePiano = (
+      ownerKind: 'voice' | 'fx',
+      owner: string,
+      frequency: number,
+    ): void => {
+      const midi = frequencyToMidi(frequency);
+      for (const view of inlineViews.values()) {
+        if (view.kind === 'piano' && view.ownerKind === ownerKind && view.owner === owner) {
+          view.currentMidi = midi;
+        }
+      }
+    };
+
+    const updateInlineScalar = (
+      ownerKind: 'voice' | 'fx',
+      owner: string,
+      property: string,
+      value: number,
+    ): void => {
+      for (const view of inlineViews.values()) {
+        if (
+          view.kind === 'scalar'
+          && view.ownerKind === ownerKind
+          && view.owner === owner
+          && view.property === property
+        ) {
+          view.current = value;
+          view.history.push(value);
+          if (view.history.length > 48) view.history.splice(0, view.history.length - 48);
+        }
+      }
+    };
+
+    this.inlineViews = inlineViews;
     this.parameterViews = [...parameterViews.values()];
     this.variableViews = variableViews;
     this.explicitSignalViews = [...views.entries()]
@@ -2222,6 +2305,81 @@ export class SonusRuntime {
     }
 
     this.scheduler.clear();
+
+    for (const cycle of languageGenerativeCycles) {
+      let base = evalNumber(cycle.expression, cycle.line, cycle.parameter);
+      if (base === undefined) continue;
+      let current = base;
+      let direction = random() < 0.5 ? -1 : 1;
+      let driftRatio = 1;
+
+      const bounds = (): [number, number] => {
+        if (cycle.ownerKind === 'fx' && cycle.parameter === 'pitch') return [-48, 48];
+        return [0, 100];
+      };
+
+      const nextGeneratedValue = (): number => {
+        const [min, max] = bounds();
+        let next = current;
+
+        if (cycle.mode === 'wander') {
+          next = current + (random() * 2 - 1) * cycle.amount;
+        } else if (cycle.mode === 'trend') {
+          if (random() < 0.12) direction *= -1;
+          const step = cycle.amount * (0.25 + random() * 0.75);
+          next = current + direction * step;
+          if (next <= min) { next = min; direction = 1; }
+          if (next >= max) { next = max; direction = -1; }
+        } else if (cycle.mode === 'scatter') {
+          next = base + (random() * 2 - 1) * cycle.amount;
+        } else {
+          // flutter: triangular distribution keeps most movement close to base.
+          next = base + (random() + random() - 1) * cycle.amount;
+        }
+
+        current = Math.max(min, Math.min(max, next));
+        return current;
+      };
+
+      const updateGenerative = (): void => {
+        if (cycle.chance < 100 && random() * 100 >= cycle.chance) return;
+        const value = nextGeneratedValue();
+
+        if (cycle.ownerKind === 'voice') {
+          const voice = voices.get(cycle.owner);
+          if (!voice || !['harmo', 'timbre', 'morph'].includes(cycle.parameter)) return;
+          const parameter = cycle.parameter as 'harmo' | 'timbre' | 'morph';
+          voice[parameter] = value;
+          this.audio.setVoiceParameter(cycle.owner, parameter, value);
+          updateInlineScalar('voice', cycle.owner, parameter, value);
+          return;
+        }
+
+        const fx = mists.get(cycle.owner);
+        if (!fx) return;
+        const parameter = cycle.parameter as LanguageFxParameter;
+        if (!(parameter in fx)) return;
+        fx[parameter] = value;
+        this.audio.setMistParameter(cycle.owner, parameter, value);
+        updateInlineScalar('fx', cycle.owner, parameter, value);
+      };
+
+      if (cycle.unit === 'beat') {
+        this.scheduler.addBeatJob(cycle.interval, updateGenerative, cycle.loose, cycle.clockSource);
+        continue;
+      }
+
+      const baseMs = cycle.unit === 'sec' ? cycle.interval * 1000 : cycle.interval;
+      this.scheduler.addWallJob(baseMs, updateGenerative, () => {
+        if (cycle.drift) {
+          driftRatio += (random() - 0.5) * 0.06;
+          driftRatio = Math.min(1.2, Math.max(0.8, driftRatio));
+        } else driftRatio = 1;
+        const looseRatio = cycle.loose ? 0.94 + random() * 0.12 : 1;
+        return baseMs * driftRatio * looseRatio;
+      });
+    }
+
 
     if (languageMasterClock && languageMasterClock.amount > 0) {
       const clockSpec = languageMasterClock;
@@ -2347,6 +2505,47 @@ export class SonusRuntime {
       });
     }
 
+    const noteNameFromMidi = (midi: number): { pitchClass: string; note: string } => {
+      const names = ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
+      const rounded = Math.round(midi);
+      const pitchClass = names[((rounded % 12) + 12) % 12];
+      const octave = Math.floor(rounded / 12) - 1;
+      return { pitchClass, note: `${pitchClass}${octave}` };
+    };
+
+    const sequenceFavorForValue = (
+      value: number,
+      favor: LanguageSequenceFavorEntry[],
+      valueKind: 'frequency' | 'semitone',
+    ): LanguageSequenceFavorEntry[] => {
+      const midi = valueKind === 'frequency'
+        ? Math.round(69 + 12 * Math.log2(value / 440))
+        : Math.round(60 + value);
+      const names = noteNameFromMidi(midi);
+      const pitchClassMatches = favor.filter((entry) => entry.target.toLowerCase() === names.pitchClass.toLowerCase());
+      const noteMatches = favor.filter((entry) => entry.target.toLowerCase() === names.note.toLowerCase());
+      return noteMatches.length > 0 ? noteMatches : pitchClassMatches;
+    };
+
+    const weightedSequenceIndex = (
+      values: number[],
+      favor: LanguageSequenceFavorEntry[],
+      valueKind: 'frequency' | 'semitone',
+    ): number => {
+      const weights = values.map((value) => {
+        const entry = sequenceFavorForValue(value, favor, valueKind).find((item) => item.operator === 'weight');
+        return entry?.amount ?? 100;
+      });
+      const total = weights.reduce((sum, weight) => sum + Math.max(0, weight), 0);
+      if (total <= 0) return Math.floor(random() * values.length);
+      let cursor = random() * total;
+      for (let index = 0; index < weights.length; index += 1) {
+        cursor -= Math.max(0, weights[index]);
+        if (cursor <= 0) return index;
+      }
+      return values.length - 1;
+    };
+
     for (const [name, cycle] of languageFxPitchCycles) {
       const fx = mists.get(name);
       const sequence = languageFxPitchSequences.get(name);
@@ -2366,11 +2565,23 @@ export class SonusRuntime {
         shuffleCursor = 0;
       };
 
+      let pendulumDirection = 1;
+      let repeatRemaining = 0;
+      let repeatedValue = sequence.values[0];
+
       const nextPitch = (): number => {
         const values = sequence.values;
         if (values.length === 1) return values[0];
-        if (sequence.mode === 'random') return values[Math.floor(random() * values.length)];
-        if (sequence.mode === 'walk') {
+
+        if (repeatRemaining > 0) {
+          repeatRemaining -= 1;
+          return repeatedValue;
+        }
+
+        let next: number;
+        if (sequence.mode === 'random') {
+          next = values[weightedSequenceIndex(values, sequence.favor, 'semitone')];
+        } else if (sequence.mode === 'walk') {
           const span = Math.max(1, Math.round(sequence.amount || 1));
           const direction = random() < 0.5 ? -1 : 1;
           const step = 1 + Math.floor(random() * span);
@@ -2379,18 +2590,35 @@ export class SonusRuntime {
             if (walkCursor < 0) walkCursor = -walkCursor;
             if (walkCursor >= values.length) walkCursor = (values.length - 1) - (walkCursor - (values.length - 1));
           }
-          return values[walkCursor];
-        }
-        if (sequence.mode === 'shuffle') {
+          next = values[walkCursor];
+        } else if (sequence.mode === 'shuffle') {
           if (shuffleOrder.length !== values.length || shuffleCursor >= shuffleOrder.length) reshuffle();
-          return values[shuffleOrder[shuffleCursor++]];
-        }
-        if (sequence.mode === 'reverse') {
+          next = values[shuffleOrder[shuffleCursor++]];
+        } else if (sequence.mode === 'reverse') {
           cursor = (cursor - 1 + values.length) % values.length;
-          return values[cursor];
+          next = values[cursor];
+        } else if (sequence.mode === 'pendulum') {
+          next = values[cursor];
+          cursor += pendulumDirection;
+          if (cursor >= values.length) {
+            cursor = Math.max(0, values.length - 2);
+            pendulumDirection = -1;
+          } else if (cursor < 0) {
+            cursor = Math.min(values.length - 1, 1);
+            pendulumDirection = 1;
+          }
+        } else {
+          next = values[cursor];
+          cursor = (cursor + 1) % values.length;
         }
-        cursor = (cursor + 1) % values.length;
-        return values[cursor];
+
+        const repeat = sequenceFavorForValue(next, sequence.favor, 'semitone')
+          .find((entry) => entry.operator === 'repeat');
+        if (repeat && repeat.amount > 1) {
+          repeatedValue = next;
+          repeatRemaining = Math.max(0, Math.round(repeat.amount) - 1);
+        }
+        return next;
       };
 
       const fire = (): void => {
@@ -2398,6 +2626,21 @@ export class SonusRuntime {
         const pitch = nextPitch();
         fx.pitch = pitch;
         this.audio.setMistParameter(name, 'pitch', pitch);
+        updateInlinePiano('fx', name, midiToFrequency(60 + pitch));
+
+        const retrig = sequenceFavorForValue(pitch, sequence.favor, 'semitone')
+          .find((entry) => entry.operator === 'retrig');
+        if (retrig && retrig.amount > 1) {
+          const count = Math.round(retrig.amount);
+          const stepMs = cycle.unit === 'beat'
+            ? Math.max(1, 60000 / Math.max(1, this.audio.getClockStatus().bpm) * cycle.amount)
+            : cycle.unit === 'sec' ? cycle.amount * 1000 : cycle.amount;
+          for (let retrigIndex = 1; retrigIndex < count; retrigIndex += 1) {
+            window.setTimeout(() => {
+              this.audio.setMistParameter(name, 'pitch', pitch);
+            }, stepMs * retrigIndex / count);
+          }
+        }
       };
 
       if (cycle.unit === 'beat') {
@@ -2453,13 +2696,24 @@ export class SonusRuntime {
         shuffleCursor = 0;
       };
 
+      let pendulumDirection = 1;
+      let repeatRemaining = 0;
+      let repeatedValue = sequence?.values[0] ?? voice.frequency;
+
       const nextFrequency = (): number => {
         if (!sequence || sequence.values.length === 0) return voice.frequency;
         const values = sequence.values;
         if (values.length === 1) return values[0];
 
-        if (sequence.mode === 'random') return values[Math.floor(random() * values.length)];
-        if (sequence.mode === 'walk') {
+        if (repeatRemaining > 0) {
+          repeatRemaining -= 1;
+          return repeatedValue;
+        }
+
+        let next: number;
+        if (sequence.mode === 'random') {
+          next = values[weightedSequenceIndex(values, sequence.favor, 'frequency')];
+        } else if (sequence.mode === 'walk') {
           const span = Math.max(1, Math.round(sequence.amount || 1));
           const direction = random() < 0.5 ? -1 : 1;
           const step = 1 + Math.floor(random() * span);
@@ -2468,19 +2722,35 @@ export class SonusRuntime {
             if (walkCursor < 0) walkCursor = -walkCursor;
             if (walkCursor >= values.length) walkCursor = (values.length - 1) - (walkCursor - (values.length - 1));
           }
-          return values[walkCursor];
-        }
-        if (sequence.mode === 'shuffle') {
+          next = values[walkCursor];
+        } else if (sequence.mode === 'shuffle') {
           if (shuffleOrder.length !== values.length || shuffleCursor >= shuffleOrder.length) reshuffle();
-          return values[shuffleOrder[shuffleCursor++]];
-        }
-        if (sequence.mode === 'reverse') {
+          next = values[shuffleOrder[shuffleCursor++]];
+        } else if (sequence.mode === 'reverse') {
           cursor = (cursor - 1 + values.length) % values.length;
-          return values[cursor];
+          next = values[cursor];
+        } else if (sequence.mode === 'pendulum') {
+          next = values[cursor];
+          cursor += pendulumDirection;
+          if (cursor >= values.length) {
+            cursor = Math.max(0, values.length - 2);
+            pendulumDirection = -1;
+          } else if (cursor < 0) {
+            cursor = Math.min(values.length - 1, 1);
+            pendulumDirection = 1;
+          }
+        } else {
+          next = values[cursor];
+          cursor = (cursor + 1) % values.length;
         }
 
-        cursor = (cursor + 1) % values.length;
-        return values[cursor];
+        const repeat = sequenceFavorForValue(next, sequence.favor, 'frequency')
+          .find((entry) => entry.operator === 'repeat');
+        if (repeat && repeat.amount > 1) {
+          repeatedValue = next;
+          repeatRemaining = Math.max(0, Math.round(repeat.amount) - 1);
+        }
+        return next;
       };
 
       const fire = (): void => {
@@ -2488,7 +2758,22 @@ export class SonusRuntime {
         const frequency = nextFrequency();
         voice.frequency = frequency;
         this.audio.setVoiceParameter(name, 'freq', frequency);
+        updateInlinePiano('voice', name, frequency);
         if (voice.lpg) this.audio.triggerVoice(name);
+
+        const retrig = sequence
+          ? sequenceFavorForValue(frequency, sequence.favor, 'frequency')
+              .find((entry) => entry.operator === 'retrig')
+          : undefined;
+        if (voice.lpg && retrig && retrig.amount > 1) {
+          const count = Math.round(retrig.amount);
+          const stepMs = cycle.unit === 'beat'
+            ? Math.max(1, 60000 / Math.max(1, this.audio.getClockStatus().bpm) * cycle.amount)
+            : cycle.unit === 'sec' ? cycle.amount * 1000 : cycle.amount;
+          for (let retrigIndex = 1; retrigIndex < count; retrigIndex += 1) {
+            window.setTimeout(() => this.audio.triggerVoice(name), stepMs * retrigIndex / count);
+          }
+        }
       };
 
       if (cycle.unit === 'beat') {
@@ -2736,16 +3021,23 @@ function matchesCycle(condition: CycleCondition | null, eventIndex: number): boo
 
 function parseLanguageSequenceDirective(
   line: string,
-): ({ name: string; values: number[]; mode: LanguageSequenceDefinition['mode']; amount: number }) | null {
+): ({ name: string; values: number[]; mode: LanguageSequenceDefinition['mode']; amount: number; favor: LanguageSequenceFavorEntry[] }) | null {
   const match = line.match(
-    /^__sequence\("([A-Za-z_]\w*)","([^"]*)","(order|random|walk|shuffle|reverse)",(\d+(?:\.\d+)?)\)$/,
+    /^__sequence\("([A-Za-z_]\w*)","([^"]*)","(order|random|walk|shuffle|reverse|pendulum)",(\d+(?:\.\d+)?),"((?:[^"\\]|\\.)*)"\)$/,
   );
   if (!match) return null;
+  let favor: LanguageSequenceFavorEntry[] = [];
+  try {
+    favor = JSON.parse(JSON.parse(`"${match[5]}"`) as string) as LanguageSequenceFavorEntry[];
+  } catch {
+    return null;
+  }
   return {
     name: match[1],
     values: match[2].split('|').filter(Boolean).map(Number),
     mode: match[3] as LanguageSequenceDefinition['mode'],
     amount: Number(match[4]),
+    favor,
   };
 }
 
@@ -2764,6 +3056,36 @@ function parseLanguageCycleDirective(
     drift: match[5] === 'true',
     loose: match[6] === 'true',
     clockSource: match[7],
+  };
+}
+
+function parseLanguageInlinePianoDirective(line: string): LanguageInlinePianoDefinition | null {
+  const match = line.match(
+    /^__inlinepiano\("(voice|fx)","([A-Za-z_]\w*)","(note|scale)",(\d+),"([^"]*)"\)$/,
+  );
+  if (!match) return null;
+  return {
+    ownerKind: match[1] as 'voice' | 'fx',
+    owner: match[2],
+    property: match[3] as 'note' | 'scale',
+    line: Number(match[4]),
+    values: match[5].split('|').filter(Boolean).map(Number),
+  };
+}
+
+function parseLanguageInlineScalarDirective(line: string): LanguageInlineScalarDefinition | null {
+  const match = line.match(
+    /^__inlinescalar\("(voice|fx)","([A-Za-z_]\w*)","([A-Za-z_]\w*)",(\d+),"((?:[^"\\]|\\.)*)"\)$/,
+  );
+  if (!match) return null;
+  let expression: string;
+  try { expression = JSON.parse(`"${match[5]}"`) as string; } catch { return null; }
+  return {
+    ownerKind: match[1] as 'voice' | 'fx',
+    owner: match[2],
+    property: match[3],
+    line: Number(match[4]),
+    expression,
   };
 }
 
@@ -2813,14 +3135,21 @@ function parseLanguageFxPitchSequenceDirective(
   line: string,
 ): ({ name: string } & LanguageFxPitchSequenceDefinition) | null {
   const match = line.match(
-    /^__fxsequence\("([A-Za-z_]\w*)","([^"]*)","(order|random|walk|shuffle|reverse)",(\d+(?:\.\d+)?)\)$/,
+    /^__fxsequence\("([A-Za-z_]\w*)","([^"]*)","(order|random|walk|shuffle|reverse|pendulum)",(\d+(?:\.\d+)?),"((?:[^"\\]|\\.)*)"\)$/,
   );
   if (!match) return null;
+  let favor: LanguageSequenceFavorEntry[] = [];
+  try {
+    favor = JSON.parse(JSON.parse(`"${match[5]}"`) as string) as LanguageSequenceFavorEntry[];
+  } catch {
+    return null;
+  }
   return {
     name: match[1],
     values: match[2].split('|').filter(Boolean).map(Number),
     mode: match[3] as LanguageFxPitchSequenceDefinition['mode'],
     amount: Number(match[4]),
+    favor,
   };
 }
 

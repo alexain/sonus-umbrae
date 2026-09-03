@@ -1,6 +1,6 @@
 import './style.css';
 import { AudioEngine } from './audio/engine';
-import { SonusEvaluationError, SonusRuntime, type ParameterViewState, type SchemeConnection, type SchemeModel, type SchemeNode } from './language/runtime';
+import { SonusEvaluationError, SonusRuntime, type InlineViewState, type ParameterViewState, type SchemeConnection, type SchemeModel, type SchemeNode } from './language/runtime';
 import { compileLanguageSource, LanguageError } from './language/language';
 
 type Screen = 'live' | 'config' | 'help' | 'scheme';
@@ -24,7 +24,7 @@ app.innerHTML = `
       <div id="live-screen" class="screen live-screen">
         <div class="editor-pane">
           <div id="line-gutter" class="line-gutter" aria-hidden="true"><div id="line-gutter-content" class="line-gutter-content"></div></div>
-          <div class="editor-stack"><div id="syntax-layer" class="syntax-layer" aria-hidden="true"></div><textarea id="editor" class="editor" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Live coding editor"></textarea></div>
+          <div class="editor-stack"><div id="syntax-layer" class="syntax-layer" aria-hidden="true"></div><textarea id="editor" class="editor" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Live coding editor"></textarea><div id="inline-view-layer" class="inline-view-layer" aria-hidden="true"></div></div>
         </div>
         <aside id="view-panel" class="view-panel hidden" aria-label="Signal views">
           <div id="view-stack" class="view-stack"></div>
@@ -102,8 +102,108 @@ app.innerHTML = `
   </main>
 `;
 
+const inlineViewStyle = document.createElement('style');
+inlineViewStyle.textContent = `
+  .editor-stack { position: relative; }
+  .inline-view-layer { display: none; }
+
+  .syntax-inline-spacer {
+    position: relative;
+    height: 38px;
+    min-height: 38px;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .syntax-inline-slot {
+    position: absolute;
+    left: 1.5em;
+    right: 12px;
+    top: 3px;
+    height: 31px;
+    box-sizing: border-box;
+    opacity: .94;
+    color: rgb(112 224 213);
+    filter: drop-shadow(0 0 3px rgb(112 224 213 / .55));
+  }
+  .syntax-inline-slot.inline-piano {
+    right: auto;
+    width: auto;
+    max-width: calc(100% - 2.5em);
+    overflow: hidden;
+  }
+  .syntax-inline-slot.inline-scalar {
+    right: auto;
+    width: 180px;
+    max-width: calc(100% - 2.5em);
+  }
+  .syntax-inline-slot svg {
+    height: 100%;
+    display: block;
+    overflow: visible;
+  }
+  .syntax-inline-slot.inline-scalar svg {
+    width: 100%;
+  }
+
+  .line-number-inline-spacer {
+    height: 38px;
+    min-height: 38px;
+  }
+
+  .inline-piano .key-white {
+    fill: transparent;
+    stroke: currentColor;
+    stroke-opacity: .34;
+  }
+  .inline-piano .key-white.available {
+    fill: currentColor;
+    fill-opacity: .30;
+    stroke-opacity: .86;
+  }
+  .inline-piano .key-black-mask {
+    fill: rgb(2 4 2);
+    stroke: none;
+  }
+  .inline-piano .key-black {
+    fill: currentColor;
+    fill-opacity: .03;
+    stroke: currentColor;
+    stroke-opacity: .42;
+  }
+  .inline-piano .key-black.available {
+    fill-opacity: .68;
+    stroke-opacity: .92;
+  }
+  .inline-piano .current-dot {
+    fill: currentColor;
+    stroke: rgb(2 4 2);
+    stroke-width: 1;
+  }
+
+  .inline-scalar .scalar-track {
+    stroke: currentColor;
+    stroke-opacity: .48;
+    stroke-width: 1.2;
+  }
+  .inline-scalar .scalar-base {
+    stroke: currentColor;
+    stroke-opacity: .88;
+    stroke-width: 1.2;
+  }
+  .inline-scalar .scalar-trail {
+    fill: currentColor;
+  }
+  .inline-scalar .scalar-current {
+    fill: currentColor;
+    stroke: rgb(2 4 2);
+    stroke-width: 1;
+  }
+`;
+document.head.append(inlineViewStyle);
+
 const editor = must<HTMLTextAreaElement>('editor');
 const syntaxLayer = must<HTMLElement>('syntax-layer');
+const inlineViewLayer = must<HTMLElement>('inline-view-layer');
 const lineGutterContent = must<HTMLElement>('line-gutter-content');
 const commandbar = must<HTMLElement>('commandbar');
 const command = must<HTMLInputElement>('command');
@@ -138,6 +238,8 @@ let commandMode = false;
 let messageTimer = 0;
 let previewTimer = 0;
 let scopeFrame = 0;
+let inlineViewFrame = 0;
+let inlineViewLastPaint = 0;
 let savedEditorSelection: { start: number; end: number; direction: 'forward' | 'backward' | 'none' } | null = null;
 let audioAutoStartPending = true;
 let codeRunning = false;
@@ -336,6 +438,13 @@ function setCodeRunning(running: boolean): void {
   codeStatus.textContent = running ? '▶' : '○';
   codeStatus.classList.toggle('disabled', !running);
   codeStatus.setAttribute('aria-label', running ? 'code running' : 'code stopped');
+  if (running) {
+    renderSyntaxLayer();
+    renderLineGutter();
+    startInlineViewLoop();
+  } else {
+    clearInlineViews();
+  }
 }
 
 function refreshStoppedPreview(): boolean {
@@ -414,6 +523,228 @@ function evaluateLiveSource(): boolean {
   }
 }
 
+
+function clearInlineViews(): void {
+  if (inlineViewFrame !== 0) {
+    cancelAnimationFrame(inlineViewFrame);
+    inlineViewFrame = 0;
+  }
+  inlineViewLastPaint = 0;
+  inlineViewLayer.replaceChildren();
+  renderSyntaxLayer();
+  renderLineGutter();
+}
+
+function startInlineViewLoop(): void {
+  if (!codeRunning || inlineViewFrame !== 0) return;
+  const frame = (time: number): void => {
+    inlineViewFrame = 0;
+    if (!codeRunning) {
+      inlineViewLayer.replaceChildren();
+      return;
+    }
+    if (time - inlineViewLastPaint >= 50) {
+      inlineViewLastPaint = time;
+      renderInlineViews();
+    }
+    inlineViewFrame = requestAnimationFrame(frame);
+  };
+  inlineViewFrame = requestAnimationFrame(frame);
+}
+
+function renderInlineViews(): void {
+  if (!codeRunning || screen !== 'live') return;
+
+  const states = new Map(runtime.getInlineViews().map((view) => [view.id, view]));
+  const slots = syntaxLayer.querySelectorAll<HTMLElement>('.syntax-inline-slot[data-inline-view-id]');
+
+  for (const slot of slots) {
+    const id = slot.dataset.inlineViewId;
+    if (!id) continue;
+    const state = states.get(id);
+    if (!state) continue;
+    slot.replaceChildren(state.kind === 'piano' ? buildInlinePiano(state) : buildInlineSparkline(state));
+  }
+}
+
+function buildInlinePiano(state: Extract<InlineViewState, { kind: 'piano' }>): SVGSVGElement {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  const minMidi = Math.min(...state.availableMidi);
+  const maxMidi = Math.max(...state.availableMidi);
+  const blackClasses = new Set([1, 3, 6, 8, 10]);
+  const available = new Set(state.availableMidi);
+
+  // Keep the keyboard proportional: every white key has a fixed on-screen width.
+  // If the requested range starts/ends on a black key, include its neighbouring
+  // white key so the black key has a physical surface to sit on.
+  let first = Math.max(0, minMidi);
+  let last = Math.min(127, maxMidi);
+  if (blackClasses.has(((first % 12) + 12) % 12)) first = Math.max(0, first - 1);
+  if (blackClasses.has(((last % 12) + 12) % 12)) last = Math.min(127, last + 1);
+
+  const whites: number[] = [];
+  for (let midi = first; midi <= last; midi += 1) {
+    if (!blackClasses.has(((midi % 12) + 12) % 12)) whites.push(midi);
+  }
+
+  const whiteWidth = 18;
+  const whiteHeight = 30;
+  const blackWidth = 10;
+  const blackHeight = 18;
+  const totalWidth = Math.max(whiteWidth, whites.length * whiteWidth);
+
+  svg.setAttribute('viewBox', `0 0 ${totalWidth} ${whiteHeight}`);
+  svg.setAttribute('width', String(totalWidth));
+  svg.setAttribute('height', String(whiteHeight));
+  svg.style.width = `${totalWidth}px`;
+  svg.style.minWidth = `${totalWidth}px`;
+  svg.style.maxWidth = 'none';
+  svg.setAttribute('preserveAspectRatio', 'xMinYMid meet');
+
+  const whiteX = new Map<number, number>();
+  whites.forEach((midi, index) => {
+    const x = index * whiteWidth;
+    whiteX.set(midi, x);
+    const key = document.createElementNS(ns, 'rect');
+    key.setAttribute('x', String(x + 0.5));
+    key.setAttribute('y', '0.5');
+    key.setAttribute('width', String(whiteWidth - 1));
+    key.setAttribute('height', String(whiteHeight - 1));
+    key.setAttribute('rx', '1');
+    key.setAttribute('class', `key-white${available.has(midi) ? ' available' : ''}`);
+    svg.append(key);
+  });
+
+  // Draw black keys after white keys. The opaque mask underneath each black key
+  // hides the white-key divider behind it, so the divider resumes only below the
+  // black key as on a real piano keyboard.
+  for (let midi = first; midi <= last; midi += 1) {
+    if (!blackClasses.has(((midi % 12) + 12) % 12)) continue;
+
+    let previousWhite = midi - 1;
+    while (previousWhite >= first && blackClasses.has(((previousWhite % 12) + 12) % 12)) previousWhite -= 1;
+    const baseX = whiteX.get(previousWhite);
+    if (baseX === undefined) continue;
+
+    const x = baseX + whiteWidth - blackWidth / 2;
+
+    const mask = document.createElementNS(ns, 'rect');
+    mask.setAttribute('x', String(x - 1));
+    mask.setAttribute('y', '0');
+    mask.setAttribute('width', String(blackWidth + 2));
+    mask.setAttribute('height', String(blackHeight + 1));
+    mask.setAttribute('rx', '1');
+    mask.setAttribute('class', 'key-black-mask');
+    svg.append(mask);
+
+    const key = document.createElementNS(ns, 'rect');
+    key.setAttribute('x', String(x));
+    key.setAttribute('y', '0.5');
+    key.setAttribute('width', String(blackWidth));
+    key.setAttribute('height', String(blackHeight));
+    key.setAttribute('rx', '1');
+    key.setAttribute('class', `key-black${available.has(midi) ? ' available' : ''}`);
+    svg.append(key);
+  }
+
+  const current = Math.max(first, Math.min(last, state.currentMidi));
+  const isBlack = blackClasses.has(((current % 12) + 12) % 12);
+  let dotX = totalWidth / 2;
+  let dotY = whiteHeight - 7;
+
+  if (isBlack) {
+    let previousWhite = current - 1;
+    while (previousWhite >= first && blackClasses.has(((previousWhite % 12) + 12) % 12)) previousWhite -= 1;
+    const baseX = whiteX.get(previousWhite);
+    if (baseX !== undefined) dotX = baseX + whiteWidth;
+    dotY = blackHeight * 0.55;
+  } else {
+    const x = whiteX.get(current);
+    if (x !== undefined) dotX = x + whiteWidth / 2;
+  }
+
+  const dot = document.createElementNS(ns, 'circle');
+  dot.setAttribute('cx', String(dotX));
+  dot.setAttribute('cy', String(dotY));
+  dot.setAttribute('r', '2.4');
+  dot.setAttribute('class', 'current-dot');
+  svg.append(dot);
+  return svg;
+}
+
+function buildInlineSparkline(state: Extract<InlineViewState, { kind: 'scalar' }>): SVGSVGElement {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  const width = 180;
+  const height = 26;
+  const left = 5;
+  const right = width - 5;
+  const centerY = 13;
+
+  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  svg.setAttribute('width', String(width));
+  svg.setAttribute('height', String(height));
+  svg.style.width = `${width}px`;
+  svg.style.minWidth = `${width}px`;
+  svg.style.maxWidth = 'none';
+
+  const recent = state.history.slice(-12);
+  const recentMin = recent.length > 0 ? Math.min(...recent, state.base) : state.base;
+  const recentMax = recent.length > 0 ? Math.max(...recent, state.base) : state.base;
+
+  // Use a local window around the base so small musical movement is obvious,
+  // but expand it when the recent generator history escapes that window.
+  const fullSpan = Math.max(1, state.max - state.min);
+  const defaultHalfWindow = Math.max(fullSpan * 0.15, 8);
+  let visibleMin = Math.min(state.base - defaultHalfWindow, recentMin - 2);
+  let visibleMax = Math.max(state.base + defaultHalfWindow, recentMax + 2);
+  visibleMin = Math.max(state.min, visibleMin);
+  visibleMax = Math.min(state.max, visibleMax);
+  if (visibleMax - visibleMin < 1) visibleMax = visibleMin + 1;
+
+  const xFor = (value: number): number => {
+    const normalized = (value - visibleMin) / (visibleMax - visibleMin);
+    return left + Math.max(0, Math.min(1, normalized)) * (right - left);
+  };
+
+  const track = document.createElementNS(ns, 'line');
+  track.setAttribute('x1', String(left));
+  track.setAttribute('x2', String(right));
+  track.setAttribute('y1', String(centerY));
+  track.setAttribute('y2', String(centerY));
+  track.setAttribute('class', 'scalar-track');
+  svg.append(track);
+
+  const baseX = xFor(state.base);
+  const baseMarker = document.createElementNS(ns, 'line');
+  baseMarker.setAttribute('x1', String(baseX));
+  baseMarker.setAttribute('x2', String(baseX));
+  baseMarker.setAttribute('y1', '5');
+  baseMarker.setAttribute('y2', '21');
+  baseMarker.setAttribute('class', 'scalar-base');
+  svg.append(baseMarker);
+
+  const trailValues = state.history.slice(-6, -1);
+  trailValues.forEach((value, index) => {
+    const dot = document.createElementNS(ns, 'circle');
+    dot.setAttribute('cx', String(xFor(value)));
+    dot.setAttribute('cy', String(centerY));
+    dot.setAttribute('r', String(1.2 + index * 0.18));
+    dot.setAttribute('opacity', String(0.12 + index * 0.11));
+    dot.setAttribute('class', 'scalar-trail');
+    svg.append(dot);
+  });
+
+  const current = document.createElementNS(ns, 'circle');
+  current.setAttribute('cx', String(xFor(state.current)));
+  current.setAttribute('cy', String(centerY));
+  current.setAttribute('r', '3.2');
+  current.setAttribute('class', 'scalar-current');
+  svg.append(current);
+
+  return svg;
+}
 
 function syncViews(): void {
   const signalViews = new Map(audioEngine.getViewSignals().map((view) => [view.signal, view.kind]));
@@ -934,7 +1265,22 @@ function formatMidiNote(midi: number): string {
 }
 
 function renderScheme(): void {
-  const model = runtime.getSchemeModel();
+  const rawModel = runtime.getSchemeModel();
+
+  // The master clock has a dedicated canonical node. Be defensive here as well:
+  // older/runtime-derived paths may still yield another plain CLOCK node.
+  // Keep exactly the first master CLOCK while preserving named derived clocks
+  // such as HALF : CLOCK.
+  let masterClockSeen = false;
+  const nodes = rawModel.nodes.filter((node) => {
+    const isMasterClock = node.id.toLowerCase() === 'clock' || node.label.trim().toUpperCase() === 'CLOCK';
+    if (!isMasterClock) return true;
+    if (masterClockSeen) return false;
+    masterClockSeen = true;
+    return true;
+  });
+  const model: SchemeModel = { nodes, connections: rawModel.connections };
+
   schemeNodes.replaceChildren();
   schemeEdges.replaceChildren();
 
@@ -1237,6 +1583,37 @@ function lineRect(lineNumber: number): DOMRect | null {
 }
 
 
+const INLINE_VIEW_ROW_HEIGHT = 38;
+
+function activeInlineViewsByLine(): Map<number, InlineViewState[]> {
+  const grouped = new Map<number, InlineViewState[]>();
+  if (!codeRunning) return grouped;
+
+  for (const view of runtime.getInlineViews()) {
+    const list = grouped.get(view.line) ?? [];
+    list.push(view);
+    grouped.set(view.line, list);
+  }
+  return grouped;
+}
+
+
+function inlineSpacerBeforePhysicalLine(line: number): number {
+  if (!codeRunning || line <= 1) return 0;
+  const grouped = activeInlineViewsByLine();
+  let total = 0;
+  for (const [viewLine, views] of grouped) {
+    if (viewLine < line) total += views.length * INLINE_VIEW_ROW_HEIGHT;
+  }
+  return total;
+}
+
+function updateEditorInlineScrollExtent(): void {
+  const total = [...activeInlineViewsByLine().values()]
+    .reduce((sum, views) => sum + views.length * INLINE_VIEW_ROW_HEIGHT, 0);
+  editor.style.paddingBottom = total > 0 ? `${total + 8}px` : '';
+}
+
 function renderLineGutter(): void {
   const lines = editor.value.split('\n');
   const style = getComputedStyle(editor);
@@ -1272,6 +1649,7 @@ function renderLineGutter(): void {
   document.body.append(mirror);
 
   const labels = statementLabels(editor.value);
+  const inlineByLine = activeInlineViewsByLine();
   lineGutterContent.replaceChildren();
   lines.forEach((_, index) => {
     const physicalLine = index + 1;
@@ -1285,6 +1663,14 @@ function renderLineGutter(): void {
     label.textContent = labels[index] ?? '';
     row.append(marker, label);
     lineGutterContent.append(row);
+
+    const views = inlineByLine.get(physicalLine) ?? [];
+    for (let viewIndex = 0; viewIndex < views.length; viewIndex += 1) {
+      const spacer = document.createElement('div');
+      spacer.className = 'line-number-inline-spacer';
+      spacer.style.height = `${INLINE_VIEW_ROW_HEIGHT}px`;
+      lineGutterContent.append(spacer);
+    }
   });
   mirror.remove();
   syncLineGutter();
@@ -1319,6 +1705,8 @@ function statementNumberForPhysicalLine(labels: string[], physicalLine: number):
 function renderSyntaxLayer(): void {
   const source = editor.value;
   const editorStyle = getComputedStyle(editor);
+  const inlineByLine = activeInlineViewsByLine();
+
   syntaxLayer.style.width = `${editor.clientWidth}px`;
   syntaxLayer.style.fontFamily = editorStyle.fontFamily;
   syntaxLayer.style.fontSize = editorStyle.fontSize;
@@ -1326,8 +1714,10 @@ function renderSyntaxLayer(): void {
   syntaxLayer.style.lineHeight = editorStyle.lineHeight;
   syntaxLayer.style.letterSpacing = editorStyle.letterSpacing;
   syntaxLayer.replaceChildren();
+
   const lines = source.split('\n');
-  lines.forEach((line) => {
+  lines.forEach((line, index) => {
+    const physicalLine = index + 1;
     const row = document.createElement('div');
     row.className = 'syntax-line';
     const commentAt = commentStart(line);
@@ -1340,7 +1730,24 @@ function renderSyntaxLayer(): void {
       row.append(comment);
     }
     syntaxLayer.append(row);
+
+    const views = inlineByLine.get(physicalLine) ?? [];
+    for (const view of views) {
+      const spacer = document.createElement('div');
+      spacer.className = 'syntax-inline-spacer';
+      spacer.style.height = `${INLINE_VIEW_ROW_HEIGHT}px`;
+
+      const slot = document.createElement('div');
+      slot.className = `syntax-inline-slot ${view.kind === 'piano' ? 'inline-piano' : 'inline-scalar'}`;
+      slot.dataset.inlineViewId = view.id;
+      slot.append(view.kind === 'piano' ? buildInlinePiano(view) : buildInlineSparkline(view));
+
+      spacer.append(slot);
+      syntaxLayer.append(spacer);
+    }
   });
+
+  updateEditorInlineScrollExtent();
   syncSyntaxLayer();
 }
 
@@ -1430,7 +1837,8 @@ function caretRect(): DOMRect | null {
   mirror.remove();
 
   const left = markerRect.left - editor.scrollLeft;
-  const top = markerRect.top - editor.scrollTop;
+  const physicalLine = editor.value.slice(0, offset).split('\n').length;
+  const top = markerRect.top - editor.scrollTop + inlineSpacerBeforePhysicalLine(physicalLine);
   return new DOMRect(left, top, 0, markerRect.height || Number.parseFloat(style.lineHeight) || 24);
 }
 
@@ -1699,6 +2107,7 @@ editor.addEventListener('scroll', () => {
   requestAnimationFrame(positionBlockCaret);
 });
 window.addEventListener('resize', () => {
+  renderSyntaxLayer();
   renderLineGutter();
   requestAnimationFrame(positionBlockCaret);
 });
@@ -1723,6 +2132,29 @@ editor.addEventListener('keydown', (event) => {
     event.preventDefault();
     event.stopPropagation();
     stopLiveCode();
+    requestAnimationFrame(positionBlockCaret);
+    return;
+  }
+
+  if (event.key.toLowerCase() === 'k' && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const value = editor.value;
+    const caret = editor.selectionStart;
+    const lineStart = value.lastIndexOf('\n', Math.max(0, caret - 1)) + 1;
+    const nextNewline = value.indexOf('\n', caret);
+    const hasFollowingLine = nextNewline !== -1;
+    const deleteEnd = hasFollowingLine ? nextNewline + 1 : value.length;
+    const deleteStart = hasFollowingLine || lineStart === 0 ? lineStart : lineStart - 1;
+    const nextCaret = hasFollowingLine ? lineStart : Math.max(0, deleteStart);
+
+    editor.setRangeText('', deleteStart, deleteEnd, 'start');
+    editor.setSelectionRange(nextCaret, nextCaret);
+
+    renderSyntaxLayer();
+    renderLineGutter();
+    scheduleStoppedPreview();
     requestAnimationFrame(positionBlockCaret);
     return;
   }
