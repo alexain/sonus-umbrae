@@ -60,6 +60,26 @@ const NOTE_INDEX: Record<string, number> = {
   B: 11,
 };
 
+const MACRO_SOUND_ALGORITHMS = new Set([
+  'analog',
+  'waves',
+  'fm',
+  'grain',
+  'additive',
+  'wavetable',
+  'chord',
+  'speech',
+  'swarm',
+  'noise',
+  'particle',
+  'string',
+  'analog-vcf',
+  'phase',
+  'terrain',
+  'strings',
+  'chiptune',
+]);
+
 const MODE_INTERVALS: Record<string, number[]> = {
   major: [0, 2, 4, 5, 7, 9, 11],
   ionian: [0, 2, 4, 5, 7, 9, 11],
@@ -415,10 +435,26 @@ function compileVoiceProperty(
   switch (key) {
     case 'sound': {
       if (!value || /\s/.test(value)) {
-        throw new LanguageError([{ line, message: 'sound expects one sound identifier' }]);
+        throw new LanguageError([{ line, message: 'sound expects one engine.algorithm identifier' }]);
       }
-      const sound = value.toLowerCase().startsWith('plaits.') ? value.slice('plaits.'.length) : value;
-      return `${voice.name}.model(${JSON.stringify(sound)});`;
+
+      const match = value.toLowerCase().match(/^([a-z][a-z0-9_-]*)\.([a-z][a-z0-9_-]*)$/);
+      if (!match) {
+        throw new LanguageError([{
+          line,
+          message: 'sound expects engine.algorithm, e.g. sound macro.fm',
+        }]);
+      }
+
+      const [, engine, algorithm] = match;
+      if (engine !== 'macro') {
+        throw new LanguageError([{ line, message: `unknown sound engine '${engine}'` }]);
+      }
+      if (!MACRO_SOUND_ALGORITHMS.has(algorithm)) {
+        throw new LanguageError([{ line, message: `unknown macro algorithm '${algorithm}'` }]);
+      }
+
+      return `${voice.name}.model(${JSON.stringify(`macro.${algorithm}`)});`;
     }
 
     case 'note': {

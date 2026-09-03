@@ -9,7 +9,6 @@ const RESERVED_IDENTIFIERS = new Set([
   'midi',
   'voice',
   'swell',
-  'dices',
   'mist',
   'pattern',
   'scale',
@@ -149,20 +148,6 @@ interface SwellDefinition {
   parameters: Map<string, string>;
 }
 
-interface DicesDefinition {
-  rate: number;
-  jitter: number;
-  gateBias: number;
-  gateLength: number;
-  gateJitter: number;
-  spread: number;
-  bias: number;
-  steps: number;
-  deja: number;
-  length: number;
-  scale: number;
-  parameters: Map<string, string>;
-}
 
 interface MistDefinition {
   position: number;
@@ -284,7 +269,6 @@ export class SonusRuntime {
     const gains = new Map<string, GainDefinition>();
     const voices = new Map<string, VoiceDefinition>();
     const swells = new Map<string, SwellDefinition>();
-    const dices = new Map<string, DicesDefinition>();
     const mists = new Map<string, MistDefinition>();
     const routes = new Map<string, RouteDefinition>();
     const clockSources = new Map<string, ClockDefinition>();
@@ -386,7 +370,7 @@ export class SonusRuntime {
       const oscillatorDeclaration = parseOscillatorDeclaration(line);
       if (oscillatorDeclaration) {
         const { name, calls } = oscillatorDeclaration;
-        if (swells.has(name) || dices.has(name) || reservedOrDuplicate(name, oscillators, gains, voices, diagnostics, lineNumber)) { if (swells.has(name) || dices.has(name)) diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue; }
+        if (swells.has(name) || reservedOrDuplicate(name, oscillators, gains, voices, diagnostics, lineNumber)) { if (swells.has(name)) diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue; }
 
         const definition: OscillatorDefinition = { frequency: 440, parameters: new Map() };
         oscillators.set(name, definition);
@@ -398,7 +382,7 @@ export class SonusRuntime {
       const gainDeclaration = parseGainDeclaration(line);
       if (gainDeclaration) {
         const { name, calls } = gainDeclaration;
-        if (swells.has(name) || dices.has(name) || reservedOrDuplicate(name, oscillators, gains, voices, diagnostics, lineNumber)) { if (swells.has(name) || dices.has(name)) diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue; }
+        if (swells.has(name) || reservedOrDuplicate(name, oscillators, gains, voices, diagnostics, lineNumber)) { if (swells.has(name)) diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue; }
 
         const definition: GainDefinition = { level: 100, parameters: new Map() };
         gains.set(name, definition);
@@ -410,7 +394,7 @@ export class SonusRuntime {
       const voiceDeclaration = parseVoiceDeclaration(line);
       if (voiceDeclaration) {
         const { name, calls } = voiceDeclaration;
-        if (swells.has(name) || dices.has(name) || reservedOrDuplicate(name, oscillators, gains, voices, diagnostics, lineNumber)) { if (swells.has(name) || dices.has(name)) diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue; }
+        if (swells.has(name) || reservedOrDuplicate(name, oscillators, gains, voices, diagnostics, lineNumber)) { if (swells.has(name)) diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue; }
 
         const definition: VoiceDefinition = {
           model: 1,
@@ -434,7 +418,7 @@ export class SonusRuntime {
           diagnostics.push({ line: lineNumber, message: reservationError });
           continue;
         }
-        if (objectExists(name, oscillators, gains, voices) || swells.has(name) || dices.has(name) || clockSources.has(name)) {
+        if (objectExists(name, oscillators, gains, voices) || swells.has(name) || clockSources.has(name)) {
           diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` });
           continue;
         }
@@ -453,35 +437,6 @@ export class SonusRuntime {
         continue;
       }
 
-      const dicesDeclaration = parseDicesDeclaration(line);
-      if (dicesDeclaration) {
-        const { name } = dicesDeclaration;
-        const reservationError = identifierReservationError(name);
-        if (reservationError) {
-          diagnostics.push({ line: lineNumber, message: reservationError });
-          continue;
-        }
-        if (objectExists(name, oscillators, gains, voices) || swells.has(name) || dices.has(name) || clockSources.has(name)) {
-          diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` });
-          continue;
-        }
-        dices.set(name, {
-          rate: 50,
-          jitter: 0,
-          gateBias: 50,
-          gateLength: 45,
-          gateJitter: 0,
-          spread: 50,
-          bias: 50,
-          steps: 75,
-          deja: 0,
-          length: 8,
-          scale: 0,
-          parameters: new Map(),
-        });
-        results.push({ message: `${name} = Dices` });
-        continue;
-      }
 
       const mistDeclaration = parseMistDeclaration(line);
       if (mistDeclaration) {
@@ -491,7 +446,7 @@ export class SonusRuntime {
           diagnostics.push({ line: lineNumber, message: reservationError });
           continue;
         }
-        if (objectExists(name, oscillators, gains, voices) || swells.has(name) || dices.has(name) || mists.has(name) || clockSources.has(name)) {
+        if (objectExists(name, oscillators, gains, voices) || swells.has(name) || mists.has(name) || clockSources.has(name)) {
           diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` });
           continue;
         }
@@ -510,7 +465,6 @@ export class SonusRuntime {
           mode: 0,
           parameters: new Map([
             ['MODE', 'GRANULAR'],
-            ['BACKEND', 'SUPERPARASITES'],
           ]),
         });
         results.push({ message: `${name} = Mist` });
@@ -710,15 +664,6 @@ export class SonusRuntime {
         const definition = swells.get(swellDeclaration.name)!;
         for (const call of swellDeclaration.calls) {
           const error = applySwellCall(swellDeclaration.name, definition, call, moduleViews, (expr) => evalValue(expr, lineNumber));
-          if (error) diagnostics.push({ line: lineNumber, message: error });
-        }
-        continue;
-      }
-      const dicesDeclaration = parseDicesDeclaration(line);
-      if (dicesDeclaration) {
-        const definition = dices.get(dicesDeclaration.name)!;
-        for (const call of dicesDeclaration.calls) {
-          const error = applyDicesCall(dicesDeclaration.name, definition, call, moduleViews, (expr) => evalValue(expr, lineNumber));
           if (error) diagnostics.push({ line: lineNumber, message: error });
         }
         continue;
@@ -1037,52 +982,6 @@ export class SonusRuntime {
         continue;
       }
 
-      match = line.match(/^([A-Za-z_]\w*)\.(rate|jitter|gate_bias|gate_length|gate_jitter|spread|bias|steps|deja|length)\(\s*(.+)\s*\)\s*$/);
-      if (match) {
-        const [, name, parameter, rawValue] = match;
-        const definition = dices.get(name);
-        if (!definition) {
-          diagnostics.push({ line: lineNumber, message: `unknown Dices object: ${name}` });
-          continue;
-        }
-        const value = evalNumber(rawValue, lineNumber, parameter);
-        if (value === undefined) continue;
-
-        if (parameter === 'length') {
-          if (!Number.isInteger(value) || value < 1 || value > 16) {
-            diagnostics.push({ line: lineNumber, message: 'length expects an integer from 1 to 16' });
-            continue;
-          }
-          definition.length = value;
-          definition.parameters.set('LENGTH', formatNumber(value));
-        } else {
-          const error = percentError(value, parameter);
-          if (error) { diagnostics.push({ line: lineNumber, message: error }); continue; }
-          if (parameter === 'gate_bias') definition.gateBias = value;
-          else if (parameter === 'gate_length') definition.gateLength = value;
-          else if (parameter === 'gate_jitter') definition.gateJitter = value;
-          else definition[parameter as 'rate' | 'jitter' | 'spread' | 'bias' | 'steps' | 'deja'] = value;
-          definition.parameters.set(parameter.toUpperCase(), `${formatNumber(value)}%`);
-        }
-        results.push({ message: `${name}.${parameter} ${formatNumber(value)}` });
-        continue;
-      }
-
-      match = line.match(/^([A-Za-z_]\w*)\.scale\(\s*["']([^"']+)["']\s*\)\s*$/);
-      if (match && dices.has(match[1])) {
-        const [, name, rawScale] = match;
-        const scale = parseDicesScale(rawScale);
-        if (scale === null) {
-          diagnostics.push({ line: lineNumber, message: 'scale expects major, minor, pentatonic, chromatic, dorian, or fifths' });
-          continue;
-        }
-        const definition = dices.get(name)!;
-        definition.scale = scale;
-        definition.parameters.set('SCALE', rawScale.toUpperCase());
-        results.push({ message: `${name}.scale ${rawScale}` });
-        continue;
-      }
-
       match = line.match(/^([A-Za-z_]\w*)\.(freq|harmo|timbre|morph|model|level|slope|shape|smooth|shift)\.view\(\s*\)\s*$/);
       if (match) {
         const [, name, parameter] = match;
@@ -1146,25 +1045,6 @@ export class SonusRuntime {
         continue;
       }
 
-      match = line.match(/^([A-Za-z_]\w*)\.(t[1-3]|x[1-3]|y)\.view\(\s*\)\s*$/);
-      if (match) {
-        const [, name, port] = match;
-        if (!dices.has(name)) {
-          diagnostics.push({ line: lineNumber, message: `${port} is only available on Dices objects: ${name}` });
-          continue;
-        }
-        views.set(`${name}.${port}`, port.startsWith('t') ? 'gate' : 'signal');
-        results.push({ message: `${name}.${port} view` });
-        continue;
-      }
-
-      match = line.match(/^([A-Za-z_]\w*)\.view\(\s*\)\s*$/);
-      if (match && dices.has(match[1])) {
-        moduleViews.add(match[1]);
-        results.push({ message: `${match[1]} module view` });
-        continue;
-      }
-
       match = line.match(/^([A-Za-z_]\w*)\.(out_L|out_R)\.view\(\s*\)\s*$/);
       if (match && mists.has(match[1])) {
         views.set(`${match[1]}.${match[2]}`, 'signal');
@@ -1220,7 +1100,7 @@ export class SonusRuntime {
       const parsedRoute = parseRouteLine(line);
       if (parsedRoute) {
         const { sourceName, sourcePort, amountExpression, targetName, targetPort } = parsedRoute;
-        if (sourceName !== 'Clock' && !clockSources.has(sourceName) && !objectExists(sourceName, oscillators, gains, voices) && !swells.has(sourceName) && !dices.has(sourceName) && !mists.has(sourceName)) {
+        if (sourceName !== 'Clock' && !clockSources.has(sourceName) && !objectExists(sourceName, oscillators, gains, voices) && !swells.has(sourceName) && !mists.has(sourceName)) {
           diagnostics.push({ line: lineNumber, message: `unknown source object: ${sourceName}` });
           continue;
         }
@@ -1236,14 +1116,10 @@ export class SonusRuntime {
           diagnostics.push({ line: lineNumber, message: `${sourcePort} is only available on stereo objects: ${sourceName}` });
           continue;
         }
-        if (/^(t[1-3]|x[1-3]|y)$/.test(sourcePort) && !dices.has(sourceName)) {
-          diagnostics.push({ line: lineNumber, message: `${sourcePort} is only available on Dices objects: ${sourceName}` });
-          continue;
-        }
         if (targetPort === 'trig') {
           if (!voices.has(targetName) && !swells.has(targetName) && !mists.has(targetName)) { diagnostics.push({ line: lineNumber, message: `trigger input is only available on Voice, Swell or Mist objects: ${targetName}` }); continue; }
         } else if (targetPort === 'clock') {
-          if (!swells.has(targetName) && !dices.has(targetName)) { diagnostics.push({ line: lineNumber, message: `clock input is only available on Swell or Dices objects: ${targetName}` }); continue; }
+          if (!swells.has(targetName)) { diagnostics.push({ line: lineNumber, message: `clock input is only available on Swell objects: ${targetName}` }); continue; }
         } else if (targetPort === 'v_oct') {
           if (!voices.has(targetName) && !swells.has(targetName)) { diagnostics.push({ line: lineNumber, message: `v_oct input is only available on Voice or Swell objects: ${targetName}` }); continue; }
         } else if (targetPort === 'harmo' || targetPort === 'timbre' || targetPort === 'morph') {
@@ -1430,7 +1306,6 @@ export class SonusRuntime {
     variableViews.length = 0;
     for (const [name] of voices) variableViews.push({ name, value: 'Voice' });
     for (const [name] of swells) variableViews.push({ name, value: 'Swell' });
-    for (const [name] of dices) variableViews.push({ name, value: 'Dices' });
     for (const [name] of mists) variableViews.push({ name, value: 'Mist' });
     for (const [name] of clockSources) variableViews.push({ name, value: 'Clock' });
     for (const [name] of oscillators) variableViews.push({ name, value: 'Osc' });
@@ -1521,13 +1396,6 @@ export class SonusRuntime {
           signalKind: 'signal',
           port: 'OUT / AUX',
         });
-      } else if (dices.has(name)) {
-        ownerViews.push({
-          signal: `${name}.x1`,
-          signals: [`${name}.t1`, `${name}.t2`, `${name}.t3`, `${name}.x1`, `${name}.x2`, `${name}.x3`],
-          signalKind: 'signal',
-          port: 'SEQUENCE',
-        });
       } else if (mists.has(name)) {
         ownerViews.push({
           signal: `${name}.out_L`,
@@ -1586,16 +1454,6 @@ export class SonusRuntime {
         label: `${name.toUpperCase()} : SWELL`,
         kind: 'module' as const,
         parameters: [...definition.parameters.entries()].map(([parameterName, value]) => ({ name: parameterName, value })),
-        views: embeddedViews.get(name),
-      })),
-      ...[...dices.entries()].map(([name, definition]) => ({
-        id: name,
-        label: `${name.toUpperCase()} : DICES`,
-        kind: 'module' as const,
-        parameters: [...definition.parameters.entries()].map(([parameterName, value]) => ({
-          name: parameterName,
-          value,
-        })),
         views: embeddedViews.get(name),
       })),
       ...[...mists.entries()].map(([name, definition]) => ({
@@ -1681,20 +1539,6 @@ export class SonusRuntime {
         outputMode: definition.outputMode,
         range: definition.range,
       })),
-      dices: [...dices.entries()].map(([name, definition]) => ({
-        name,
-        rate: definition.rate,
-        jitter: definition.jitter,
-        gateBias: definition.gateBias,
-        gateLength: definition.gateLength,
-        gateJitter: definition.gateJitter,
-        spread: definition.spread,
-        bias: definition.bias,
-        steps: definition.steps,
-        deja: definition.deja,
-        length: definition.length,
-        scale: definition.scale,
-      })),
       mists: [...mists.entries()].map(([name, definition]) => ({
         name,
         position: definition.position,
@@ -1736,12 +1580,6 @@ export class SonusRuntime {
           } else if (voices.has(name)) {
             monitors.set(`${name}.out`, 'signal');
             monitors.set(`${name}.aux`, 'signal');
-          } else if (dices.has(name)) {
-            for (let port = 1; port <= 3; port += 1) {
-              monitors.set(`${name}.t${port}`, 'gate');
-              monitors.set(`${name}.x${port}`, 'signal');
-            }
-            monitors.set(`${name}.y`, 'signal');
           } else if (mists.has(name)) {
             monitors.set(`${name}.out_L`, 'signal');
             monitors.set(`${name}.out_R`, 'signal');
@@ -2348,9 +2186,6 @@ function parseSwellDeclaration(line: string): ObjectDeclaration | null {
   return parseDeclaration(line, 'Swell');
 }
 
-function parseDicesDeclaration(line: string): ObjectDeclaration | null {
-  return parseDeclaration(line, 'Dices');
-}
 
 function parseMistDeclaration(line: string): ObjectDeclaration | null {
   return parseDeclaration(line, 'Mist');
@@ -2569,72 +2404,6 @@ function applyMistCall(
   }
 }
 
-function parseDicesScale(value: string): number | null {
-  const scales: Record<string, number> = {
-    major: 0,
-    minor: 1,
-    pentatonic: 2,
-    chromatic: 3,
-    dorian: 4,
-    fifths: 5,
-  };
-  return scales[value.trim().toLowerCase()] ?? null;
-}
-
-function applyDicesCall(
-  objectName: string,
-  definition: DicesDefinition,
-  call: ChainedCall,
-  moduleViews: Set<string>,
-  evaluate: (expression: string) => ScalarValue | undefined,
-): string | null {
-  const percent = (parameter: 'rate' | 'jitter' | 'spread' | 'bias' | 'steps' | 'deja' | 'gateBias' | 'gateLength' | 'gateJitter'): string | null => {
-    const value = evaluate(call.argument);
-    if (value === undefined) return null;
-    if (typeof value !== 'number') return `${call.name} expects one numeric expression`;
-    const error = percentError(value, call.name);
-    if (error) return error;
-    definition[parameter] = value;
-    definition.parameters.set(call.name.toUpperCase(), `${formatNumber(value)}%`);
-    return null;
-  };
-
-  switch (call.name) {
-    case 'rate': return percent('rate');
-    case 'jitter': return percent('jitter');
-    case 'gate_bias': return percent('gateBias');
-    case 'gate_length': return percent('gateLength');
-    case 'gate_jitter': return percent('gateJitter');
-    case 'spread': return percent('spread');
-    case 'bias': return percent('bias');
-    case 'steps': return percent('steps');
-    case 'deja': return percent('deja');
-    case 'length': {
-      const value = evaluate(call.argument);
-      if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 16) {
-        return 'length expects an integer from 1 to 16';
-      }
-      definition.length = value;
-      definition.parameters.set('LENGTH', formatNumber(value));
-      return null;
-    }
-    case 'scale': {
-      const value = evaluate(call.argument);
-      if (typeof value !== 'string') return 'scale expects a scale name';
-      const scale = parseDicesScale(value);
-      if (scale === null) return 'scale expects major, minor, pentatonic, chromatic, dorian, or fifths';
-      definition.scale = scale;
-      definition.parameters.set('SCALE', value.toUpperCase());
-      return null;
-    }
-    case 'view':
-      if (call.argument.length > 0) return 'view does not accept parameters yet';
-      moduleViews.add(objectName);
-      return null;
-    default:
-      return `unknown Dices method: ${call.name}`;
-  }
-}
 
 function applySwellCall(
   objectName: string,
@@ -2785,11 +2554,34 @@ function applyGainCall(
   }
 }
 
-const VOICE_MODEL_NAMES = [
+const VOICE_MODEL_BACKEND_NAMES = [
   'analog', 'waves', 'fm', 'grain', 'additive', 'wavetable', 'chord', 'speech',
   'swarm', 'noise', 'particle', 'string', 'modal', 'kick', 'snare', 'hat',
   'analog-vcf', 'phase', 'fm6-a', 'fm6-b', 'fm6-c', 'terrain', 'strings', 'chiptune',
 ] as const;
+
+const MACRO_MODEL_IDS = new Map<string, number>([
+  ['analog', 1],
+  ['waves', 2],
+  ['fm', 3],
+  ['grain', 4],
+  ['additive', 5],
+  ['wavetable', 6],
+  ['chord', 7],
+  ['speech', 8],
+  ['swarm', 9],
+  ['noise', 10],
+  ['particle', 11],
+  ['string', 12],
+  // Backend slots 13..16 are intentionally not part of the public macro family:
+  // modal synthesis and the three percussion engines are reserved for future
+  // dedicated resonator/physical/drum families.
+  ['analog-vcf', 17],
+  ['phase', 18],
+  ['terrain', 22],
+  ['strings', 23],
+  ['chiptune', 24],
+]);
 
 function applyVoiceCall(
   objectName: string,
@@ -2842,13 +2634,22 @@ function applyVoiceCall(
 function parseVoiceModelValue(value: ScalarValue): number | null {
   if (typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 24) return value;
   if (typeof value !== 'string') return null;
+
   const normalized = value.trim().toLowerCase();
-  const index = VOICE_MODEL_NAMES.indexOf(normalized as typeof VOICE_MODEL_NAMES[number]);
-  return index >= 0 ? index + 1 : null;
+  const macro = normalized.match(/^macro\.([a-z0-9_-]+)$/);
+  if (macro) return MACRO_MODEL_IDS.get(macro[1]) ?? null;
+
+  // Low-level compatibility: backend model names remain accepted internally,
+  // but the high-level language exposes only engine.algorithm identifiers.
+  const backendIndex = VOICE_MODEL_BACKEND_NAMES.indexOf(normalized as typeof VOICE_MODEL_BACKEND_NAMES[number]);
+  return backendIndex >= 0 ? backendIndex + 1 : null;
 }
 
 function formatVoiceModel(model: number): string {
-  return `${model} ${VOICE_MODEL_NAMES[model - 1]?.toUpperCase() ?? ''}`.trim();
+  for (const [algorithm, id] of MACRO_MODEL_IDS) {
+    if (id === model) return `${model} MACRO.${algorithm.toUpperCase()}`;
+  }
+  return `${model} INTERNAL`;
 }
 
 function percentError(value: number, name: string): string | null {
