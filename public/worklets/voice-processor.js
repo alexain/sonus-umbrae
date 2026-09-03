@@ -22,11 +22,19 @@ class SonusVoiceProcessor extends AudioWorkletProcessor {
     this.baseHarmo = 0.5;
     this.baseTimbre = 0.5;
     this.baseMorph = 0.5;
+    this.lpgEnabled = false;
+    this.pendingTrigger = false;
 
     this.port.onmessage = (event) => {
       const message = event.data;
-      if (!message || message.type !== 'params') return;
+      if (!message) return;
+      if (message.type === 'trigger') {
+        if (this.lpgEnabled) this.pendingTrigger = true;
+        return;
+      }
+      if (message.type !== 'params') return;
       if (message.model !== undefined) this.call('su_voice_set_model', this.handle, message.model);
+      if (message.lpg !== undefined) this.lpgEnabled = Boolean(message.lpg);
       if (message.frequency !== undefined) this.call('su_voice_set_frequency', this.handle, message.frequency);
       if (message.harmo !== undefined) this.baseHarmo = message.harmo;
       if (message.timbre !== undefined) this.baseTimbre = message.timbre;
@@ -46,7 +54,9 @@ class SonusVoiceProcessor extends AudioWorkletProcessor {
     if (triggerInput) {
       for (let i = 0; i < triggerInput.length; i += 1) trigger = Math.max(trigger, triggerInput[i]);
     }
-    this.call('su_voice_set_trigger', this.handle, trigger, triggerInput ? 1 : 0);
+    if (this.pendingTrigger) trigger = Math.max(trigger, 1);
+    this.call('su_voice_set_trigger', this.handle, trigger, triggerInput ? 1 : (this.lpgEnabled ? 1 : 0));
+    this.pendingTrigger = false;
 
     const vOctInput = inputs[1]?.[0];
     const vOct = vOctInput && vOctInput.length > 0 ? vOctInput[0] : 0;

@@ -41,10 +41,6 @@ if [[ ! -f "$VENDOR/tides2/poly_slope_generator.h" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$VENDOR/marbles/random/t_generator.h" ]]; then
-  echo "Marbles DSP sources are incomplete: $VENDOR/marbles is missing" >&2
-  exit 1
-fi
 
 if [[ ! -f "$VENDOR/clouds/dsp/granular_processor.cc" ]]; then
   echo "Clouds DSP sources are incomplete: $VENDOR/clouds is missing" >&2

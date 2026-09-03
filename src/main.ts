@@ -1,10 +1,11 @@
 import './style.css';
 import { AudioEngine } from './audio/engine';
 import { SonusEvaluationError, SonusRuntime, type ParameterViewState, type SchemeConnection, type SchemeModel, type SchemeNode } from './language/runtime';
+import { compileLanguageSource, LanguageError } from './language/language';
 
 type Screen = 'live' | 'config' | 'help' | 'scheme';
 
-const VERSION = '0.0.4';
+const VERSION = '0.1.0';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Missing #app');
@@ -14,7 +15,8 @@ app.innerHTML = `
     <header class="statusbar">
       <span class="brand">SONUS UMBRAE / ${VERSION}</span>
       <span class="status-item"><span class="label">CLK</span> <span id="clock-status" class="disabled">--.-</span></span>
-      <span class="status-item"><span class="label">LIVE</span> <span id="live-dot" class="dot off" aria-label="engine stopped"></span></span>
+      <span class="status-item"><span class="label">AUDIO ENGINE</span> <span id="live-dot" class="dot off" aria-label="engine stopped"></span></span>
+      <span class="status-item"><span class="label">LIVE</span> <span id="code-status" class="disabled" aria-label="code stopped">○</span></span>
       <span class="status-item optional"><span class="label">DSP</span> <span id="dsp-status" class="disabled">--%</span></span>
     </header>
 
@@ -33,7 +35,7 @@ app.innerHTML = `
         <div class="system-title">CONFIGURATION</div>
         <div class="rule"></div>
         <div class="system-copy">NO CONFIGURABLE PARAMETERS IN ${VERSION}</div>
-        <div class="system-copy muted">ESC  RETURN TO LIVE</div>
+        <div class="system-copy muted">ESC  RETURN TO CODE</div>
       </div>
 
       <div id="help-screen" class="screen system-screen hidden" aria-hidden="true">
@@ -50,14 +52,16 @@ app.innerHTML = `
           <span>:CLEAR</span><span>CLEAR SOURCE</span>
           <span>:START</span><span>START / RESUME AUDIO ENGINE</span>
           <span>:STOP</span><span>SUSPEND AUDIO ENGINE</span>
+          <span>:RUN</span><span>START / RELOAD LIVE CODE</span>
+          <span>:RUN STOP</span><span>STOP LIVE CODE</span>
           <span>:TEST 440</span><span>PLAY DIAGNOSTIC SINE TONE</span>
           <span>:TEST STOP</span><span>STOP DIAGNOSTIC TONE</span>
           <span>:CLOCK START</span><span>START MASTER CLOCK TRANSPORT</span>
           <span>:CLOCK STOP</span><span>STOP MASTER CLOCK TRANSPORT</span>
           <span>:PANIC</span><span>STOP CURRENT AUDIO IMMEDIATELY</span>
-          <span>ENTER</span><span>EVALUATE SOURCE AND INSERT NEW LINE</span>
-          <span>SHIFT+ENTER</span><span>INSERT NEW LINE WITHOUT EVALUATING</span>
-          <span>CMD+ENTER</span><span>EVALUATE ENTIRE SOURCE</span>
+          <span>ENTER</span><span>INSERT NEW LINE</span>
+          <span>CMD/CTRL+ENTER</span><span>RECOMPILE / START LIVE CODE</span>
+          <span>CMD+BACKSPACE</span><span>STOP LIVE CODE</span>
         </div>
         <div class="system-copy muted">ESC  RETURN TO LIVE</div>
       </div>
@@ -71,6 +75,16 @@ app.innerHTML = `
           </div>
         </div>
         <div class="scheme-hints">ESC / TAB&nbsp;&nbsp;LIVE</div>
+      </div>
+
+      <div id="audio-start-overlay" class="audio-start-overlay" role="dialog" aria-modal="true" aria-label="Start audio engine">
+        <div class="audio-start-card">
+          <div class="audio-start-title">SONUS UMBRAE</div>
+          <div class="rule"></div>
+          <div class="audio-start-copy">AUDIO ENGINE SUSPENDED</div>
+          <button id="audio-start-button" class="audio-start-button" type="button">START AUDIO</button>
+          <div id="audio-start-status" class="system-copy muted">BROWSER REQUIRES USER INTERACTION</div>
+        </div>
       </div>
 
       <div id="phosphor-layer" class="phosphor-layer" aria-hidden="true">
@@ -90,7 +104,6 @@ app.innerHTML = `
 
 const editor = must<HTMLTextAreaElement>('editor');
 const syntaxLayer = must<HTMLElement>('syntax-layer');
-const lineGutter = must<HTMLElement>('line-gutter');
 const lineGutterContent = must<HTMLElement>('line-gutter-content');
 const commandbar = must<HTMLElement>('commandbar');
 const command = must<HTMLInputElement>('command');
@@ -102,6 +115,9 @@ const schemeViewport = must<HTMLElement>('scheme-viewport');
 const schemeWorld = must<HTMLElement>('scheme-world');
 const schemeEdges = must<SVGSVGElement>('scheme-edges');
 const schemeNodes = must<HTMLElement>('scheme-nodes');
+const audioStartOverlay = must<HTMLElement>('audio-start-overlay');
+const audioStartButton = must<HTMLButtonElement>('audio-start-button');
+const audioStartStatus = must<HTMLElement>('audio-start-status');
 const phosphorLayer = must<HTMLElement>('phosphor-layer');
 const message = must<HTMLElement>('message');
 const blockCaret = must<HTMLElement>('block-caret');
@@ -110,6 +126,7 @@ const viewPanel = must<HTMLElement>('view-panel');
 const viewStack = must<HTMLElement>('view-stack');
 const diagnostic = must<HTMLElement>('diagnostic');
 const liveDot = must<HTMLElement>('live-dot');
+const codeStatus = must<HTMLElement>('code-status');
 const dspStatus = must<HTMLElement>('dsp-status');
 const clockStatus = must<HTMLElement>('clock-status');
 
@@ -119,14 +136,11 @@ const runtime = new SonusRuntime(audioEngine);
 let screen: Screen = 'live';
 let commandMode = false;
 let messageTimer = 0;
+let previewTimer = 0;
 let scopeFrame = 0;
-const dicesHistories = new Map<string, {
-  previousT2: boolean;
-  t: [boolean[], boolean[], boolean[]];
-  x: [number[], number[], number[]];
-}>();
 let savedEditorSelection: { start: number; end: number; direction: 'forward' | 'backward' | 'none' } | null = null;
 let audioAutoStartPending = true;
+let codeRunning = false;
 let diagnosticLines = new Set<number>();
 const PANEL_STATE_KEY = 'sonus-umbrae.monitor-panels';
 const panelCollapsed = new Map<string, boolean>();
@@ -134,6 +148,7 @@ const panelExplicitState = new Set<string>();
 let panelOrder: string[] = [];
 let draggedPanelId: string | null = null;
 let clockWasActive = false;
+let lastCaretTrailPosition: { left: number; top: number } | null = null;
 
 loadPanelState();
 
@@ -150,9 +165,33 @@ async function tryAutoStartAudio(): Promise<void> {
   }
 }
 
-function retryAutoStartFromGesture(): void {
-  if (!audioAutoStartPending) return;
-  void tryAutoStartAudio();
+async function startAudioFromOverlay(): Promise<void> {
+  if (!audioAutoStartPending) {
+    audioStartOverlay.classList.add('hidden');
+    return;
+  }
+
+  audioStartButton.disabled = true;
+  audioStartButton.textContent = 'STARTING...';
+  audioStartStatus.textContent = 'INITIALIZING AUDIO ENGINE';
+
+  try {
+    await tryAutoStartAudio();
+
+    if (audioEngine.snapshot().state !== 'running') {
+      throw new Error('audio start blocked');
+    }
+
+    audioStartOverlay.classList.add('hidden');
+    audioStartButton.disabled = false;
+    audioStartButton.textContent = 'START AUDIO';
+    audioStartStatus.textContent = 'BROWSER REQUIRES USER INTERACTION';
+    editor.focus();
+  } catch {
+    audioStartButton.disabled = false;
+    audioStartButton.textContent = 'RETRY AUDIO';
+    audioStartStatus.textContent = 'AUDIO START FAILED — TRY AGAIN';
+  }
 }
 
 audioEngine.subscribe((snapshot) => {
@@ -169,8 +208,10 @@ audioEngine.subscribe((snapshot) => {
 });
 
 editor.value = '';
-editor.focus();
-void tryAutoStartAudio();
+
+// Web Audio requires an explicit user gesture.
+// Keep the engine suspended until the user activates the startup gate.
+audioStartButton.focus();
 
 function must<T extends Element>(id: string): T {
   const el = document.getElementById(id);
@@ -179,6 +220,7 @@ function must<T extends Element>(id: string): T {
 }
 
 function showScreen(next: Screen): void {
+  if (next !== 'live') clearDiagnostic();
   screen = next;
   liveScreen.classList.toggle('hidden', next !== 'live');
   configScreen.classList.toggle('hidden', next !== 'config');
@@ -243,8 +285,95 @@ function notify(text: string): void {
   messageTimer = window.setTimeout(() => message.classList.remove('visible'), 1800);
 }
 
+function normalizeLanguageCommandCase(): void {
+  const normalized = editor.value
+    .replace(
+      /^(\s*)(voice|fx|mod|play|set|clock|main)\b/gim,
+      (_match, indentation: string, commandName: string) => `${indentation}${commandName.toUpperCase()}`,
+    )
+    .replace(
+      /^(\s*PLAY\s+[A-Za-z_]\w*(?:\.(?:out|aux))?\s+through\s+)main(?:\.([lr]))?/gim,
+      (_match, prefix: string, channel: string | undefined) =>
+        `${prefix}MAIN${channel ? `.${channel.toUpperCase()}` : ''}`,
+    )
+    .replace(
+      /^(\s*PLAY\b.*)$/gim,
+      (line: string) => line
+        .replace(/\bmain\b/gi, 'MAIN')
+        .replace(/\.([lr])\b/gi, (_match, channel: string) => `.${channel.toUpperCase()}`),
+    )
+    .replace(
+      /^(\s*(?:through|then)\b.*)$/gim,
+      (line: string) => line
+        .replace(/\bmain\b/gi, 'MAIN')
+        .replace(/\.([lr])\b/gi, (_match, channel: string) => `.${channel.toUpperCase()}`),
+    )
+    .replace(
+      /^(\s*scale\s+)([a-g])([#b]?)(?=\s|$)/gim,
+      (_match, prefix: string, note: string, accidental: string) =>
+        `${prefix}${note.toUpperCase()}${accidental}`,
+    );
+
+  if (normalized === editor.value) return;
+
+  const start = editor.selectionStart;
+  const end = editor.selectionEnd;
+  const direction = editor.selectionDirection ?? 'none';
+  editor.value = normalized;
+  editor.setSelectionRange(start, end, direction);
+}
+
 function sourceText(): string {
   return editor.value.replace(/\r\n/g, '\n');
+}
+
+function setCodeRunning(running: boolean): void {
+  codeRunning = running;
+  if (running) {
+    window.clearTimeout(previewTimer);
+    previewTimer = 0;
+  }
+  codeStatus.textContent = running ? '▶' : '○';
+  codeStatus.classList.toggle('disabled', !running);
+  codeStatus.setAttribute('aria-label', running ? 'code running' : 'code stopped');
+}
+
+function refreshStoppedPreview(): boolean {
+  if (codeRunning) return false;
+
+  try {
+    const source = sourceText();
+    const compiled = source.trim() ? compileLanguageSource(source) : '';
+    runtime.evaluate(compiled, { applyAudio: false });
+    clearDiagnostic();
+    syncViews();
+    return true;
+  } catch (error) {
+    // While editing with LIVE stopped, incomplete/invalid source is expected.
+    // Keep the last valid preview and avoid surfacing transient diagnostics.
+    if (error instanceof LanguageError || error instanceof SonusEvaluationError) return false;
+    return false;
+  }
+}
+
+function scheduleStoppedPreview(delay = 90): void {
+  if (codeRunning) return;
+  window.clearTimeout(previewTimer);
+  previewTimer = window.setTimeout(() => {
+    previewTimer = 0;
+    refreshStoppedPreview();
+  }, delay);
+}
+
+function recompileLiveCode(): boolean {
+  window.clearTimeout(previewTimer);
+  previewTimer = 0;
+  const applied = evaluateLiveSource();
+  if (applied && !codeRunning) {
+    setCodeRunning(true);
+    notify('live code running');
+  }
+  return applied;
 }
 
 function evaluateLiveSource(): boolean {
@@ -258,12 +387,21 @@ function evaluateLiveSource(): boolean {
       return true;
     }
 
-    const results = runtime.evaluate(source);
+    const compiled = compileLanguageSource(source);
+    const hasMasterClock = /^\s*CLOCK\b/im.test(source);
+    audioEngine.setClockTransport(hasMasterClock);
+    const results = runtime.evaluate(compiled);
     const last = results.at(-1);
     syncViews();
     notify(last?.message ?? 'ok');
     return true;
   } catch (error) {
+    if (error instanceof LanguageError) {
+      showDiagnostics(error.diagnostics);
+      syncViews();
+      return false;
+    }
+
     if (error instanceof SonusEvaluationError) {
       showDiagnostics(error.diagnostics);
       syncViews();
@@ -336,18 +474,12 @@ function syncViews(): void {
     }
 
     const details = [...parameterViews.values()].filter((view) => view.signal.startsWith(`${node.id}.`));
-    const dicesModuleView = moduleViews.has(node.id) && / : DICES$/i.test(node.label);
-    const dicesClockSource = dicesModuleView
-      ? scheme.connections.some((connection) => connection.target === node.id && connection.targetPort === 'CLOCK')
-        ? 'EXTERNAL'
-        : 'INTERNAL'
-      : undefined;
     const compositeSignals = moduleViews.has(node.id)
-      ? / : SWELL$/i.test(node.label)
+      ? / : (?:SWELL|MOD)$/i.test(node.label)
         ? [1, 2, 3, 4].map((port) => `${node.id}.out${port}`)
         : / : VOICE$/i.test(node.label)
           ? [`${node.id}.out`, `${node.id}.aux`]
-          : / : MIST$/i.test(node.label)
+          : / : (?:MIST|FX)$/i.test(node.label)
             ? [`${node.id}.out_L`, `${node.id}.out_R`]
             : []
       : [];
@@ -355,16 +487,14 @@ function syncViews(): void {
     // User-created modules exist in VARIABLES and SCHEME automatically, but a
     // LIVE monitor panel is created only by an explicit .view(). Merely
     // creating or changing a module must not consume monitor space.
-    if (signals.length === 0 && details.length === 0 && compositeSignals.length === 0 && !dicesModuleView) continue;
+    if (signals.length === 0 && details.length === 0 && compositeSignals.length === 0) continue;
 
     panels.push(buildModuleMonitorPanel({
       id: node.id,
       title: node.label,
-      parameters: node.parameters,
+      parameters: [],
       signals,
       compositeSignals,
-      dicesModule: dicesModuleView,
-      dicesClockSource,
       parameterDetails: details,
       defaultCollapsed: false,
     }));
@@ -400,6 +530,7 @@ function buildVariablesPanel(variables: Array<{ name: string; value: string }>):
       name.textContent = variable.name;
       const value = document.createElement('span');
       value.className = 'variable-value';
+      value.dataset.variableName = variable.name;
       value.textContent = variable.value;
       row.append(name, value);
       readout.append(row);
@@ -416,8 +547,6 @@ function buildModuleMonitorPanel(options: {
   signals: Array<{ signal: string; kind: string; label: string }>;
   compositeSignals?: string[];
   stereoLegend?: boolean;
-  dicesModule?: boolean;
-  dicesClockSource?: 'INTERNAL' | 'EXTERNAL';
   parameterDetails?: ParameterViewState[];
   defaultCollapsed: boolean;
 }): HTMLElement {
@@ -425,47 +554,6 @@ function buildModuleMonitorPanel(options: {
   const body = card.querySelector<HTMLElement>('.monitor-body');
   if (!body) return card;
 
-  if (options.dicesModule) {
-    const sequence = document.createElement('div');
-    sequence.className = 'dices-view';
-    sequence.dataset.module = options.id;
-    sequence.dataset.clockSource = options.dicesClockSource ?? 'INTERNAL';
-
-    const clock = document.createElement('div');
-    clock.className = 'dices-clock';
-    clock.innerHTML = `<span>CLOCK</span><span class="dices-clock-source">${options.dicesClockSource ?? 'INTERNAL'}</span><span class="dices-clock-dot">○</span>`;
-    sequence.append(clock);
-
-    for (const labelText of ['T1', 'T2', 'T3', 'X1', 'X2', 'X3']) {
-      const label = document.createElement('div');
-      label.className = 'dices-lane-label';
-      label.textContent = labelText;
-      sequence.append(label);
-
-      const lane = document.createElement('div');
-      lane.className = `dices-lane dices-lane-${labelText.toLowerCase()}`;
-      for (let step = 0; step < 8; step += 1) {
-        const cell = document.createElement('span');
-        cell.className = 'dices-step';
-        cell.textContent = labelText.startsWith('T') ? '·' : '--';
-        lane.append(cell);
-      }
-      sequence.append(lane);
-    }
-
-    const y = document.createElement('div');
-    y.className = 'dices-y';
-    const yHeader = document.createElement('div');
-    yHeader.className = 'dices-y-header';
-    yHeader.innerHTML = '<span>Y</span><span class="dices-y-value">--</span>';
-    const yCanvas = document.createElement('canvas');
-    yCanvas.className = 'scope-canvas view-signal dices-y-scope';
-    yCanvas.dataset.signal = `${options.id}.y`;
-    yCanvas.dataset.kind = 'signal';
-    y.append(yHeader, yCanvas);
-    sequence.append(y);
-    body.append(sequence);
-  }
 
   if ((options.compositeSignals?.length ?? 0) > 0) {
     const section = document.createElement('div');
@@ -474,22 +562,38 @@ function buildModuleMonitorPanel(options: {
     label.className = 'monitor-section-label';
     label.textContent = options.id === 'Audio'
       ? 'STEREO OUT'
-      : options.title.endsWith(': MIST')
+      : (/: (?:MIST|FX)$/.test(options.title))
         ? 'OUT L / R'
         : options.compositeSignals!.length === 2
           ? 'OUT / AUX'
-          : 'OUT 1-4';
+          : options.title.endsWith(': MOD')
+            ? 'A / B / C / D'
+            : 'OUT 1-4';
 
-    if (options.stereoLegend) {
+    if (options.stereoLegend || (/: (?:MIST|FX)$/.test(options.title) && options.compositeSignals?.length === 2)) {
       const legend = document.createElement('span');
       legend.className = 'scope-stereo-legend';
       legend.innerHTML = '<span class="scope-legend-l">● L</span><span class="scope-legend-r">● R</span>';
+      label.append(legend);
+    } else if (options.title.endsWith(': MOD') && options.compositeSignals?.length === 4) {
+      const legend = document.createElement('span');
+      legend.className = 'scope-stereo-legend';
+      legend.innerHTML = [
+        '<span style="color:var(--scope-trace-1)">● A</span>',
+        '<span style="color:var(--scope-trace-2)">● B</span>',
+        '<span style="color:var(--scope-trace-3)">● C</span>',
+        '<span style="color:var(--scope-trace-4)">● D</span>',
+      ].join('');
       label.append(legend);
     }
     const canvas = document.createElement('canvas');
     canvas.className = 'scope-canvas view-signal composite-scope';
     canvas.dataset.signals = options.compositeSignals!.join(',');
     canvas.dataset.kind = 'multi-signal';
+    if (options.title.endsWith(': MOD')) {
+      canvas.dataset.modScope = 'true';
+      canvas.dataset.modName = options.id;
+    }
     canvas.setAttribute('aria-label', `${options.title} multi-channel signal monitor`);
     section.append(label, canvas);
     body.append(section);
@@ -657,98 +761,28 @@ function applySavedPanelOrder(): void {
   for (const card of cards) viewStack.append(card);
 }
 
-function voltageToNote(voltage: number): string {
-  const midi = Math.round(48 + voltage * 12);
-  const names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
-  const note = names[((midi % 12) + 12) % 12];
-  const octave = Math.floor(midi / 12) - 1;
-  return `${note}${octave}`;
-}
 
-function updateDicesViews(): void {
-  const views = [...document.querySelectorAll<HTMLElement>('.dices-view[data-module]')];
-  for (const view of views) {
-    const name = view.dataset.module;
+function updateVariableValues(): void {
+  const values = new Map(runtime.getVariableViews().map((variable) => [variable.name, variable.value]));
+  for (const element of document.querySelectorAll<HTMLElement>('.variable-value[data-variable-name]')) {
+    const name = element.dataset.variableName;
     if (!name) continue;
-
-    let history = dicesHistories.get(name);
-    if (!history) {
-      history = {
-        previousT2: false,
-        t: [[], [], []],
-        x: [[], [], []],
-      };
-      dicesHistories.set(name, history);
-    }
-
-    const t = [1, 2, 3].map((port) => (audioEngine.readLatestSignal(`${name}.t${port}`) ?? 0) > 0.3);
-    const x = [1, 2, 3].map((port) => audioEngine.readLatestSignal(`${name}.x${port}`) ?? 0);
-    const t2Rising = t[1] && !history.previousT2;
-    history.previousT2 = t[1];
-
-    const dot = view.querySelector<HTMLElement>('.dices-clock-dot');
-    if (dot) {
-      dot.textContent = t[1] ? '●' : '○';
-      dot.classList.toggle('active', t[1]);
-    }
-
-    const clockSource = view.querySelector<HTMLElement>('.dices-clock-source');
-    if (clockSource) {
-      const source = view.dataset.clockSource;
-      if (source) {
-        clockSource.textContent = source;
-      } else {
-        const scheme = runtime.getSchemeModel();
-        clockSource.textContent = scheme.connections.some(
-          (connection) => connection.target === name && connection.targetPort === 'CLOCK',
-        ) ? 'EXTERNAL' : 'INTERNAL';
-      }
-    }
-
-    if (t2Rising) {
-      for (let lane = 0; lane < 3; lane += 1) {
-        history.t[lane].push(t[lane]);
-        history.x[lane].push(x[lane]);
-        if (history.t[lane].length > 8) history.t[lane].shift();
-        if (history.x[lane].length > 8) history.x[lane].shift();
-      }
-    }
-
-    for (let lane = 0; lane < 3; lane += 1) {
-      const tCells = [...view.querySelectorAll<HTMLElement>(`.dices-lane-t${lane + 1} .dices-step`)];
-      const xCells = [...view.querySelectorAll<HTMLElement>(`.dices-lane-x${lane + 1} .dices-step`)];
-      const visible = tCells.length;
-      const tValues = history.t[lane].slice(-visible);
-      const xValues = history.x[lane].slice(-visible);
-
-      tCells.forEach((cell, index) => {
-        const offset = visible - tValues.length;
-        const active = index >= offset ? tValues[index - offset] : false;
-        cell.textContent = active ? '●' : '·';
-        cell.classList.toggle('active', active);
-      });
-
-      xCells.forEach((cell, index) => {
-        const offset = visible - xValues.length;
-        cell.textContent = index >= offset ? voltageToNote(xValues[index - offset]) : '--';
-      });
-    }
-
-    const y = audioEngine.readLatestSignal(`${name}.y`);
-    const yValue = view.querySelector<HTMLElement>('.dices-y-value');
-    if (yValue && y !== null) yValue.textContent = `${y >= 0 ? '+' : ''}${y.toFixed(2)}V`;
+    const value = values.get(name);
+    if (value !== undefined) element.textContent = value;
   }
 }
 
 function drawScopes(): void {
   scopeFrame = 0;
+  updateVariableValues();
   updateSchemeLiveValues();
-  updateDicesViews();
   const canvases = [...document.querySelectorAll<HTMLCanvasElement>('canvas.scope-canvas')];
   const liveValues = document.querySelectorAll<HTMLElement>('.scheme-live-value');
   if (canvases.length === 0 && liveValues.length === 0) return;
 
   const phosphor = getComputedStyle(document.documentElement).getPropertyValue('--phosphor-hot').trim() || '#ffe783';
+
+
   for (const canvas of canvases) {
     const signal = canvas.dataset.signal;
     const compositeSignals = canvas.dataset.signals?.split(',').filter(Boolean) ?? [];
@@ -779,6 +813,7 @@ function drawScopes(): void {
         styles.getPropertyValue('--scope-trace-3').trim() || phosphor,
         styles.getPropertyValue('--scope-trace-4').trim() || phosphor,
       ];
+
       compositeSignals.forEach((traceSignal, traceIndex) => {
         const data = new Float32Array(512);
         if (!audioEngine.readOscilloscope(traceSignal, data)) return;
@@ -788,7 +823,7 @@ function drawScopes(): void {
         ctx.beginPath();
         for (let i = 0; i < data.length; i += 1) {
           const x = (i / (data.length - 1)) * width;
-          const y = height * 0.5 - data[i] * height * 0.38;
+          const y = height * 0.5 - data[i] * height * 0.42;
           if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
         }
         ctx.stroke();
@@ -945,32 +980,6 @@ function buildSchemeNode(node: SchemeNode): HTMLElement {
   }
 
   for (const view of node.views ?? []) {
-    if (/ : DICES$/i.test(node.label) && view.port === 'SEQUENCE') {
-      const dedicated = document.createElement('div');
-      dedicated.className = 'dices-view dices-view-scheme';
-      dedicated.dataset.module = node.id;
-      const clock = document.createElement('div');
-      clock.className = 'dices-clock';
-      clock.innerHTML = '<span>CLOCK</span><span class="dices-clock-source">--</span><span class="dices-clock-dot">○</span>';
-      dedicated.append(clock);
-      for (const labelText of ['T1', 'T2', 'T3', 'X1', 'X2', 'X3']) {
-        const label = document.createElement('div');
-        label.className = 'dices-lane-label';
-        label.textContent = labelText;
-        dedicated.append(label);
-        const lane = document.createElement('div');
-        lane.className = `dices-lane dices-lane-${labelText.toLowerCase()}`;
-        for (let step = 0; step < 4; step += 1) {
-          const cell = document.createElement('span');
-          cell.className = 'dices-step';
-          cell.textContent = labelText.startsWith('T') ? '·' : '--';
-          lane.append(cell);
-        }
-        dedicated.append(lane);
-      }
-      element.append(dedicated);
-      continue;
-    }
 
     const embedded = document.createElement('div');
     embedded.className = 'scheme-embedded-view';
@@ -986,6 +995,10 @@ function buildSchemeNode(node: SchemeNode): HTMLElement {
       canvas.dataset.signals = view.signals.join(',');
       canvas.dataset.kind = 'multi-signal';
       canvas.classList.add('composite-scope');
+      if (node.label.endsWith(': MOD') && view.signals.length === 4) {
+        canvas.dataset.modScope = 'true';
+        canvas.dataset.modName = node.id;
+      }
     } else {
       canvas.dataset.kind = view.signalKind;
     }
@@ -1281,58 +1294,14 @@ function statementLabels(source: string): string[] {
   const lines = source.split('\n');
   const labels = Array(lines.length).fill('') as string[];
   let statement = 0;
-  let pending = false;
-  let braceDepth = 0;
-  let quote: '"' | "'" | null = null;
-  let escaped = false;
 
-  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-    const line = lines[lineIndex];
-    let hasCode = false;
-    let topLevelTerminator = false;
-
-    for (let i = 0; i < line.length; i += 1) {
-      const char = line[i];
-      const next = line[i + 1];
-
-      if (quote) {
-        hasCode = true;
-        if (escaped) escaped = false;
-        else if (char === '\\') escaped = true;
-        else if (char === quote) quote = null;
-        continue;
-      }
-
-      if (char === '"' || char === "'") {
-        quote = char;
-        hasCode = true;
-        continue;
-      }
-
-      if (char === '/' && next === '/') break;
-      if (!/\s/.test(char)) hasCode = true;
-
-      if (char === '{') {
-        braceDepth += 1;
-        continue;
-      }
-
-      if (char === '}') {
-        braceDepth = Math.max(0, braceDepth - 1);
-        if (braceDepth === 0) topLevelTerminator = true;
-        continue;
-      }
-
-      if (char === ';' && braceDepth === 0) topLevelTerminator = true;
-    }
-
-    if (hasCode && !pending) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const trimmed = lines[index].trim();
+    if (!trimmed || trimmed.startsWith('//')) continue;
+    if (/^(VOICE|SET|CLOCK|PLAY)\b/i.test(trimmed)) {
       statement += 1;
-      labels[lineIndex] = String(statement);
-      pending = true;
+      labels[index] = String(statement);
     }
-
-    if (topLevelTerminator) pending = false;
   }
 
   return labels;
@@ -1347,51 +1316,6 @@ function statementNumberForPhysicalLine(labels: string[], physicalLine: number):
   return null;
 }
 
-function statementCompleteBeforeCaret(source: string): boolean {
-  let quote: '"' | "'" | null = null;
-  let escaped = false;
-  let inComment = false;
-  let braceDepth = 0;
-  let lastSignificant = '';
-
-  for (let i = 0; i < source.length; i += 1) {
-    const char = source[i];
-    const next = source[i + 1];
-
-    if (inComment) {
-      if (char === '\n') inComment = false;
-      continue;
-    }
-
-    if (quote) {
-      if (escaped) escaped = false;
-      else if (char === '\\') escaped = true;
-      else if (char === quote) quote = null;
-      continue;
-    }
-
-    if (char === '"' || char === "'") {
-      quote = char;
-      lastSignificant = char;
-      continue;
-    }
-
-    if (char === '/' && next === '/') {
-      inComment = true;
-      i += 1;
-      continue;
-    }
-
-    if (char === '{') braceDepth += 1;
-    else if (char === '}') braceDepth = Math.max(0, braceDepth - 1);
-
-    if (!/\s/.test(char)) lastSignificant = char;
-  }
-
-  if (braceDepth > 0) return false;
-  return lastSignificant === ';' || lastSignificant === '}';
-}
-
 function renderSyntaxLayer(): void {
   const source = editor.value;
   const editorStyle = getComputedStyle(editor);
@@ -1403,7 +1327,7 @@ function renderSyntaxLayer(): void {
   syntaxLayer.style.letterSpacing = editorStyle.letterSpacing;
   syntaxLayer.replaceChildren();
   const lines = source.split('\n');
-  lines.forEach((line, index) => {
+  lines.forEach((line) => {
     const row = document.createElement('div');
     row.className = 'syntax-line';
     const commentAt = commentStart(line);
@@ -1510,25 +1434,58 @@ function caretRect(): DOMRect | null {
   return new DOMRect(left, top, 0, markerRect.height || Number.parseFloat(style.lineHeight) || 24);
 }
 
+function leaveBlockCaretTrail(): void {
+  if (screen !== 'live' || commandMode || document.activeElement !== editor) return;
+  if (blockCaret.classList.contains('hidden')) return;
+
+  const left = blockCaret.style.left;
+  const top = blockCaret.style.top;
+  if (!left || !top) return;
+
+  const trail = document.createElement('span');
+  trail.className = 'block-caret-trail';
+  trail.style.fontSize = blockCaret.style.fontSize;
+  trail.style.left = left;
+  trail.style.top = top;
+  phosphorLayer.append(trail);
+  window.setTimeout(() => trail.remove(), 360);
+}
+
 function positionBlockCaret(): void {
   if (screen !== 'live' || commandMode || document.activeElement !== editor) {
     blockCaret.classList.add('hidden');
+    lastCaretTrailPosition = null;
     return;
   }
 
   const rect = caretRect();
   if (!rect) {
     blockCaret.classList.add('hidden');
+    lastCaretTrailPosition = null;
     return;
   }
 
   const host = phosphorLayer.getBoundingClientRect();
   const editorStyle = getComputedStyle(editor);
   const fontSize = Number.parseFloat(editorStyle.fontSize) || 20;
+  const left = rect.left - host.left;
+  const caretHeight = fontSize * 0.92;
+  const top = rect.top - host.top + Math.max(0, (rect.height - caretHeight) * 0.5);
+
+  if (lastCaretTrailPosition && (Math.abs(lastCaretTrailPosition.left - left) > 0.5 || Math.abs(lastCaretTrailPosition.top - top) > 0.5)) {
+    const trail = document.createElement('span');
+    trail.className = 'block-caret-trail';
+    trail.style.fontSize = `${fontSize}px`;
+    trail.style.left = `${lastCaretTrailPosition.left}px`;
+    trail.style.top = `${lastCaretTrailPosition.top}px`;
+    phosphorLayer.append(trail);
+    window.setTimeout(() => trail.remove(), 360);
+  }
+
+  lastCaretTrailPosition = { left, top };
   blockCaret.style.fontSize = `${fontSize}px`;
-  blockCaret.style.left = `${rect.left - host.left}px`;
-  const caretHeight = fontSize * 0.78;
-  blockCaret.style.top = `${rect.top - host.top + Math.max(0, (rect.height - caretHeight) * 0.5)}px`;
+  blockCaret.style.left = `${left}px`;
+  blockCaret.style.top = `${top}px`;
   blockCaret.classList.remove('hidden');
 }
 
@@ -1547,6 +1504,14 @@ function flashAtCaret(text: string): void {
   pulse.style.top = `${rect.top - host.top + Math.max(0, (rect.height - fontSize * 0.82) * 0.5)}px`;
   phosphorLayer.appendChild(pulse);
   window.setTimeout(() => pulse.remove(), 320);
+}
+
+function stopLiveCode(): void {
+  runtime.stopExecution();
+  audioEngine.setClockTransport(false);
+  setCodeRunning(false);
+  syncViews();
+  notify('live code stopped');
 }
 
 async function runCommand(raw: string): Promise<void> {
@@ -1572,6 +1537,7 @@ async function runCommand(raw: string): Promise<void> {
     case 'clear':
       setSourceText('');
       runtime.evaluate('');
+      setCodeRunning(false);
       syncViews();
       leaveCommandMode();
       notify('source cleared');
@@ -1584,6 +1550,24 @@ async function runCommand(raw: string): Promise<void> {
       leaveCommandMode();
       await loadSource();
       return;
+    case 'run': {
+      leaveCommandMode();
+      const action = args[0]?.toLowerCase();
+      if (action === 'stop') {
+        stopLiveCode();
+        return;
+      }
+      if (action !== undefined) {
+        notify('usage: :run | :run stop');
+        return;
+      }
+      const applied = evaluateLiveSource();
+      if (applied) {
+        setCodeRunning(true);
+        notify('live code running');
+      }
+      return;
+    }
     case 'start':
       leaveCommandMode();
       try {
@@ -1683,20 +1667,27 @@ async function loadSource(): Promise<void> {
     const file = input.files?.[0];
     if (!file) return;
     setSourceText(await file.text());
-    const applied = evaluateLiveSource();
+    const applied = codeRunning ? evaluateLiveSource() : refreshStoppedPreview();
     if (applied) notify(`loaded ${file.name}`);
     else notify(`loaded ${file.name} — runtime unchanged`);
   }, { once: true });
   input.click();
 }
 
+audioStartButton.addEventListener('click', () => {
+  void startAudioFromOverlay();
+});
+
 document.addEventListener('selectionchange', () => requestAnimationFrame(positionBlockCaret));
 editor.addEventListener('input', () => {
+  normalizeLanguageCommandCase();
   renderSyntaxLayer();
   renderLineGutter();
+  scheduleStoppedPreview();
   requestAnimationFrame(positionBlockCaret);
 });
 editor.addEventListener('keyup', () => requestAnimationFrame(positionBlockCaret));
+editor.addEventListener('pointerdown', () => leaveBlockCaretTrail());
 editor.addEventListener('pointerup', () => requestAnimationFrame(positionBlockCaret));
 liveScreen.addEventListener('scroll', () => {
   clearDiagnostic();
@@ -1711,7 +1702,6 @@ window.addEventListener('resize', () => {
   renderLineGutter();
   requestAnimationFrame(positionBlockCaret);
 });
-window.addEventListener('keydown', retryAutoStartFromGesture, { capture: true });
 
 editor.addEventListener('beforeinput', (event) => {
   const input = event as InputEvent;
@@ -1719,15 +1709,28 @@ editor.addEventListener('beforeinput', (event) => {
 });
 
 editor.addEventListener('keydown', (event) => {
+  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) {
+    leaveBlockCaretTrail();
+  }
+
   if (event.key === 'Escape') {
     event.preventDefault();
     enterCommandMode();
     return;
   }
 
+  if (event.key === 'Backspace' && event.metaKey) {
+    event.preventDefault();
+    event.stopPropagation();
+    stopLiveCode();
+    requestAnimationFrame(positionBlockCaret);
+    return;
+  }
+
   if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
     event.preventDefault();
-    evaluateLiveSource();
+    normalizeLanguageCommandCase();
+    recompileLiveCode();
     requestAnimationFrame(positionBlockCaret);
     return;
   }
@@ -1735,16 +1738,26 @@ editor.addEventListener('keydown', (event) => {
   if (event.key === 'Enter') {
     event.preventDefault();
 
+    normalizeLanguageCommandCase();
+
     const start = editor.selectionStart;
     const end = editor.selectionEnd;
     const before = editor.value.slice(0, start);
-    const complete = statementCompleteBeforeCaret(before);
-    const indentation = complete ? '' : '    ';
+    const currentLine = before.slice(before.lastIndexOf('\n') + 1);
+    const trimmed = currentLine.trim();
+    const currentIndent = currentLine.match(/^\s*/)?.[0] ?? '';
+
+    let indentation = currentIndent;
+    if (!trimmed) indentation = currentIndent.length >= 4 ? currentIndent.slice(0, -4) : '';
+    else if (/^(VOICE|FX|MOD)\b.*:\s*$/i.test(trimmed)) indentation = `${currentIndent}    `;
+    else if (/^PLAY\b/i.test(trimmed) && !/\bthrough\b/i.test(trimmed)) indentation = `${currentIndent}    `;
+    else if (currentIndent.length > 0 && /^(through|then)\b/i.test(trimmed)) indentation = currentIndent;
+
     editor.setRangeText(`\n${indentation}`, start, end, 'end');
 
     renderSyntaxLayer();
     renderLineGutter();
-    if (!event.shiftKey && complete) evaluateLiveSource();
+    scheduleStoppedPreview();
 
     requestAnimationFrame(positionBlockCaret);
     return;
@@ -1755,6 +1768,7 @@ editor.addEventListener('keydown', (event) => {
     const start = editor.selectionStart;
     const end = editor.selectionEnd;
     editor.setRangeText('  ', start, end, 'end');
+    scheduleStoppedPreview();
     requestAnimationFrame(positionBlockCaret);
   }
 });
@@ -1773,6 +1787,18 @@ command.addEventListener('keydown', (event) => {
 });
 
 document.addEventListener('keydown', (event) => {
+  if (!audioStartOverlay.classList.contains('hidden')) {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      void startAudioFromOverlay();
+    } else if (event.key === 'Tab') {
+      event.preventDefault();
+      audioStartButton.focus();
+    }
+    return;
+  }
+
   if (commandMode) return;
 
   if (event.key === 'Tab' && !event.shiftKey) {
@@ -1791,12 +1817,12 @@ document.addEventListener('keydown', (event) => {
 }, { capture: true });
 
 window.addEventListener('pointerdown', (event) => {
-  retryAutoStartFromGesture();
   if (screen !== 'live' || commandMode) return;
   if (event.target === editor || editor.contains(event.target as Node)) return;
   editor.focus();
   requestAnimationFrame(positionBlockCaret);
 });
 
+setCodeRunning(false);
 renderSyntaxLayer();
 requestAnimationFrame(renderLineGutter);

@@ -59,6 +59,20 @@ void su_swell_destroy(SwellState* state) {
   delete state;
 }
 
+void su_swell_reset(SwellState* state) {
+  if (!state) return;
+  state->generator.Reset();
+  state->ramp_extractor.Reset();
+  state->previous_trigger = stmlib::GATE_FLAG_LOW;
+  state->previous_clock = stmlib::GATE_FLAG_LOW;
+  std::fill(state->trigger, state->trigger + kRenderCapacity, 0.0f);
+  std::fill(state->clock, state->clock + kRenderCapacity, 0.0f);
+  std::fill(state->v_oct_input, state->v_oct_input + kRenderCapacity, 0.0f);
+  for (auto& channel : state->output) {
+    std::fill(channel, channel + kRenderCapacity, 0.0f);
+  }
+}
+
 void su_swell_set_sample_rate(SwellState* state, float value) {
   if (state && std::isfinite(value) && value > 1000.0f) {
     state->sample_rate = value;
@@ -181,7 +195,7 @@ void su_swell_process(SwellState* state, int size) {
     for (int channel = 0; channel < 4; ++channel) {
       // Preserve Tides' Eurorack-like logical voltage range. Destinations such
       // as Voice parameter CV inputs apply their own ±5V normalization.
-      state->output[channel][i] = frames[i].channel[channel];
+      state->output[channel][i] = frames[i].channel[channel] * 5.0f;
     }
   }
 }
