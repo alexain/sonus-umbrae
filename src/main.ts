@@ -61,6 +61,7 @@ app.innerHTML = `
           <span>:PANIC</span><span>STOP CURRENT AUDIO IMMEDIATELY</span>
           <span>ENTER</span><span>INSERT NEW LINE</span>
           <span>CMD/CTRL+ENTER</span><span>RECOMPILE / START LIVE CODE</span>
+          <span>CMD+BACKSPACE</span><span>STOP LIVE CODE</span>
         </div>
         <div class="system-copy muted">ESC  RETURN TO LIVE</div>
       </div>
@@ -287,13 +288,20 @@ function notify(text: string): void {
 function normalizeLanguageCommandCase(): void {
   const normalized = editor.value
     .replace(
-      /^(\s*)(voice|play|set|clock)\b/gim,
+      /^(\s*)(voice|mod|play|set|clock|main)\b/gim,
       (_match, indentation: string, commandName: string) => `${indentation}${commandName.toUpperCase()}`,
     )
     .replace(
-      /^(\s*PLAY\s+[A-Za-z_]\w*\s+through\s+)main\b/gim,
-      (_match, prefix: string) => `${prefix}MAIN`,
+      /^(\s*PLAY\s+[A-Za-z_]\w*(?:\.(?:out|aux))?\s+through\s+)main(?:\.([lr]))?/gim,
+      (_match, prefix: string, channel: string | undefined) =>
+        `${prefix}MAIN${channel ? `.${channel.toUpperCase()}` : ''}`,
+    )
+    .replace(
+      /^(\s*scale\s+)([a-g])([#b]?)(?=\s|$)/gim,
+      (_match, prefix: string, note: string, accidental: string) =>
+        `${prefix}${note.toUpperCase()}${accidental}`,
     );
+
   if (normalized === editor.value) return;
 
   const start = editor.selectionStart;
@@ -472,7 +480,7 @@ function syncViews(): void {
 
     const details = [...parameterViews.values()].filter((view) => view.signal.startsWith(`${node.id}.`));
     const compositeSignals = moduleViews.has(node.id)
-      ? / : SWELL$/i.test(node.label)
+      ? / : (?:SWELL|MOD)$/i.test(node.label)
         ? [1, 2, 3, 4].map((port) => `${node.id}.out${port}`)
         : / : VOICE$/i.test(node.label)
           ? [`${node.id}.out`, `${node.id}.aux`]
@@ -489,7 +497,7 @@ function syncViews(): void {
     panels.push(buildModuleMonitorPanel({
       id: node.id,
       title: node.label,
-      parameters: node.parameters,
+      parameters: [],
       signals,
       compositeSignals,
       parameterDetails: details,
@@ -563,18 +571,34 @@ function buildModuleMonitorPanel(options: {
         ? 'OUT L / R'
         : options.compositeSignals!.length === 2
           ? 'OUT / AUX'
-          : 'OUT 1-4';
+          : options.title.endsWith(': MOD')
+            ? 'A / B / C / D'
+            : 'OUT 1-4';
 
     if (options.stereoLegend) {
       const legend = document.createElement('span');
       legend.className = 'scope-stereo-legend';
       legend.innerHTML = '<span class="scope-legend-l">● L</span><span class="scope-legend-r">● R</span>';
       label.append(legend);
+    } else if (options.title.endsWith(': MOD') && options.compositeSignals?.length === 4) {
+      const legend = document.createElement('span');
+      legend.className = 'scope-stereo-legend';
+      legend.innerHTML = [
+        '<span style="color:var(--scope-trace-1)">● A</span>',
+        '<span style="color:var(--scope-trace-2)">● B</span>',
+        '<span style="color:var(--scope-trace-3)">● C</span>',
+        '<span style="color:var(--scope-trace-4)">● D</span>',
+      ].join('');
+      label.append(legend);
     }
     const canvas = document.createElement('canvas');
     canvas.className = 'scope-canvas view-signal composite-scope';
     canvas.dataset.signals = options.compositeSignals!.join(',');
     canvas.dataset.kind = 'multi-signal';
+    if (options.title.endsWith(': MOD')) {
+      canvas.dataset.modScope = 'true';
+      canvas.dataset.modName = options.id;
+    }
     canvas.setAttribute('aria-label', `${options.title} multi-channel signal monitor`);
     section.append(label, canvas);
     body.append(section);
@@ -762,6 +786,8 @@ function drawScopes(): void {
   if (canvases.length === 0 && liveValues.length === 0) return;
 
   const phosphor = getComputedStyle(document.documentElement).getPropertyValue('--phosphor-hot').trim() || '#ffe783';
+
+
   for (const canvas of canvases) {
     const signal = canvas.dataset.signal;
     const compositeSignals = canvas.dataset.signals?.split(',').filter(Boolean) ?? [];
@@ -792,6 +818,7 @@ function drawScopes(): void {
         styles.getPropertyValue('--scope-trace-3').trim() || phosphor,
         styles.getPropertyValue('--scope-trace-4').trim() || phosphor,
       ];
+
       compositeSignals.forEach((traceSignal, traceIndex) => {
         const data = new Float32Array(512);
         if (!audioEngine.readOscilloscope(traceSignal, data)) return;
@@ -801,7 +828,7 @@ function drawScopes(): void {
         ctx.beginPath();
         for (let i = 0; i < data.length; i += 1) {
           const x = (i / (data.length - 1)) * width;
-          const y = height * 0.5 - data[i] * height * 0.38;
+          const y = height * 0.5 - data[i] * height * 0.42;
           if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
         }
         ctx.stroke();
@@ -973,6 +1000,10 @@ function buildSchemeNode(node: SchemeNode): HTMLElement {
       canvas.dataset.signals = view.signals.join(',');
       canvas.dataset.kind = 'multi-signal';
       canvas.classList.add('composite-scope');
+      if (node.label.endsWith(': MOD') && view.signals.length === 4) {
+        canvas.dataset.modScope = 'true';
+        canvas.dataset.modName = node.id;
+      }
     } else {
       canvas.dataset.kind = view.signalKind;
     }
@@ -1493,6 +1524,14 @@ function flashAtCaret(text: string): void {
   window.setTimeout(() => pulse.remove(), 320);
 }
 
+function stopLiveCode(): void {
+  runtime.stopExecution();
+  audioEngine.setClockTransport(false);
+  setCodeRunning(false);
+  syncViews();
+  notify('live code stopped');
+}
+
 async function runCommand(raw: string): Promise<void> {
   const [name = '', ...args] = raw.trim().toLowerCase().split(/\s+/);
 
@@ -1533,11 +1572,7 @@ async function runCommand(raw: string): Promise<void> {
       leaveCommandMode();
       const action = args[0]?.toLowerCase();
       if (action === 'stop') {
-        runtime.stopExecution();
-        audioEngine.setClockTransport(false);
-        setCodeRunning(false);
-        syncViews();
-        notify('live code stopped');
+        stopLiveCode();
         return;
       }
       if (action !== undefined) {
@@ -1702,6 +1737,14 @@ editor.addEventListener('keydown', (event) => {
     return;
   }
 
+  if (event.key === 'Backspace' && event.metaKey) {
+    event.preventDefault();
+    event.stopPropagation();
+    stopLiveCode();
+    requestAnimationFrame(positionBlockCaret);
+    return;
+  }
+
   if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
     event.preventDefault();
     normalizeLanguageCommandCase();
@@ -1723,8 +1766,8 @@ editor.addEventListener('keydown', (event) => {
     const currentIndent = currentLine.match(/^\s*/)?.[0] ?? '';
 
     let indentation = currentIndent;
-    if (!trimmed) indentation = '';
-    else if (/^VOICE\b.*:\s*$/i.test(trimmed)) indentation = '    ';
+    if (!trimmed) indentation = currentIndent.length >= 4 ? currentIndent.slice(0, -4) : '';
+    else if (/^(VOICE|MOD)\b.*:\s*$/i.test(trimmed)) indentation = `${currentIndent}    `;
 
     editor.setRangeText(`\n${indentation}`, start, end, 'end');
 

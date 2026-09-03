@@ -14,6 +14,7 @@ const DEFAULT_HARDWARE_OUTPUT_GAIN = 0.12;
 
 export interface AudioProgram {
   clock: { bpm: number };
+  mainLevel: number;
   clockSources: Array<{ name: string; rate: number }>;
   oscillators: Array<{
     name: string;
@@ -22,6 +23,8 @@ export interface AudioProgram {
   voices: Array<{
     name: string;
     model: number;
+    lpg: boolean;
+    level: number;
     frequency: number;
     harmo: number;
     timbre: number;
@@ -87,11 +90,15 @@ interface GainVoice {
 
 interface MacroVoice {
   node: AudioWorkletNode;
+  outGain: GainNode;
+  auxGain: GainNode;
   vOctInput: GainNode;
   harmoInput: GainNode;
   timbreInput: GainNode;
   morphInput: GainNode;
   model: number;
+  lpg: boolean;
+  level: number;
   frequency: number;
   harmo: number;
   timbre: number;
@@ -108,6 +115,7 @@ interface SwellVoice {
   mode: number;
   outputMode: number;
   range: number;
+  monitorValues: [number, number, number, number];
 }
 
 
@@ -254,6 +262,12 @@ export class AudioEngine {
     }
 
     this.masterClockBpm = program.clock.bpm;
+    const context = this.ensureContext();
+    if (this.audioOutL && this.audioOutR) {
+      const level = Math.max(0, Math.min(1, program.mainLevel / 100));
+      this.audioOutL.gain.setTargetAtTime(level, context.currentTime, 0.008);
+      this.audioOutR.gain.setTargetAtTime(level, context.currentTime, 0.008);
+    }
     const desiredClockSources = new Map(program.clockSources.map((definition) => [definition.name, definition]));
     const desiredOscillators = new Map(program.oscillators.map((definition) => [definition.name, definition]));
     const desiredVoices = new Map(program.voices.map((definition) => [definition.name, definition]));
@@ -313,6 +327,7 @@ export class AudioEngine {
       this.createSwell(definition);
       this.updateSwell(definition);
     }
+    this.setModTransport(true);
 
 
     for (const definition of program.mists) {
@@ -368,10 +383,16 @@ export class AudioEngine {
       outputChannelCount: [1, 1],
       processorOptions: { wasmBytes },
     });
+    const outGain = context.createGain();
+    const auxGain = context.createGain();
     const vOctInput = context.createGain();
     const harmoInput = context.createGain();
     const timbreInput = context.createGain();
     const morphInput = context.createGain();
+    outGain.gain.value = definition.level / 100;
+    auxGain.gain.value = definition.level / 100;
+    node.connect(outGain, 0, 0);
+    node.connect(auxGain, 1, 0);
     vOctInput.gain.value = 1;
     harmoInput.gain.value = 1;
     timbreInput.gain.value = 1;
@@ -383,11 +404,15 @@ export class AudioEngine {
 
     this.voices.set(definition.name, {
       node,
+      outGain,
+      auxGain,
       vOctInput,
       harmoInput,
       timbreInput,
       morphInput,
       model: definition.model,
+      lpg: definition.lpg,
+      level: definition.level,
       frequency: definition.frequency,
       harmo: definition.harmo,
       timbre: definition.timbre,
@@ -399,6 +424,11 @@ export class AudioEngine {
     const voice = this.voices.get(definition.name);
     if (!voice) return;
     voice.model = definition.model;
+    voice.lpg = definition.lpg;
+    voice.level = definition.level;
+    const level = Math.max(0, Math.min(1, definition.level / 100));
+    voice.outGain.gain.setTargetAtTime(level, this.ensureContext().currentTime, 0.008);
+    voice.auxGain.gain.setTargetAtTime(level, this.ensureContext().currentTime, 0.008);
     voice.frequency = definition.frequency;
     voice.harmo = definition.harmo;
     voice.timbre = definition.timbre;
@@ -406,6 +436,7 @@ export class AudioEngine {
     voice.node.port.postMessage({
       type: 'params',
       model: definition.model,
+      lpg: definition.lpg,
       frequency: definition.frequency,
       harmo: definition.harmo / 100,
       timbre: definition.timbre / 100,
@@ -435,7 +466,19 @@ export class AudioEngine {
       mode: definition.mode,
       outputMode: definition.outputMode,
       range: definition.range,
+      monitorValues: [0, 0, 0, 0],
     });
+
+    node.port.onmessage = (event) => {
+      const message = event.data;
+      if (!message || message.type !== 'monitor' || !Array.isArray(message.values)) return;
+      const swell = this.swells.get(definition.name);
+      if (!swell) return;
+      for (let channel = 0; channel < 4; channel += 1) {
+        const value = Number(message.values[channel]);
+        swell.monitorValues[channel] = Number.isFinite(value) ? value : 0;
+      }
+    };
   }
 
   private updateSwell(definition: AudioProgram['swells'][number]): void {
@@ -661,8 +704,9 @@ export class AudioEngine {
     const view = this.views.get(signal);
     if (!view) return false;
 
-    const swellMatch = signal.match(/^([A-Za-z_]\w*)\.out[1-4]$/);
+    const swellMatch = signal.match(/^([A-Za-z_]\w*)\.out([1-4])$/);
     const swell = swellMatch ? this.swells.get(swellMatch[1]) : undefined;
+    const swellChannel = swellMatch ? Number(swellMatch[2]) - 1 : -1;
     if (!swell) {
       view.analyser.getFloatTimeDomainData(target);
       return true;
@@ -674,8 +718,6 @@ export class AudioEngine {
       return true;
     }
 
-    const probe = new Float32Array(32);
-    view.analyser.getFloatTimeDomainData(probe);
     const now = performance.now() / 1000;
     const seconds = Math.min(20, Math.max(2, 2 / Math.max(0.05, swell!.frequency)));
     const interval = seconds / Math.max(1, target.length - 1);
@@ -686,19 +728,30 @@ export class AudioEngine {
     }
 
     if (now - history.lastSampleAt >= interval) {
-      const raw = probe[probe.length - 1] ?? 0;
-      // Swell is an Eurorack-style CV signal. Keep routing values in volts,
-      // but map +/-5V to the oscilloscope's normalized +/-1 domain.
+      const raw = swell.monitorValues[swellChannel] ?? 0;
+      // The Swell/Tides backend already exposes its rendered channel value in
+      // a useful normalized display domain. Routing keeps its existing CV
+      // semantics; the slow oscilloscope should not attenuate it by another /5.
+      // Worklet telemetry now carries the real routing-domain CV (+/-5V).
+      // Normalize to +/-1 before storing display history.
       history.values.push(raw / 5);
       history.lastSampleAt = now;
       if (history.values.length > target.length) history.values.splice(0, history.values.length - target.length);
     }
 
-    const rawFill = probe[probe.length - 1] ?? 0;
-    const fill = history.values[0] ?? rawFill / 5;
-    target.fill(fill);
-    const offset = target.length - history.values.length;
-    for (let i = 0; i < history.values.length; i += 1) target[offset + i] = history.values[i];
+    const values = history.values;
+    target.fill(0);
+    if (values.length === 0) return true;
+
+    // Fixed slow-scope scale: no autoscaling and no horizontal stretching.
+    // New samples accumulate from the right until the history fills the scope.
+    const displayGain = 10;
+    const visibleCount = Math.min(values.length, target.length);
+    const sourceOffset = values.length - visibleCount;
+    const targetOffset = target.length - visibleCount;
+    for (let i = 0; i < visibleCount; i += 1) {
+      target[targetOffset + i] = Math.max(-1, Math.min(1, values[sourceOffset + i] * displayGain));
+    }
     return true;
   }
 
@@ -775,7 +828,7 @@ export class AudioEngine {
     const [, name, port] = match;
 
     const voice = this.voices.get(name);
-    if (voice) return { node: voice.node, output: port === 'aux' ? 1 : 0 };
+    if (voice) return { node: port === 'aux' ? voice.auxGain : voice.outGain, output: 0 };
 
     if (port === 'aux') throw new Error(`aux output is not available on ${name}`);
     const oscillator = this.oscillators.get(name);
@@ -888,6 +941,12 @@ export class AudioEngine {
     };
   }
 
+  triggerVoice(name: string): void {
+    const voice = this.voices.get(name);
+    if (!voice || !voice.lpg) return;
+    voice.node.port.postMessage({ type: 'trigger' });
+  }
+
   setVoiceParameter(name: string, parameter: 'freq' | 'model' | 'harmo' | 'timbre' | 'morph', value: number): void {
     const voice = this.voices.get(name);
     if (!voice) throw new Error(`unknown Voice object: ${name}`);
@@ -912,6 +971,16 @@ export class AudioEngine {
     this.masterClockBpm = bpm;
     this.updateAllClocks();
     this.emit();
+  }
+
+  setModTransport(running: boolean): void {
+    for (const swell of this.swells.values()) {
+      swell.node.port.postMessage({ type: 'transport', running });
+      if (!running) {
+        swell.monitorValues = [0, 0, 0, 0];
+      }
+    }
+    if (!running) this.slowScopeHistory.clear();
   }
 
   setClockTransport(running: boolean): void {
@@ -1166,6 +1235,8 @@ export class AudioEngine {
       this.controlMonitors.delete(`${name}.v_oct`);
     }
     voice.vOctInput.disconnect();
+    voice.outGain.disconnect();
+    voice.auxGain.disconnect();
     voice.node.disconnect();
     voice.node.port.close();
     this.voices.delete(name);

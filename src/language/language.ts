@@ -26,7 +26,22 @@ type VoiceState = {
   name: string;
   line: number;
   hasSound: boolean;
+  soundId: string | null;
 };
+
+type ModState = {
+  name: string;
+  internalName: string;
+  line: number;
+  indentation: number;
+  ownerVoice: string | null;
+};
+
+type ModSourceDefinition = {
+  internalName: string;
+  ownerVoice: string | null;
+};
+
 
 type SelectionMode = 'order' | 'random' | 'walk' | 'shuffle' | 'reverse';
 
@@ -60,25 +75,37 @@ const NOTE_INDEX: Record<string, number> = {
   B: 11,
 };
 
-const MACRO_SOUND_ALGORITHMS = new Set([
-  'analog',
-  'waves',
-  'fm',
-  'grain',
-  'additive',
-  'wavetable',
-  'chord',
-  'speech',
-  'swarm',
-  'noise',
-  'particle',
-  'string',
-  'analog-vcf',
-  'phase',
-  'terrain',
-  'strings',
-  'chiptune',
-]);
+type SoundParameterSchema = { min: number; max: number; modulatable: boolean };
+type SoundEngineSchema = {
+  parameters: Record<string, SoundParameterSchema>;
+  options: ReadonlySet<string>;
+};
+
+const MACRO_PARAMETERS: Record<string, SoundParameterSchema> = {
+  harmo: { min: 0, max: 100, modulatable: true },
+  timbre: { min: 0, max: 100, modulatable: true },
+  morph: { min: 0, max: 100, modulatable: true },
+};
+
+const SOUND_ENGINE_REGISTRY: Record<string, SoundEngineSchema> = {
+  'macro.analog': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
+  'macro.waves': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
+  'macro.fm': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
+  'macro.grain': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
+  'macro.additive': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
+  'macro.wavetable': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
+  'macro.chord': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
+  'macro.speech': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
+  'macro.swarm': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
+  'macro.noise': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
+  'macro.particle': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
+  'macro.string': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
+  'macro.analog-vcf': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
+  'macro.phase': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
+  'macro.terrain': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
+  'macro.strings': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
+  'macro.chiptune': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
+};
 
 const MODE_INTERVALS: Record<string, number[]> = {
   major: [0, 2, 4, 5, 7, 9, 11],
@@ -401,9 +428,32 @@ function compileVoiceProperty(
   line: number,
   sourceKinds: Map<string, SourceKind>,
   sourceDefinitions: Map<string, SourceDefinition>,
+  modSources: Map<string, ModSourceDefinition>,
 ): string {
   const key = property.toLowerCase();
+  if (['harmo', 'timbre', 'morph'].includes(key)) {
+    if (!voice.soundId) {
+      throw new LanguageError([{ line, message: `${key} requires sound to be declared first` }]);
+    }
+    const parameter = SOUND_ENGINE_REGISTRY[voice.soundId]?.parameters[key];
+    if (!parameter) {
+      throw new LanguageError([{ line, message: `${key} is not available for ${voice.soundId}` }]);
+    }
+  }
   const value = rawValue.trim();
+
+
+
+  if (['harmo', 'timbre', 'morph'].includes(key) && /^from\s+/i.test(value)) {
+    const parameter = voice.soundId ? SOUND_ENGINE_REGISTRY[voice.soundId]?.parameters[key] : undefined;
+    if (!parameter?.modulatable) {
+      throw new LanguageError([{ line, message: `${key} is not modulatable for ${voice.soundId ?? 'this sound'}` }]);
+    }
+    const route = compileModulationRoute(voice, key, value, line, modSources);
+    if (route) return route;
+    throw new LanguageError([{ line, message: `${key} from expects MOD.output [with depth <value>]` }]);
+  }
+
 
   if ((key === 'note' || key === 'freq' || key === 'scale' || key === 'cycle') && /^from\s+/i.test(value)) {
     if (key === 'scale') {
@@ -432,29 +482,69 @@ function compileVoiceProperty(
     return compileFrom(voice, key, sourceName, line, sourceKinds, sourceDefinitions);
   }
 
+  if (['harmo', 'timbre', 'morph'].includes(key)) {
+    const schema = voice.soundId ? SOUND_ENGINE_REGISTRY[voice.soundId]?.parameters[key] : undefined;
+    if (!schema) {
+      throw new LanguageError([{ line, message: `${key} is not available for ${voice.soundId ?? 'this sound'}` }]);
+    }
+
+    const cycleMatch = value.match(
+      /^(.*?)\s+cycle\s+(\d+(?:\.\d+)?)\s+(ms|sec|secs|second|seconds|beat|beats)(?:\s+with\s+(.+))?$/i,
+    );
+    const expression = (cycleMatch ? cycleMatch[1] : value).trim();
+    if (!expression) {
+      throw new LanguageError([{ line, message: `${key} expects a numeric expression` }]);
+    }
+
+    if (!cycleMatch) {
+      return `${voice.name}.${key}(${expression});`;
+    }
+
+    const amount = numberValue(cycleMatch[2], line, `${key} cycle`);
+    if (amount <= 0) {
+      throw new LanguageError([{ line, message: `${key} cycle interval must be greater than 0` }]);
+    }
+    const unit = normalizeCycleUnit(cycleMatch[3], line);
+    if (unit === 'beat' && !Number.isInteger(amount)) {
+      throw new LanguageError([{ line, message: `${key} beat cycles currently require a whole number of beats` }]);
+    }
+
+    const modifiers = (cycleMatch[4] ?? '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const timing = parseTimingModifiers(modifiers, line, unit);
+
+    return `${voice.name}.${key}(${expression}); __paramcycle(${JSON.stringify(voice.name)},${JSON.stringify(key)},${JSON.stringify(expression)},${amount},${JSON.stringify(unit)},${timing.chance},${timing.drift},${timing.loose});`;
+  }
+
   switch (key) {
+    case 'level': {
+      const level = numberValue(value, line, 'level');
+      if (level < 0 || level > 100) throw new LanguageError([{ line, message: 'level expects 0..100' }]);
+      return `${voice.name}.level(${level});`;
+    }
+
     case 'sound': {
-      if (!value || /\s/.test(value)) {
-        throw new LanguageError([{ line, message: 'sound expects one engine.algorithm identifier' }]);
-      }
-
-      const match = value.toLowerCase().match(/^([a-z][a-z0-9_-]*)\.([a-z][a-z0-9_-]*)$/);
+      const match = value.match(/^([a-z][a-z0-9_-]*\.[a-z][a-z0-9_-]*)(?:\s+with\s+(.+))?$/i);
       if (!match) {
-        throw new LanguageError([{
-          line,
-          message: 'sound expects engine.algorithm, e.g. sound macro.fm',
-        }]);
+        throw new LanguageError([{ line, message: 'sound expects engine.algorithm [with option, ...]' }]);
       }
+      const soundId = match[1].toLowerCase();
+      const schema = SOUND_ENGINE_REGISTRY[soundId];
+      if (!schema) throw new LanguageError([{ line, message: `unknown sound '${soundId}'` }]);
 
-      const [, engine, algorithm] = match;
-      if (engine !== 'macro') {
-        throw new LanguageError([{ line, message: `unknown sound engine '${engine}'` }]);
+      const options = (match[2] ?? '').split(',').map((v) => v.trim().toLowerCase()).filter(Boolean);
+      const seen = new Set<string>();
+      for (const option of options) {
+        if (seen.has(option)) throw new LanguageError([{ line, message: `duplicate sound option '${option}'` }]);
+        seen.add(option);
+        if (!schema.options.has(option)) {
+          throw new LanguageError([{ line, message: `${soundId} does not support sound option '${option}'` }]);
+        }
       }
-      if (!MACRO_SOUND_ALGORITHMS.has(algorithm)) {
-        throw new LanguageError([{ line, message: `unknown macro algorithm '${algorithm}'` }]);
-      }
-
-      return `${voice.name}.model(${JSON.stringify(`macro.${algorithm}`)});`;
+      voice.soundId = soundId;
+      return `${voice.name}.model(${JSON.stringify(soundId)});\n${voice.name}.lpg(${seen.has('lpg')});`;
     }
 
     case 'note': {
@@ -730,35 +820,145 @@ function compileClock(lineText: string, line: number): string {
   return `__masterclock(${JSON.stringify(expression)},${cycleAmount},${JSON.stringify(cycleUnit)},${drift});`;
 }
 
-function compilePlay(lineText: string, line: number): string {
-  const tokens = lineText.trim().split(/\s+/);
-  if (tokens.length < 4 || tokens[0].toUpperCase() !== 'PLAY') {
-    throw new LanguageError([{ line, message: 'invalid PLAY statement' }]);
-  }
 
-  const name = tokens[1];
-  if (!IDENTIFIER.test(name)) {
-    throw new LanguageError([{ line, message: `invalid voice name '${name}'` }]);
-  }
+function modSourceKey(ownerVoice: string | null, name: string): string {
+  return ownerVoice ? `${ownerVoice}:${name}` : name;
+}
 
-  if (tokens[2].toLowerCase() !== 'through') {
-    throw new LanguageError([{ line, message: "PLAY expects 'through' after the voice name" }]);
-  }
+function compileModProperty(mod: ModState, property: string, rawValue: string, line: number): string {
+  const key = property.toLowerCase();
+  const value = rawValue.trim();
 
-  const target = tokens[3];
-  if (target.toUpperCase() !== 'MAIN') {
-    throw new LanguageError([{ line, message: `unknown PLAY target '${target}'` }]);
-  }
-
-  let amount = 100;
-  if (tokens.length > 4) {
-    if (tokens.length !== 6 || tokens[4].toLowerCase() !== 'at') {
-      throw new LanguageError([{ line, message: "PLAY currently accepts only the optional modifier 'at <value>'" }]);
+  if (key === 'rate') {
+    let match = value.match(/^(\d+(?:\.\d+)?)\s*hz$/i);
+    if (match) {
+      const hz = Number(match[1]);
+      if (!Number.isFinite(hz) || hz <= 0) throw new LanguageError([{ line, message: 'MOD rate must be greater than 0' }]);
+      return `__modset(${JSON.stringify(mod.internalName)},"freq",${JSON.stringify(String(hz))});`;
     }
-    amount = normalizedAmount(tokens[5], line);
+
+    match = value.match(/^(\d+(?:\.\d+)?)\s+(?:sec|secs|second|seconds)$/i);
+    if (match) {
+      const seconds = Number(match[1]);
+      if (!Number.isFinite(seconds) || seconds <= 0) throw new LanguageError([{ line, message: 'MOD rate must be greater than 0' }]);
+      return `__modset(${JSON.stringify(mod.internalName)},"freq",${JSON.stringify(String(1 / seconds))});`;
+    }
+
+    match = value.match(/^(\d+(?:\.\d+)?)\s+ms$/i);
+    if (match) {
+      const ms = Number(match[1]);
+      if (!Number.isFinite(ms) || ms <= 0) throw new LanguageError([{ line, message: 'MOD rate must be greater than 0' }]);
+      return `__modset(${JSON.stringify(mod.internalName)},"freq",${JSON.stringify(String(1000 / ms))});`;
+    }
+
+    throw new LanguageError([{ line, message: 'MOD rate expects hz, sec, or ms' }]);
   }
 
-  return `${name}.out(${amount}) -> Audio.out;`;
+  if (key === 'shape') {
+    const normalized = value.toLowerCase();
+    const presets: Record<string, Array<[string, string]>> = {
+      sine: [['slope', '50'], ['shape', '50'], ['smooth', '100']],
+      triangle: [['slope', '50'], ['shape', '50'], ['smooth', '0']],
+      ramp: [['slope', '100'], ['shape', '50'], ['smooth', '0']],
+      rise: [['slope', '100'], ['shape', '50'], ['smooth', '0']],
+      fall: [['slope', '0'], ['shape', '50'], ['smooth', '0']],
+    };
+
+    const preset = presets[normalized];
+    if (preset) {
+      return preset
+        .map(([parameter, expression]) =>
+          `__modset(${JSON.stringify(mod.internalName)},${JSON.stringify(parameter)},${JSON.stringify(expression)});`)
+        .join('\n');
+    }
+
+    const numeric = Number(value);
+    if (Number.isFinite(numeric) && numeric >= 0 && numeric <= 100) {
+      return `__modset(${JSON.stringify(mod.internalName)},"shape",${JSON.stringify(String(numeric))});`;
+    }
+
+    throw new LanguageError([{ line, message: 'MOD shape expects sine, triangle, ramp, rise, fall, or 0..100' }]);
+  }
+
+  if (key === 'relation') {
+    const match = value.match(/^(phase|amplitude|frequency|different)(?:\s+with\s+shift\s+(-?\d+(?:\.\d+)?))?$/i);
+    if (!match) {
+      throw new LanguageError([{ line, message: 'MOD relation expects phase, amplitude, frequency, or different [with shift 0..100]' }]);
+    }
+
+    const relation = match[1].toLowerCase();
+    const directives = [
+      `__modset(${JSON.stringify(mod.internalName)},"output",${JSON.stringify(relation)});`,
+    ];
+
+    if (match[2] !== undefined) {
+      const shift = Number(match[2]);
+      if (!Number.isFinite(shift) || shift < 0 || shift > 100) {
+        throw new LanguageError([{ line, message: 'MOD relation shift expects 0..100' }]);
+      }
+      directives.push(`__modset(${JSON.stringify(mod.internalName)},"shift",${JSON.stringify(String(shift))});`);
+    }
+
+    return directives.join('\n');
+  }
+
+  if (key === 'range') {
+    const normalized = value.toLowerCase();
+    if (normalized !== 'control' && normalized !== 'audio') {
+      throw new LanguageError([{ line, message: 'MOD range expects control or audio' }]);
+    }
+    return `__modset(${JSON.stringify(mod.internalName)},"range",${JSON.stringify(normalized)});`;
+  }
+
+
+  if (key === 'slope' || key === 'smooth' || key === 'shift') {
+    const amount = Number(value);
+    if (!Number.isFinite(amount) || amount < 0 || amount > 100) {
+      throw new LanguageError([{ line, message: `MOD ${key} expects 0..100` }]);
+    }
+    return `__modset(${JSON.stringify(mod.internalName)},${JSON.stringify(key)},${JSON.stringify(String(amount))});`;
+  }
+
+  throw new LanguageError([{ line, message: `unknown MOD property '${property}'` }]);
+}
+
+function compileModulationRoute(
+  voice: VoiceState,
+  parameter: string,
+  value: string,
+  line: number,
+  modSources: Map<string, ModSourceDefinition>,
+): string | null {
+  const match = value.match(/^from\s+([A-Za-z_][A-Za-z0-9_]*)\.([a-d])(?:\s+with\s+depth\s+(-?\d+(?:\.\d+)?))?$/i);
+  if (!match) return null;
+  const source = modSources.get(modSourceKey(voice.name, match[1])) ?? modSources.get(match[1]);
+  if (!source) throw new LanguageError([{ line, message: `unknown MOD source '${match[1]}'` }]);
+  const depth = match[3] === undefined ? 100 : Number(match[3]);
+  if (!Number.isFinite(depth) || depth < -100 || depth > 100) {
+    throw new LanguageError([{ line, message: 'modulation depth must be between -100 and 100' }]);
+  }
+  const port = ({ a: 1, b: 2, c: 3, d: 4 } as const)[match[2].toLowerCase() as 'a'|'b'|'c'|'d'];
+  return `${source.internalName}.out${port}(${depth}) -> ${voice.name}.${parameter};`;
+}
+
+function compilePlay(lineText: string, line: number): string {
+  const match = lineText.trim().match(
+    /^PLAY\s+([A-Za-z_][A-Za-z0-9_]*)(?:\.(out|aux))?(?:\s+at\s+(.+?))?\s+through\s+MAIN(?:\.(L|R))?$/i,
+  );
+  if (!match) {
+    throw new LanguageError([{
+      line,
+      message: 'PLAY expects: PLAY <voice>[.out|.aux] [at <value>] through MAIN[.L|.R]',
+    }]);
+  }
+
+  const name = match[1];
+  const sourcePort = (match[2] ?? 'out').toLowerCase();
+  const amount = match[3] === undefined ? 100 : normalizedAmount(match[3].trim(), line);
+  const targetChannel = match[4]?.toUpperCase() ?? null;
+  const source = `${name}.${sourcePort}`;
+  const target = targetChannel === 'L' ? 'Audio.out_L' : targetChannel === 'R' ? 'Audio.out_R' : 'Audio.out';
+  return `${source}(${amount}) -> ${target};`;
 }
 
 function requireVoiceSound(voice: VoiceState | null, diagnostics: LanguageDiagnostic[]): void {
@@ -775,7 +975,9 @@ export function compileLanguageSource(source: string): string {
   const scalarNames = new Set<string>();
   const sourceKinds = new Map<string, SourceKind>();
   const sourceDefinitions = new Map<string, SourceDefinition>();
+  const modSources = new Map<string, ModSourceDefinition>();
   let currentVoice: VoiceState | null = null;
+  let currentMod: ModState | null = null;
 
   for (let index = 0; index < lines.length; index += 1) {
     const lineNumber = index + 1;
@@ -791,7 +993,35 @@ export function compileLanguageSource(source: string): string {
     const indentation = withoutComment.length - withoutComment.trimStart().length;
 
     try {
-      const voiceMatch = trimmed.match(/^VOICE\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*$/i);
+      if (currentMod && indentation <= currentMod.indentation) currentMod = null;
+
+      const modMatch = trimmed.match(/^MOD\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
+      if (modMatch) {
+        const name = modMatch[1];
+        const ownerVoice = indentation > 0 && currentVoice ? currentVoice.name : null;
+        if (indentation > 0 && !ownerVoice) throw new LanguageError([{ line: lineNumber, message: 'local MOD must be inside a VOICE' }]);
+        if (!ownerVoice) {
+          requireVoiceSound(currentVoice, diagnostics);
+          currentVoice = null;
+        }
+        const scopeKey = modSourceKey(ownerVoice, name);
+        if (modSources.has(scopeKey)) throw new LanguageError([{ line: lineNumber, message: `MOD '${name}' is already defined in this scope` }]);
+        const internalName = ownerVoice ? `__mod_${ownerVoice}_${name}` : name;
+        currentMod = { name, internalName, line: lineNumber, indentation, ownerVoice };
+        modSources.set(scopeKey, { internalName, ownerVoice });
+        const viewDirective = modMatch[2] ? `\n${internalName}.view();` : '';
+        output[index] = `${internalName} = Swell();\n__modmeta(${JSON.stringify(internalName)},${JSON.stringify(name)},${JSON.stringify(ownerVoice ?? '')});${viewDirective}`;
+        continue;
+      }
+
+      if (currentMod && indentation > currentMod.indentation) {
+        const propertyMatch = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s+(.+)$/);
+        if (!propertyMatch) throw new LanguageError([{ line: lineNumber, message: 'expected MOD property and value' }]);
+        output[index] = compileModProperty(currentMod, propertyMatch[1], propertyMatch[2], lineNumber);
+        continue;
+      }
+
+      const voiceMatch = trimmed.match(/^VOICE\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
       if (voiceMatch) {
         requireVoiceSound(currentVoice, diagnostics);
         const name = voiceMatch[1];
@@ -800,8 +1030,8 @@ export function compileLanguageSource(source: string): string {
         }
         voices.add(name);
         sourceKinds.set(name, 'voice');
-        currentVoice = { name, line: lineNumber, hasSound: false };
-        output[index] = `${name} = Voice();`;
+        currentVoice = { name, line: lineNumber, hasSound: false, soundId: null };
+        output[index] = voiceMatch[2] ? `${name} = Voice();\n${name}.view();` : `${name} = Voice();`;
         continue;
       }
 
@@ -819,10 +1049,22 @@ export function compileLanguageSource(source: string): string {
         continue;
       }
 
+      const mainMatch = trimmed.match(/^MAIN\s+level\s+(.+)$/i);
+      if (mainMatch) {
+        requireVoiceSound(currentVoice, diagnostics);
+        currentVoice = null;
+        currentMod = null;
+        const level = numberValue(mainMatch[1].trim(), lineNumber, 'MAIN level');
+        if (level < 0 || level > 100) throw new LanguageError([{ line: lineNumber, message: 'MAIN level expects 0..100' }]);
+        output[index] = `Audio.level(${level});`;
+        continue;
+      }
+
       if (/^PLAY\b/i.test(trimmed)) {
         requireVoiceSound(currentVoice, diagnostics);
         currentVoice = null;
-        const playName = trimmed.split(/\s+/)[1] ?? '';
+        const playToken = trimmed.split(/\s+/)[1] ?? '';
+        const playName = playToken.replace(/\.(?:out|aux)$/i, '');
         if (!voices.has(playName)) {
           throw new LanguageError([{ line: lineNumber, message: `unknown voice '${playName}'` }]);
         }
@@ -835,18 +1077,18 @@ export function compileLanguageSource(source: string): string {
         if (!propertyMatch) {
           throw new LanguageError([{ line: lineNumber, message: 'expected VOICE property and value' }]);
         }
-        output[index] = compileVoiceProperty(currentVoice, propertyMatch[1], propertyMatch[2], lineNumber, sourceKinds, sourceDefinitions);
+        output[index] = compileVoiceProperty(currentVoice, propertyMatch[1], propertyMatch[2], lineNumber, sourceKinds, sourceDefinitions, modSources);
         if (propertyMatch[1].toLowerCase() === 'sound') currentVoice.hasSound = true;
         continue;
       }
 
       if (/^[A-Za-z_][A-Za-z0-9_]*\s*:/.test(trimmed)) {
-        throw new LanguageError([{ line: lineNumber, message: 'only VOICE blocks are supported in language v1' }]);
+        throw new LanguageError([{ line: lineNumber, message: 'only VOICE and MOD blocks are supported' }]);
       }
 
       throw new LanguageError([{
         line: lineNumber,
-        message: 'each top-level statement must begin with VOICE, SET, CLOCK, or PLAY',
+        message: 'each top-level statement must begin with VOICE, MOD, SET, CLOCK, MAIN, or PLAY',
       }]);
     } catch (error) {
       if (error instanceof LanguageError) diagnostics.push(...error.diagnostics);

@@ -16,10 +16,26 @@ class SonusSwellProcessor extends AudioWorkletProcessor {
     this.triggerPtr = this.call('su_swell_trigger', this.handle);
     this.clockPtr = this.call('su_swell_clock', this.handle);
     this.vOctPtr = this.call('su_swell_v_oct', this.handle);
+    this.running = true;
+    this.monitorCounter = 0;
+    this.monitorIntervalFrames = Math.max(
+      128,
+      Math.floor((options.processorOptions?.sampleRate ?? sampleRate) / 60),
+    );
 
     this.port.onmessage = (event) => {
       const m = event.data;
-      if (!m || m.type !== 'params') return;
+      if (!m) return;
+      if (m.type === 'transport') {
+        const nextRunning = Boolean(m.running);
+        if (nextRunning !== this.running) {
+          this.running = nextRunning;
+          this.call('su_swell_reset', this.handle);
+          this.monitorCounter = 0;
+        }
+        return;
+      }
+      if (m.type !== 'params') return;
       if (m.frequency !== undefined) this.call('su_swell_set_frequency', this.handle, m.frequency);
       if (m.slope !== undefined) this.call('su_swell_set_slope', this.handle, m.slope);
       if (m.shape !== undefined) this.call('su_swell_set_shape', this.handle, m.shape);
@@ -41,6 +57,13 @@ class SonusSwellProcessor extends AudioWorkletProcessor {
     const frames = outputs[0]?.[0]?.length ?? 128;
     const memory = new Float32Array(this.memory.buffer);
 
+    if (!this.running) {
+      for (let channel = 0; channel < 4; channel += 1) {
+        outputs[channel]?.[0]?.fill(0);
+      }
+      return true;
+    }
+
     const copyInput = (index, ptr) => {
       const source = inputs[index]?.[0];
       const target = memory.subarray(ptr >>> 2, (ptr >>> 2) + frames);
@@ -61,6 +84,16 @@ class SonusSwellProcessor extends AudioWorkletProcessor {
       if (!output) continue;
       const ptr = this.ptrs[channel] >>> 2;
       output.set(memory.subarray(ptr, ptr + frames));
+    }
+
+    this.monitorCounter += frames;
+    if (this.monitorCounter >= this.monitorIntervalFrames) {
+      this.monitorCounter %= this.monitorIntervalFrames;
+      const last = Math.max(0, frames - 1);
+      this.port.postMessage({
+        type: 'monitor',
+        values: this.ptrs.map((ptr) => memory[(ptr >>> 2) + last] ?? 0),
+      });
     }
     return true;
   }

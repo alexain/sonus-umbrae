@@ -129,6 +129,8 @@ interface GainDefinition {
 
 interface VoiceDefinition {
   model: number;
+  lpg: boolean;
+  level: number;
   frequency: number;
   harmo: number;
   timbre: number;
@@ -199,12 +201,168 @@ interface LanguageSetCycleDefinition {
   loose: boolean;
 }
 
+interface LanguageParameterCycleDefinition {
+  voice: string;
+  parameter: 'harmo' | 'timbre' | 'morph';
+  expression: string;
+  amount: number;
+  unit: 'ms' | 'sec' | 'beat';
+  chance: number;
+  drift: boolean;
+  loose: boolean;
+  line: number;
+}
+
 interface LanguageMasterClockDefinition {
   expression: string;
   amount: number;
   unit: 'ms' | 'sec' | 'beat';
   drift: boolean;
   line: number;
+}
+
+interface LanguageModMetadata {
+  internalName: string;
+  displayName: string;
+  ownerVoice: string | null;
+}
+
+interface LanguageModSetDirective {
+  internalName: string;
+  parameter: 'freq' | 'slope' | 'shape' | 'smooth' | 'shift' | 'output' | 'range';
+  value: string;
+  line: number;
+}
+
+
+
+type RuntimeWallJob = {
+  intervalMs: number;
+  nextAtMs: number;
+  callback: () => void;
+  intervalFactory?: () => number;
+};
+
+type RuntimeBeatJob = {
+  everyBeats: number;
+  nextBeat: number;
+  callback: () => void;
+  loose: boolean;
+};
+
+class RuntimeScheduler {
+  private wallJobs: RuntimeWallJob[] = [];
+  private beatJobs: RuntimeBeatJob[] = [];
+  private deferred: Array<{ dueAtMs: number; callback: () => void }> = [];
+  private epochMs = 0;
+  private beatCounter = 0;
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private clockUnsubscribe: (() => void) | null = null;
+
+  constructor(private readonly audio: AudioEngine) {}
+
+  clear(): void {
+    this.stop();
+    this.wallJobs = [];
+    this.beatJobs = [];
+    this.deferred = [];
+    this.beatCounter = 0;
+  }
+
+  addWallJob(intervalMs: number, callback: () => void, intervalFactory?: () => number): void {
+    this.wallJobs.push({
+      intervalMs,
+      nextAtMs: intervalMs,
+      callback,
+      intervalFactory,
+    });
+  }
+
+  addBeatJob(everyBeats: number, callback: () => void, loose = false): void {
+    this.beatJobs.push({
+      everyBeats,
+      nextBeat: everyBeats,
+      callback,
+      loose,
+    });
+  }
+
+  start(): void {
+    this.stop();
+    this.epochMs = performance.now();
+    this.beatCounter = 0;
+    for (const job of this.wallJobs) job.nextAtMs = job.intervalMs;
+    for (const job of this.beatJobs) job.nextBeat = job.everyBeats;
+
+    if (this.wallJobs.length > 0 || this.deferred.length > 0) {
+      this.timer = setInterval(() => this.tickWallClock(), 10);
+    }
+
+    if (this.beatJobs.length > 0) {
+      this.clockUnsubscribe = this.audio.subscribeClockTrigger('Clock', () => this.tickBeat());
+    }
+  }
+
+  stop(): void {
+    if (this.timer !== null) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    if (this.clockUnsubscribe) {
+      this.clockUnsubscribe();
+      this.clockUnsubscribe = null;
+    }
+    this.deferred = [];
+  }
+
+  private tickWallClock(): void {
+    const elapsed = performance.now() - this.epochMs;
+
+    for (const job of this.wallJobs) {
+      if (elapsed < job.nextAtMs) continue;
+      job.callback();
+
+      const nextInterval = Math.max(1, job.intervalFactory?.() ?? job.intervalMs);
+      job.nextAtMs += nextInterval;
+
+      if (job.nextAtMs <= elapsed) {
+        const missed = Math.floor((elapsed - job.nextAtMs) / nextInterval) + 1;
+        job.nextAtMs += missed * nextInterval;
+      }
+    }
+
+    if (this.deferred.length > 0) {
+      const now = performance.now();
+      const ready = this.deferred.filter((entry) => entry.dueAtMs <= now);
+      this.deferred = this.deferred.filter((entry) => entry.dueAtMs > now);
+      for (const entry of ready) entry.callback();
+    }
+  }
+
+  private tickBeat(): void {
+    this.beatCounter += 1;
+
+    for (const job of this.beatJobs) {
+      if (this.beatCounter < job.nextBeat) continue;
+      job.nextBeat += job.everyBeats;
+
+      if (!job.loose) {
+        job.callback();
+        continue;
+      }
+
+      const bpm = this.audio.getClockStatus().bpm;
+      const beatMs = bpm > 0 ? 60000 / bpm : 0;
+      this.deferred.push({
+        dueAtMs: performance.now() + beatMs * 0.08 * Math.random(),
+        callback: job.callback,
+      });
+
+      if (this.timer === null) {
+        this.timer = setInterval(() => this.tickWallClock(), 10);
+      }
+    }
+  }
 }
 
 export class SonusRuntime {
@@ -219,12 +377,15 @@ export class SonusRuntime {
   };
 
   private whenUnsubscribers: Array<() => void> = [];
-  private cycleUnsubscribers: Array<() => void> = [];
+  private readonly scheduler: RuntimeScheduler;
 
-  constructor(private readonly audio: AudioEngine) {}
+  constructor(private readonly audio: AudioEngine) {
+    this.scheduler = new RuntimeScheduler(audio);
+  }
 
   stopExecution(): void {
     this.stopSchedulers();
+    this.audio.setModTransport(false);
     this.audio.stopProgramOutput();
     this.audio.panic();
   }
@@ -232,8 +393,7 @@ export class SonusRuntime {
   private stopSchedulers(): void {
     for (const unsubscribe of this.whenUnsubscribers) unsubscribe();
     this.whenUnsubscribers = [];
-    for (const unsubscribe of this.cycleUnsubscribers) unsubscribe();
-    this.cycleUnsubscribers = [];
+    this.scheduler.clear();
   }
 
   getParameterViews(): ParameterViewState[] {
@@ -273,6 +433,7 @@ export class SonusRuntime {
     const routes = new Map<string, RouteDefinition>();
     const clockSources = new Map<string, ClockDefinition>();
     let clockBpm = 0;
+    let mainLevel = 100;
     const views = new Map<string, ViewKind>();
     const moduleViews = new Set<string>();
     const parameterViews = new Map<string, ParameterViewState>();
@@ -300,8 +461,23 @@ export class SonusRuntime {
     const languageSequences = new Map<string, LanguageSequenceDefinition>();
     const languageCycles = new Map<string, LanguageCycleDefinition>();
     const languageSetCycles = new Map<string, LanguageSetCycleDefinition>();
+    const languageParameterCycles: LanguageParameterCycleDefinition[] = [];
+    const languageMods = new Map<string, LanguageModMetadata>();
+    const languageModSets: LanguageModSetDirective[] = [];
     let languageMasterClock: LanguageMasterClockDefinition | null = null;
     for (const { source: line, line: lineNumber } of lines) {
+      const modMetadata = parseLanguageModMetadata(line);
+      if (modMetadata) {
+        languageMods.set(modMetadata.internalName, modMetadata);
+        continue;
+      }
+
+      const modSet = parseLanguageModSetDirective(line, lineNumber);
+      if (modSet) {
+        languageModSets.push(modSet);
+        continue;
+      }
+
       const masterClock = parseLanguageMasterClockDirective(line, lineNumber);
       if (masterClock) {
         if (languageMasterClock) diagnostics.push({ line: lineNumber, message: 'only one CLOCK statement is allowed' });
@@ -328,6 +504,12 @@ export class SonusRuntime {
           drift: cycle.drift,
           loose: cycle.loose,
         });
+      }
+
+      const parameterCycle = parseLanguageParameterCycleDirective(line, lineNumber);
+      if (parameterCycle) {
+        languageParameterCycles.push(parameterCycle);
+        continue;
       }
 
       const setCycle = parseLanguageSetCycleDirective(line);
@@ -398,6 +580,8 @@ export class SonusRuntime {
 
         const definition: VoiceDefinition = {
           model: 1,
+          lpg: false,
+          level: 100,
           frequency: 440,
           harmo: 50,
           timbre: 50,
@@ -413,7 +597,11 @@ export class SonusRuntime {
       const swellDeclaration = parseSwellDeclaration(line);
       if (swellDeclaration) {
         const { name } = swellDeclaration;
-        const reservationError = identifierReservationError(name);
+        // High-level MOD objects use a compiler-generated __mod_* identifier.
+        // The matching __modmeta directive is collected in the pre-pass, so
+        // only those known generated objects may bypass the user identifier
+        // reservation. User-authored __* identifiers remain rejected.
+        const reservationError = languageMods.has(name) ? null : identifierReservationError(name);
         if (reservationError) {
           diagnostics.push({ line: lineNumber, message: reservationError });
           continue;
@@ -630,7 +818,7 @@ export class SonusRuntime {
     // source order. All module declarations already exist, so references between
     // modules are still independent from declaration order.
     for (const { source: line, line: lineNumber } of lines) {
-      if (parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageFromDirective(line)) continue;
+      if (parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
 
       const oscillatorDeclaration = parseOscillatorDeclaration(line);
       if (oscillatorDeclaration) {
@@ -902,12 +1090,6 @@ export class SonusRuntime {
       match = line.match(/^([A-Za-z_]\w*)\.level\(\s*(.+)\s*\)\s*$/);
       if (match) {
         const [, name, rawLevel] = match;
-        const gain = gains.get(name);
-        if (!gain) {
-          diagnostics.push({ line: lineNumber, message: `unknown gain object: ${name}` });
-          continue;
-        }
-
         const level = evalNumber(rawLevel, lineNumber, 'level');
         if (level === undefined) continue;
         const error = gainLevelError(level);
@@ -916,9 +1098,38 @@ export class SonusRuntime {
           continue;
         }
 
-        gain.level = level;
-        gain.parameters.set('LEVEL', `${formatNumber(level)}%`);
-        results.push({ message: `${name}.level ${formatNumber(level)}%` });
+        if (name === 'Audio') {
+          mainLevel = level;
+          results.push({ message: `MAIN level ${formatNumber(level)}%` });
+          continue;
+        }
+
+        const voice = voices.get(name);
+        if (voice) {
+          voice.level = level;
+          voice.parameters.set('LEVEL', `${formatNumber(level)}%`);
+          results.push({ message: `${name}.level ${formatNumber(level)}%` });
+          continue;
+        }
+
+        const gain = gains.get(name);
+        if (gain) {
+          gain.level = level;
+          gain.parameters.set('LEVEL', `${formatNumber(level)}%`);
+          results.push({ message: `${name}.level ${formatNumber(level)}%` });
+          continue;
+        }
+
+        diagnostics.push({ line: lineNumber, message: `unknown level-capable object: ${name}` });
+        continue;
+      }
+
+      match = line.match(/^([A-Za-z_]\w*)\.lpg\(\s*(true|false)\s*\)\s*$/i);
+      if (match) {
+        const voice = voices.get(match[1]);
+        if (!voice) { diagnostics.push({ line: lineNumber, message: `unknown Voice: ${match[1]}` }); continue; }
+        voice.lpg = match[2].toLowerCase() === 'true';
+        voice.parameters.set('LPG', voice.lpg ? 'ON' : 'OFF');
         continue;
       }
 
@@ -1201,6 +1412,66 @@ export class SonusRuntime {
       }
     }
 
+    for (const cycle of languageParameterCycles) {
+      if (!voices.has(cycle.voice)) {
+        diagnostics.push({ line: cycle.line, message: `parameter cycle references unknown Voice: ${cycle.voice}` });
+      }
+    }
+
+    for (const directive of languageModSets) {
+      const swell = swells.get(directive.internalName);
+      if (!swell) {
+        diagnostics.push({ line: directive.line, message: `unknown MOD object: ${directive.internalName}` });
+        continue;
+      }
+
+      const parameter = directive.parameter;
+      if (parameter === 'freq') {
+        const value = Number(directive.value);
+        if (!Number.isFinite(value) || value <= 0 || value > 10000) {
+          diagnostics.push({ line: directive.line, message: 'MOD rate resolves outside the supported frequency range' });
+          continue;
+        }
+        swell.frequency = value;
+        swell.parameters.set('RATE', `${formatNumber(value)} HZ`);
+        continue;
+      }
+
+      if (parameter === 'slope' || parameter === 'shape' || parameter === 'smooth' || parameter === 'shift') {
+        const value = Number(directive.value);
+        if (!Number.isFinite(value) || value < 0 || value > 100) {
+          diagnostics.push({ line: directive.line, message: `MOD ${parameter} expects 0..100` });
+          continue;
+        }
+        swell[parameter] = value;
+        swell.parameters.set(parameter.toUpperCase(), `${formatNumber(value)}%`);
+        continue;
+      }
+
+      if (parameter === 'output') {
+        const modes: Record<string, number> = { different: 0, amplitude: 1, phase: 2, frequency: 3 };
+        const mode = modes[directive.value.toLowerCase()];
+        if (mode === undefined) {
+          diagnostics.push({ line: directive.line, message: 'MOD relation expects phase, amplitude, frequency, or different' });
+          continue;
+        }
+        swell.outputMode = mode;
+        swell.parameters.set('RELATION', directive.value.toUpperCase());
+        continue;
+      }
+
+      if (parameter === 'range') {
+        const normalized = directive.value.toLowerCase();
+        if (normalized !== 'control' && normalized !== 'audio') {
+          diagnostics.push({ line: directive.line, message: 'MOD range expects control or audio' });
+          continue;
+        }
+        swell.range = normalized === 'audio' ? 1 : 0;
+        swell.parameters.set('RANGE', normalized.toUpperCase());
+      }
+    }
+
+
     const variableViews: VariableViewState[] = [];
     const seenVariableViews = new Set<string>();
     for (const request of variableViewRequests) {
@@ -1305,7 +1576,13 @@ export class SonusRuntime {
     // Built-in singletons such as Audio and Clock are intentionally omitted.
     variableViews.length = 0;
     for (const [name] of voices) variableViews.push({ name, value: 'Voice' });
-    for (const [name] of swells) variableViews.push({ name, value: 'Swell' });
+    for (const [name] of swells) {
+      const mod = languageMods.get(name);
+      variableViews.push({
+        name: mod ? (mod.ownerVoice ? `${mod.ownerVoice}.${mod.displayName}` : mod.displayName) : name,
+        value: mod ? 'Mod' : 'Swell',
+      });
+    }
     for (const [name] of mists) variableViews.push({ name, value: 'Mist' });
     for (const [name] of clockSources) variableViews.push({ name, value: 'Clock' });
     for (const [name] of oscillators) variableViews.push({ name, value: 'Osc' });
@@ -1449,13 +1726,17 @@ export class SonusRuntime {
         ],
         views: embeddedViews.get(name),
       })),
-      ...[...swells.entries()].map(([name, definition]) => ({
-        id: name,
-        label: `${name.toUpperCase()} : SWELL`,
-        kind: 'module' as const,
-        parameters: [...definition.parameters.entries()].map(([parameterName, value]) => ({ name: parameterName, value })),
-        views: embeddedViews.get(name),
-      })),
+      ...[...swells.entries()].map(([name, definition]) => {
+        const mod = languageMods.get(name);
+        const displayName = mod ? (mod.ownerVoice ? `${mod.ownerVoice}.${mod.displayName}` : mod.displayName) : name;
+        return {
+          id: name,
+          label: `${displayName.toUpperCase()} : ${mod ? 'MOD' : 'SWELL'}`,
+          kind: 'module' as const,
+          parameters: [...definition.parameters.entries()].map(([parameterName, value]) => ({ name: parameterName, value })),
+          views: embeddedViews.get(name),
+        };
+      }),
       ...[...mists.entries()].map(([name, definition]) => ({
         id: name,
         label: `${name.toUpperCase()} : MIST`,
@@ -1483,7 +1764,7 @@ export class SonusRuntime {
         parameters: [{ name: 'BPM', value: `${formatNumber(clockBpm)} BPM` }],
         views: embeddedViews.get('Clock'),
       }] : []),
-      { id: 'Audio', label: 'AUDIO OUT', kind: 'module' as const, parameters: [], views: embeddedViews.get('Audio') },
+      { id: 'Audio', label: 'AUDIO OUT', kind: 'module' as const, parameters: [{ name: 'LEVEL', value: `${formatNumber(mainLevel)}%` }], views: embeddedViews.get('Audio') },
     ];
 
     const schemeConnections: SchemeConnection[] = [
@@ -1511,6 +1792,7 @@ export class SonusRuntime {
 
     const program: AudioProgram = {
       clock: { bpm: clockBpm },
+      mainLevel,
       clockSources: [
         { name: 'Clock', rate: 1 },
         ...[...clockSources.entries()].map(([name, definition]) => ({ name, rate: definition.rate })),
@@ -1523,6 +1805,8 @@ export class SonusRuntime {
       voices: [...voices.entries()].map(([name, definition]) => ({
         name,
         model: definition.model,
+        lpg: definition.lpg,
+        level: definition.level,
         frequency: definition.frequency,
         harmo: definition.harmo,
         timbre: definition.timbre,
@@ -1598,8 +1882,13 @@ export class SonusRuntime {
     if (applyAudio) {
       this.stopSchedulers();
       this.audio.applyProgram(program);
+    for (const [name, voice] of voices) {
+      if (voice.lpg) this.audio.triggerVoice(name);
+    }
 
-      if (languageMasterClock && languageMasterClock.amount > 0) {
+    this.scheduler.clear();
+
+    if (languageMasterClock && languageMasterClock.amount > 0) {
       const clockSpec = languageMasterClock;
       let driftValue = clockBpm;
 
@@ -1615,192 +1904,150 @@ export class SonusRuntime {
       };
 
       if (clockSpec.unit === 'beat') {
-        let beats = 0;
-        const unsubscribeClock = this.audio.subscribeClockTrigger('Clock', () => {
-          beats += 1;
-          if (beats < clockSpec.amount) return;
-          beats = 0;
-          updateClock();
-        });
-        this.cycleUnsubscribers.push(unsubscribeClock);
+        this.scheduler.addBeatJob(clockSpec.amount, updateClock);
       } else {
-        let active = true;
-        let timeout: ReturnType<typeof setTimeout> | null = null;
         const intervalMs = clockSpec.unit === 'sec' ? clockSpec.amount * 1000 : clockSpec.amount;
-        const schedule = (): void => {
-          if (!active) return;
-          timeout = setTimeout(() => {
-            updateClock();
-            schedule();
-          }, Math.max(1, intervalMs));
-        };
-        schedule();
-        this.cycleUnsubscribers.push(() => {
-          active = false;
-          if (timeout !== null) clearTimeout(timeout);
-        });
+        this.scheduler.addWallJob(intervalMs, updateClock);
       }
     }
 
     for (const [name, cycle] of languageSetCycles) {
-        const definition = scalarExpressions.get(name);
-        if (!definition) continue;
-        let driftRatio = 1;
+      const definition = scalarExpressions.get(name);
+      if (!definition) continue;
+      let driftRatio = 1;
 
-        const updateValue = (): void => {
-          if (cycle.chance < 100 && random() * 100 >= cycle.chance) return;
-          const value = evalValue(definition.expression, definition.line);
-          if (value === undefined) return;
-          variables.set(name, value);
-          const existing = this.variableViews.find((view) => view.name === name);
-          if (existing) existing.value = formatScalar(value);
-          else this.variableViews.push({ name, value: formatScalar(value) });
-        };
+      const updateValue = (): void => {
+        if (cycle.chance < 100 && random() * 100 >= cycle.chance) return;
+        const value = evalValue(definition.expression, definition.line);
+        if (value === undefined) return;
+        variables.set(name, value);
+        const existing = this.variableViews.find((view) => view.name === name);
+        if (existing) existing.value = formatScalar(value);
+        else this.variableViews.push({ name, value: formatScalar(value) });
+      };
 
-        if (cycle.unit === 'beat') {
-          let beats = 0;
-          let pendingTimeout: ReturnType<typeof setTimeout> | null = null;
-          const unsubscribeClock = this.audio.subscribeClockTrigger('Clock', () => {
-            beats += 1;
-            if (beats < cycle.amount) return;
-            beats = 0;
-            if (!cycle.loose) {
-              updateValue();
-              return;
-            }
-            const bpm = this.audio.getClockStatus().bpm;
-            const beatMs = bpm > 0 ? 60000 / bpm : 0;
-            pendingTimeout = setTimeout(updateValue, beatMs * 0.08 * random());
-          });
-          this.cycleUnsubscribers.push(() => {
-            unsubscribeClock();
-            if (pendingTimeout !== null) clearTimeout(pendingTimeout);
-          });
-          continue;
-        }
-
-        let active = true;
-        let timeout: ReturnType<typeof setTimeout> | null = null;
-        const baseMs = cycle.unit === 'sec' ? cycle.amount * 1000 : cycle.amount;
-        const schedule = (): void => {
-          if (!active) return;
-          if (cycle.drift) {
-            driftRatio += (random() - 0.5) * 0.06;
-            driftRatio = Math.min(1.2, Math.max(0.8, driftRatio));
-          } else {
-            driftRatio = 1;
-          }
-          const looseRatio = cycle.loose ? 0.94 + random() * 0.12 : 1;
-          timeout = setTimeout(() => {
-            updateValue();
-            schedule();
-          }, Math.max(1, baseMs * driftRatio * looseRatio));
-        };
-        schedule();
-        this.cycleUnsubscribers.push(() => {
-          active = false;
-          if (timeout !== null) clearTimeout(timeout);
-        });
+      if (cycle.unit === 'beat') {
+        this.scheduler.addBeatJob(cycle.amount, updateValue, cycle.loose);
+        continue;
       }
 
-      for (const [name, cycle] of languageCycles) {
-        const voice = voices.get(name);
-        if (!voice) continue;
-        const sequence = languageSequences.get(name);
-        let cursor = 0;
-        let walkCursor = 0;
-        let shuffleOrder: number[] = [];
-        let shuffleCursor = 0;
-        let driftRatio = 1;
+      const baseMs = cycle.unit === 'sec' ? cycle.amount * 1000 : cycle.amount;
+      this.scheduler.addWallJob(baseMs, updateValue, () => {
+        if (cycle.drift) {
+          driftRatio += (random() - 0.5) * 0.06;
+          driftRatio = Math.min(1.2, Math.max(0.8, driftRatio));
+        } else {
+          driftRatio = 1;
+        }
+        const looseRatio = cycle.loose ? 0.94 + random() * 0.12 : 1;
+        return baseMs * driftRatio * looseRatio;
+      });
+    }
 
-        const reshuffle = (): void => {
-          const count = sequence?.values.length ?? 0;
-          shuffleOrder = Array.from({ length: count }, (_, index) => index);
-          for (let index = shuffleOrder.length - 1; index > 0; index -= 1) {
-            const swap = Math.floor(random() * (index + 1));
-            [shuffleOrder[index], shuffleOrder[swap]] = [shuffleOrder[swap], shuffleOrder[index]];
-          }
-          shuffleCursor = 0;
-        };
+    for (const cycle of languageParameterCycles) {
+      const voice = voices.get(cycle.voice);
+      if (!voice) continue;
+      let driftRatio = 1;
 
-        const nextFrequency = (): number => {
-          if (!sequence || sequence.values.length === 0) return voice.frequency;
-          const values = sequence.values;
-          if (values.length === 1) return values[0];
+      const updateParameter = (): void => {
+        if (cycle.chance < 100 && random() * 100 >= cycle.chance) return;
+        const value = evalNumber(cycle.expression, cycle.line, cycle.parameter);
+        if (value === undefined || percentError(value, cycle.parameter)) return;
+        voice[cycle.parameter] = value;
+        this.audio.setVoiceParameter(cycle.voice, cycle.parameter, value);
+      };
 
-          if (sequence.mode === 'random') return values[Math.floor(random() * values.length)];
-          if (sequence.mode === 'walk') {
-            const direction = random() < 0.5 ? -1 : 1;
-            walkCursor += direction;
-            if (walkCursor < 0) walkCursor = 1;
-            if (walkCursor >= values.length) walkCursor = Math.max(0, values.length - 2);
-            return values[walkCursor];
-          }
-          if (sequence.mode === 'shuffle') {
-            if (shuffleOrder.length !== values.length || shuffleCursor >= shuffleOrder.length) reshuffle();
-            return values[shuffleOrder[shuffleCursor++]];
-          }
-          if (sequence.mode === 'reverse') {
-            cursor = (cursor - 1 + values.length) % values.length;
-            return values[cursor];
-          }
+      if (cycle.unit === 'beat') {
+        this.scheduler.addBeatJob(cycle.amount, updateParameter, cycle.loose);
+        continue;
+      }
 
-          cursor = (cursor + 1) % values.length;
+      const baseMs = cycle.unit === 'sec' ? cycle.amount * 1000 : cycle.amount;
+      this.scheduler.addWallJob(baseMs, updateParameter, () => {
+        if (cycle.drift) {
+          driftRatio += (random() - 0.5) * 0.06;
+          driftRatio = Math.min(1.2, Math.max(0.8, driftRatio));
+        } else {
+          driftRatio = 1;
+        }
+        const looseRatio = cycle.loose ? 0.94 + random() * 0.12 : 1;
+        return baseMs * driftRatio * looseRatio;
+      });
+    }
+
+    for (const [name, cycle] of languageCycles) {
+      const voice = voices.get(name);
+      if (!voice) continue;
+      const sequence = languageSequences.get(name);
+      let cursor = 0;
+      let walkCursor = 0;
+      let shuffleOrder: number[] = [];
+      let shuffleCursor = 0;
+      let driftRatio = 1;
+
+      const reshuffle = (): void => {
+        const count = sequence?.values.length ?? 0;
+        shuffleOrder = Array.from({ length: count }, (_, index) => index);
+        for (let index = shuffleOrder.length - 1; index > 0; index -= 1) {
+          const swap = Math.floor(random() * (index + 1));
+          [shuffleOrder[index], shuffleOrder[swap]] = [shuffleOrder[swap], shuffleOrder[index]];
+        }
+        shuffleCursor = 0;
+      };
+
+      const nextFrequency = (): number => {
+        if (!sequence || sequence.values.length === 0) return voice.frequency;
+        const values = sequence.values;
+        if (values.length === 1) return values[0];
+
+        if (sequence.mode === 'random') return values[Math.floor(random() * values.length)];
+        if (sequence.mode === 'walk') {
+          const direction = random() < 0.5 ? -1 : 1;
+          walkCursor += direction;
+          if (walkCursor < 0) walkCursor = 1;
+          if (walkCursor >= values.length) walkCursor = Math.max(0, values.length - 2);
+          return values[walkCursor];
+        }
+        if (sequence.mode === 'shuffle') {
+          if (shuffleOrder.length !== values.length || shuffleCursor >= shuffleOrder.length) reshuffle();
+          return values[shuffleOrder[shuffleCursor++]];
+        }
+        if (sequence.mode === 'reverse') {
+          cursor = (cursor - 1 + values.length) % values.length;
           return values[cursor];
-        };
-
-        const fire = (): void => {
-          if (cycle.chance < 100 && random() * 100 >= cycle.chance) return;
-          const frequency = nextFrequency();
-          voice.frequency = frequency;
-          this.audio.setVoiceParameter(name, 'freq', frequency);
-        };
-
-        if (cycle.unit === 'beat') {
-          let beats = 0;
-          let pendingTimeout: ReturnType<typeof setTimeout> | null = null;
-          const unsubscribeClock = this.audio.subscribeClockTrigger('Clock', () => {
-            beats += 1;
-            if (beats < cycle.amount) return;
-            beats = 0;
-            if (!cycle.loose) {
-              fire();
-              return;
-            }
-            const bpm = this.audio.getClockStatus().bpm;
-            const beatMs = bpm > 0 ? 60000 / bpm : 0;
-            pendingTimeout = setTimeout(fire, beatMs * 0.08 * random());
-          });
-          this.cycleUnsubscribers.push(() => {
-            unsubscribeClock();
-            if (pendingTimeout !== null) clearTimeout(pendingTimeout);
-          });
-          continue;
         }
 
-        let active = true;
-        let timeout: ReturnType<typeof setTimeout> | null = null;
-        const baseMs = cycle.unit === 'sec' ? cycle.amount * 1000 : cycle.amount;
-        const schedule = (): void => {
-          if (!active) return;
-          if (cycle.drift) {
-            driftRatio += (random() - 0.5) * 0.06;
-            driftRatio = Math.min(1.2, Math.max(0.8, driftRatio));
-          } else {
-            driftRatio = 1;
-          }
-          const looseRatio = cycle.loose ? 0.94 + random() * 0.12 : 1;
-          timeout = setTimeout(() => {
-            fire();
-            schedule();
-          }, Math.max(1, baseMs * driftRatio * looseRatio));
-        };
-        schedule();
-        this.cycleUnsubscribers.push(() => {
-          active = false;
-          if (timeout !== null) clearTimeout(timeout);
-        });
+        cursor = (cursor + 1) % values.length;
+        return values[cursor];
+      };
+
+      const fire = (): void => {
+        if (cycle.chance < 100 && random() * 100 >= cycle.chance) return;
+        const frequency = nextFrequency();
+        voice.frequency = frequency;
+        this.audio.setVoiceParameter(name, 'freq', frequency);
+        if (voice.lpg) this.audio.triggerVoice(name);
+      };
+
+      if (cycle.unit === 'beat') {
+        this.scheduler.addBeatJob(cycle.amount, fire, cycle.loose);
+        continue;
       }
+
+      const baseMs = cycle.unit === 'sec' ? cycle.amount * 1000 : cycle.amount;
+      this.scheduler.addWallJob(baseMs, fire, () => {
+        if (cycle.drift) {
+          driftRatio += (random() - 0.5) * 0.06;
+          driftRatio = Math.min(1.2, Math.max(0.8, driftRatio));
+        } else {
+          driftRatio = 1;
+        }
+        const looseRatio = cycle.loose ? 0.94 + random() * 0.12 : 1;
+        return baseMs * driftRatio * looseRatio;
+      });
+    }
+
+    this.scheduler.start();
 
       for (const handler of whenHandlers) {
         let eventIndex = 0;
@@ -2044,6 +2291,33 @@ function parseLanguageCycleDirective(line: string): ({ name: string; amount: num
   };
 }
 
+function parseLanguageModSetDirective(line: string, lineNumber: number): LanguageModSetDirective | null {
+  const match = line.match(
+    /^__modset\("([A-Za-z_]\w*)","(freq|slope|shape|smooth|shift|output|range)","((?:[^"\\]|\\.)*)"\);?$/,
+  );
+  if (!match) return null;
+
+  let value: string;
+  try {
+    value = JSON.parse(`"${match[3]}"`) as string;
+  } catch {
+    return null;
+  }
+
+  return {
+    internalName: match[1],
+    parameter: match[2] as LanguageModSetDirective['parameter'],
+    value,
+    line: lineNumber,
+  };
+}
+
+function parseLanguageModMetadata(line: string): LanguageModMetadata | null {
+  const match = line.match(/^__modmeta\("([A-Za-z_]\w*)","([A-Za-z_]\w*)","([A-Za-z_]\w*)?"\)$/);
+  if (!match) return null;
+  return { internalName: match[1], displayName: match[2], ownerVoice: match[3] || null };
+}
+
 function parseLanguageMasterClockDirective(line: string, lineNumber: number): LanguageMasterClockDefinition | null {
   const match = line.match(/^__masterclock\("((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(true|false)\)$/);
   if (!match) return null;
@@ -2058,6 +2332,35 @@ function parseLanguageMasterClockDirective(line: string, lineNumber: number): La
     amount: Number(match[2]),
     unit: match[3] as LanguageMasterClockDefinition['unit'],
     drift: match[4] === 'true',
+    line: lineNumber,
+  };
+}
+
+function parseLanguageParameterCycleDirective(
+  line: string,
+  lineNumber: number,
+): LanguageParameterCycleDefinition | null {
+  const match = line.match(
+    /^__paramcycle\("([A-Za-z_]\w*)","(harmo|timbre|morph)","((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false)\)$/,
+  );
+  if (!match) return null;
+
+  let expression: string;
+  try {
+    expression = JSON.parse(`"${match[3]}"`) as string;
+  } catch {
+    return null;
+  }
+
+  return {
+    voice: match[1],
+    parameter: match[2] as LanguageParameterCycleDefinition['parameter'],
+    expression,
+    amount: Number(match[4]),
+    unit: match[5] as LanguageParameterCycleDefinition['unit'],
+    chance: Number(match[6]),
+    drift: match[7] === 'true',
+    loose: match[8] === 'true',
     line: lineNumber,
   };
 }
