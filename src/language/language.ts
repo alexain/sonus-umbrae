@@ -13,7 +13,7 @@ export class LanguageError extends Error {
   }
 }
 
-type SourceKind = 'voice' | 'note' | 'freq' | 'time' | 'trigger';
+type SourceKind = 'voice' | 'note' | 'freq' | 'time' | 'trigger' | 'scalar';
 
 type VoiceState = {
   name: string;
@@ -218,7 +218,7 @@ function compileFrom(
   const compatible = property === 'note'
     ? actual === 'note'
     : property === 'freq'
-      ? actual === 'freq'
+      ? actual === 'freq' || actual === 'scalar'
       : actual === 'time' || actual === 'trigger';
 
   if (!compatible) {
@@ -354,6 +354,66 @@ function compileVoiceProperty(
   }
 }
 
+
+function normalizeCycleUnit(rawUnit: string, line: number): 'ms' | 'sec' | 'beat' {
+  const unit = rawUnit.toLowerCase();
+  if (unit === 'ms') return 'ms';
+  if (unit === 'sec' || unit === 'secs' || unit === 'second' || unit === 'seconds') return 'sec';
+  if (unit === 'beat' || unit === 'beats') return 'beat';
+  throw new LanguageError([{ line, message: `unknown cycle unit '${rawUnit}'` }]);
+}
+
+function compileSet(
+  lineText: string,
+  line: number,
+  sourceKinds: Map<string, SourceKind>,
+  scalarNames: Set<string>,
+  voiceNames: Set<string>,
+): string {
+  const match = lineText.match(/^SET\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+)$/i);
+  if (!match) {
+    throw new LanguageError([{ line, message: 'SET expects a name, colon, and scalar expression' }]);
+  }
+
+  const name = match[1];
+  if (voiceNames.has(name) || scalarNames.has(name)) {
+    throw new LanguageError([{ line, message: `duplicate object or variable: ${name}` }]);
+  }
+
+  const body = match[2].trim();
+  const cycleMatch = body.match(
+    /^(.*)\s+cycle\s+(\d+(?:\.\d+)?)\s+(ms|sec|secs|second|seconds|beat|beats)(?:\s+with\s+(.+))?$/i,
+  );
+
+  const expression = (cycleMatch ? cycleMatch[1] : body).trim();
+  if (!expression) {
+    throw new LanguageError([{ line, message: 'SET expects a scalar expression' }]);
+  }
+
+  scalarNames.add(name);
+  sourceKinds.set(name, 'scalar');
+
+  if (!cycleMatch) return `${name} = ${expression};`;
+
+  const amount = numberValue(cycleMatch[2], line, 'cycle');
+  if (amount <= 0) {
+    throw new LanguageError([{ line, message: 'cycle interval must be greater than 0' }]);
+  }
+
+  const unit = normalizeCycleUnit(cycleMatch[3], line);
+  if (unit === 'beat' && !Number.isInteger(amount)) {
+    throw new LanguageError([{ line, message: 'beat cycles currently require a whole number of beats' }]);
+  }
+
+  const modifiers = (cycleMatch[4] ?? '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const timing = parseTimingModifiers(modifiers, line, unit);
+
+  return `${name} = ${expression}; __setcycle(${JSON.stringify(name)},${amount},${JSON.stringify(unit)},${timing.chance},${timing.drift},${timing.loose});`;
+}
+
 function compilePlay(lineText: string, line: number): string {
   const tokens = lineText.trim().split(/\s+/);
   if (tokens.length < 4 || tokens[0].toUpperCase() !== 'PLAY') {
@@ -396,6 +456,7 @@ export function compileLanguageSource(source: string): string {
   const output = Array(lines.length).fill('') as string[];
   const diagnostics: LanguageDiagnostic[] = [];
   const voices = new Set<string>();
+  const scalarNames = new Set<string>();
   const sourceKinds = new Map<string, SourceKind>();
   let currentVoice: VoiceState | null = null;
 
@@ -427,6 +488,13 @@ export function compileLanguageSource(source: string): string {
         continue;
       }
 
+      if (/^SET\b/i.test(trimmed)) {
+        requireVoiceSound(currentVoice, diagnostics);
+        currentVoice = null;
+        output[index] = compileSet(trimmed, lineNumber, sourceKinds, scalarNames, voices);
+        continue;
+      }
+
       if (/^PLAY\b/i.test(trimmed)) {
         requireVoiceSound(currentVoice, diagnostics);
         currentVoice = null;
@@ -454,7 +522,7 @@ export function compileLanguageSource(source: string): string {
 
       throw new LanguageError([{
         line: lineNumber,
-        message: 'each top-level statement must begin with VOICE or PLAY',
+        message: 'each top-level statement must begin with VOICE, SET, or PLAY',
       }]);
     } catch (error) {
       if (error instanceof LanguageError) diagnostics.push(...error.diagnostics);

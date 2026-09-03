@@ -59,9 +59,8 @@ app.innerHTML = `
           <span>:CLOCK START</span><span>START MASTER CLOCK TRANSPORT</span>
           <span>:CLOCK STOP</span><span>STOP MASTER CLOCK TRANSPORT</span>
           <span>:PANIC</span><span>STOP CURRENT AUDIO IMMEDIATELY</span>
-          <span>ENTER</span><span>EVALUATE SOURCE AND INSERT NEW LINE</span>
-          <span>SHIFT+ENTER</span><span>INSERT NEW LINE WITHOUT EVALUATING</span>
-          <span>CMD+ENTER</span><span>EVALUATE ENTIRE SOURCE</span>
+          <span>ENTER</span><span>INSERT NEW LINE</span>
+          <span>CMD/CTRL+ENTER</span><span>RECOMPILE / START LIVE CODE</span>
         </div>
         <div class="system-copy muted">ESC  RETURN TO LIVE</div>
       </div>
@@ -136,6 +135,7 @@ const runtime = new SonusRuntime(audioEngine);
 let screen: Screen = 'live';
 let commandMode = false;
 let messageTimer = 0;
+let previewTimer = 0;
 let scopeFrame = 0;
 const dicesHistories = new Map<string, {
   previousT2: boolean;
@@ -152,6 +152,7 @@ const panelExplicitState = new Set<string>();
 let panelOrder: string[] = [];
 let draggedPanelId: string | null = null;
 let clockWasActive = false;
+let lastCaretTrailPosition: { left: number; top: number } | null = null;
 
 loadPanelState();
 
@@ -223,6 +224,7 @@ function must<T extends Element>(id: string): T {
 }
 
 function showScreen(next: Screen): void {
+  if (next !== 'live') clearDiagnostic();
   screen = next;
   liveScreen.classList.toggle('hidden', next !== 'live');
   configScreen.classList.toggle('hidden', next !== 'config');
@@ -288,10 +290,15 @@ function notify(text: string): void {
 }
 
 function normalizeLanguageCommandCase(): void {
-  const normalized = editor.value.replace(
-    /^(\s*)(voice|play)\b/gim,
-    (_match, indentation: string, commandName: string) => `${indentation}${commandName.toUpperCase()}`,
-  );
+  const normalized = editor.value
+    .replace(
+      /^(\s*)(voice|play|set)\b/gim,
+      (_match, indentation: string, commandName: string) => `${indentation}${commandName.toUpperCase()}`,
+    )
+    .replace(
+      /^(\s*PLAY\s+[A-Za-z_]\w*\s+through\s+)main\b/gim,
+      (_match, prefix: string) => `${prefix}MAIN`,
+    );
   if (normalized === editor.value) return;
 
   const start = editor.selectionStart;
@@ -307,6 +314,10 @@ function sourceText(): string {
 
 function setCodeRunning(running: boolean): void {
   codeRunning = running;
+  if (running) {
+    window.clearTimeout(previewTimer);
+    previewTimer = 0;
+  }
   codeStatus.textContent = running ? '▶' : '○';
   codeStatus.classList.toggle('disabled', !running);
   codeStatus.setAttribute('aria-label', running ? 'code running' : 'code stopped');
@@ -329,8 +340,42 @@ function validateLanguageSource(): boolean {
   }
 }
 
-function refreshCodeFromEditor(): boolean {
-  return codeRunning ? evaluateLiveSource() : validateLanguageSource();
+function refreshStoppedPreview(): boolean {
+  if (codeRunning) return false;
+
+  try {
+    const source = sourceText();
+    const compiled = source.trim() ? compileLanguageSource(source) : '';
+    runtime.evaluate(compiled, { applyAudio: false });
+    clearDiagnostic();
+    syncViews();
+    return true;
+  } catch (error) {
+    // While editing with LIVE stopped, incomplete/invalid source is expected.
+    // Keep the last valid preview and avoid surfacing transient diagnostics.
+    if (error instanceof LanguageError || error instanceof SonusEvaluationError) return false;
+    return false;
+  }
+}
+
+function scheduleStoppedPreview(delay = 90): void {
+  if (codeRunning) return;
+  window.clearTimeout(previewTimer);
+  previewTimer = window.setTimeout(() => {
+    previewTimer = 0;
+    refreshStoppedPreview();
+  }, delay);
+}
+
+function recompileLiveCode(): boolean {
+  window.clearTimeout(previewTimer);
+  previewTimer = 0;
+  const applied = evaluateLiveSource();
+  if (applied && !codeRunning) {
+    setCodeRunning(true);
+    notify('live code running');
+  }
+  return applied;
 }
 
 function evaluateLiveSource(): boolean {
@@ -493,6 +538,7 @@ function buildVariablesPanel(variables: Array<{ name: string; value: string }>):
       name.textContent = variable.name;
       const value = document.createElement('span');
       value.className = 'variable-value';
+      value.dataset.variableName = variable.name;
       value.textContent = variable.value;
       row.append(name, value);
       readout.append(row);
@@ -833,8 +879,19 @@ function updateDicesViews(): void {
   }
 }
 
+function updateVariableValues(): void {
+  const values = new Map(runtime.getVariableViews().map((variable) => [variable.name, variable.value]));
+  for (const element of document.querySelectorAll<HTMLElement>('.variable-value[data-variable-name]')) {
+    const name = element.dataset.variableName;
+    if (!name) continue;
+    const value = values.get(name);
+    if (value !== undefined) element.textContent = value;
+  }
+}
+
 function drawScopes(): void {
   scopeFrame = 0;
+  updateVariableValues();
   updateSchemeLiveValues();
   updateDicesViews();
   const canvases = [...document.querySelectorAll<HTMLCanvasElement>('canvas.scope-canvas')];
@@ -1378,7 +1435,7 @@ function statementLabels(source: string): string[] {
   for (let index = 0; index < lines.length; index += 1) {
     const trimmed = lines[index].trim();
     if (!trimmed || trimmed.startsWith('//')) continue;
-    if (/^(VOICE|PLAY)\b/i.test(trimmed)) {
+    if (/^(VOICE|SET|PLAY)\b/i.test(trimmed)) {
       statement += 1;
       labels[index] = String(statement);
     }
@@ -1527,25 +1584,58 @@ function caretRect(): DOMRect | null {
   return new DOMRect(left, top, 0, markerRect.height || Number.parseFloat(style.lineHeight) || 24);
 }
 
+function leaveBlockCaretTrail(): void {
+  if (screen !== 'live' || commandMode || document.activeElement !== editor) return;
+  if (blockCaret.classList.contains('hidden')) return;
+
+  const left = blockCaret.style.left;
+  const top = blockCaret.style.top;
+  if (!left || !top) return;
+
+  const trail = document.createElement('span');
+  trail.className = 'block-caret-trail';
+  trail.style.fontSize = blockCaret.style.fontSize;
+  trail.style.left = left;
+  trail.style.top = top;
+  phosphorLayer.append(trail);
+  window.setTimeout(() => trail.remove(), 360);
+}
+
 function positionBlockCaret(): void {
   if (screen !== 'live' || commandMode || document.activeElement !== editor) {
     blockCaret.classList.add('hidden');
+    lastCaretTrailPosition = null;
     return;
   }
 
   const rect = caretRect();
   if (!rect) {
     blockCaret.classList.add('hidden');
+    lastCaretTrailPosition = null;
     return;
   }
 
   const host = phosphorLayer.getBoundingClientRect();
   const editorStyle = getComputedStyle(editor);
   const fontSize = Number.parseFloat(editorStyle.fontSize) || 20;
+  const left = rect.left - host.left;
+  const caretHeight = fontSize * 0.92;
+  const top = rect.top - host.top + Math.max(0, (rect.height - caretHeight) * 0.5);
+
+  if (lastCaretTrailPosition && (Math.abs(lastCaretTrailPosition.left - left) > 0.5 || Math.abs(lastCaretTrailPosition.top - top) > 0.5)) {
+    const trail = document.createElement('span');
+    trail.className = 'block-caret-trail';
+    trail.style.fontSize = `${fontSize}px`;
+    trail.style.left = `${lastCaretTrailPosition.left}px`;
+    trail.style.top = `${lastCaretTrailPosition.top}px`;
+    phosphorLayer.append(trail);
+    window.setTimeout(() => trail.remove(), 360);
+  }
+
+  lastCaretTrailPosition = { left, top };
   blockCaret.style.fontSize = `${fontSize}px`;
-  blockCaret.style.left = `${rect.left - host.left}px`;
-  const caretHeight = fontSize * 0.78;
-  blockCaret.style.top = `${rect.top - host.top + Math.max(0, (rect.height - caretHeight) * 0.5)}px`;
+  blockCaret.style.left = `${left}px`;
+  blockCaret.style.top = `${top}px`;
   blockCaret.classList.remove('hidden');
 }
 
@@ -1606,7 +1696,7 @@ async function runCommand(raw: string): Promise<void> {
       leaveCommandMode();
       const action = args[0]?.toLowerCase();
       if (action === 'stop') {
-        runtime.evaluate('');
+        runtime.stopExecution();
         setCodeRunning(false);
         syncViews();
         notify('live code stopped');
@@ -1738,9 +1828,11 @@ editor.addEventListener('input', () => {
   normalizeLanguageCommandCase();
   renderSyntaxLayer();
   renderLineGutter();
+  scheduleStoppedPreview();
   requestAnimationFrame(positionBlockCaret);
 });
 editor.addEventListener('keyup', () => requestAnimationFrame(positionBlockCaret));
+editor.addEventListener('pointerdown', () => leaveBlockCaretTrail());
 editor.addEventListener('pointerup', () => requestAnimationFrame(positionBlockCaret));
 liveScreen.addEventListener('scroll', () => {
   clearDiagnostic();
@@ -1762,6 +1854,10 @@ editor.addEventListener('beforeinput', (event) => {
 });
 
 editor.addEventListener('keydown', (event) => {
+  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) {
+    leaveBlockCaretTrail();
+  }
+
   if (event.key === 'Escape') {
     event.preventDefault();
     enterCommandMode();
@@ -1770,7 +1866,8 @@ editor.addEventListener('keydown', (event) => {
 
   if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
     event.preventDefault();
-    refreshCodeFromEditor();
+    normalizeLanguageCommandCase();
+    recompileLiveCode();
     requestAnimationFrame(positionBlockCaret);
     return;
   }
@@ -1795,7 +1892,7 @@ editor.addEventListener('keydown', (event) => {
 
     renderSyntaxLayer();
     renderLineGutter();
-    if (!event.shiftKey) refreshCodeFromEditor();
+    scheduleStoppedPreview();
 
     requestAnimationFrame(positionBlockCaret);
     return;
@@ -1806,6 +1903,7 @@ editor.addEventListener('keydown', (event) => {
     const start = editor.selectionStart;
     const end = editor.selectionEnd;
     editor.setRangeText('  ', start, end, 'end');
+    scheduleStoppedPreview();
     requestAnimationFrame(positionBlockCaret);
   }
 });
