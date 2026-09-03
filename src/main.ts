@@ -1764,7 +1764,7 @@ function statementLabels(source: string): string[] {
   for (let index = 0; index < lines.length; index += 1) {
     const trimmed = lines[index].trim();
     if (!trimmed || trimmed.startsWith('//')) continue;
-    if (/^(VOICE|SET|CLOCK|PLAY)\b/i.test(trimmed)) {
+    if (/^(VOICE|FX|FILTER|MOD|SEQ|SET|CLOCK|PLAY)\b/i.test(trimmed)) {
       statement += 1;
       labels[index] = String(statement);
     }

@@ -127,11 +127,24 @@ VOICE lead:
 
 ## CLOCK
 
-The master clock is explicit:
+The master clock is explicit and its monitor is always available:
 
 ```text
 CLOCK set 120 bpm
 ```
+
+The master can deliberately move away from a perfectly rigid pulse:
+
+```text
+CLOCK set 120 bpm with jitter 8, drift 12
+```
+
+`jitter 0..100` adds fast interval-to-interval timing variation. A value of 10
+allows roughly ±10% instantaneous interval variation around the nominal tempo.
+`drift 0..100` is slower and correlated: the clock gradually wanders around the
+nominal BPM instead of choosing a completely new offset on every tick. The BPM
+shown in the status bar remains the nominal BPM; the always-on master clock view
+shows the actual irregular trigger spacing.
 
 A program using beat-based `every` statements remains stopped with respect to
 beat timing until a master clock is declared and the program transport is
@@ -140,86 +153,66 @@ running.
 The clock value can also be dynamic:
 
 ```text
-CLOCK set rnd(110,120) bpm
+CLOCK set rnd(110,120) bpm with cycle 4 beats
 ```
 
-The timing system is shared by all objects. Wall-clock timing and beat timing
-are handled by the same runtime scheduler.
+### Named derived clocks
 
-### Derived clocks
-
-Beat-based `every` clauses can use a clock derived from the master clock.
-
-A divider:
+Simple one-off dividers and multipliers remain available:
 
 ```text
 SET half: clock /2
-```
-
-A multiplier:
-
-```text
 SET double: clock *2
 ```
 
-These clocks remain phase-locked to the master clock. They are not independent
-timers.
-
-A derived clock can be used by name:
+For a clock with its own timing character, declare a named `CLOCK` block:
 
 ```text
-VOICE lead:
-    sound macro.fm
-    scale C minor every 2 beats with clock half
+CLOCK slow with view:
+    from MASTER /4
+    jitter 15
+    drift 25
 ```
 
-or directly:
+`with view` is optional. Unlike the master clock, named clocks do not create a
+sidebar monitor unless requested.
+
+A named clock can derive from another named clock:
 
 ```text
-VOICE lead:
-    sound macro.fm
-    scale C minor every 2 beats with clock /2
+CLOCK slow:
+    from MASTER /2
+    drift 10
+
+CLOCK broken with view:
+    from slow /3
+    jitter 30
+    drift 4
 ```
 
-The `every` count is measured in steps of the selected clock. Therefore:
+The rate is relative to the selected parent. The parent's jitter/drift character
+is inherited and the child's values are added on top, capped at 100. This lets a
+clock remain related to the master while becoming progressively less rigid.
+
+Use named clocks from any beat-based `every` clause:
 
 ```text
-every 2 beats with clock /2
+VOICE bass:
+    sound macro.analog
+    note [C2 Eb2 G2] with walk every 1 beat with clock slow
 ```
 
-means one update every two ticks of the `/2` clock, which corresponds to four
-master-clock beats.
-
-Likewise:
-
-```text
-every 3 beats with clock *2
-```
-
-means one update every three ticks of a clock running at twice the master rate.
-
-Clock selection is a timing modifier and is written after `every`:
+or use an anonymous master-derived rate directly:
 
 ```text
 morph 50 every 2 beats with clock /4
 ```
 
-It can be combined with other timing modifiers:
+The `every` count is measured in ticks of the selected clock. Therefore
+`every 2 beats with clock /2` updates every two ticks of the half-rate clock.
+Timing modifiers such as `chance`, `coin` and `loose` remain local to the
+`every` clause rather than changing the clock itself.
 
-```text
-morph 50 every 2 beats with clock /2, loose, chance 80
-```
-
-A named derived clock does not create a visualizer automatically. Request one
-explicitly when needed:
-
-```text
-SET half: clock /2 with view
-```
-
-The resulting view uses the same trigger-particle vocabulary as the master
-clock. Direct anonymous clock expressions used only inside `every` remain
-runtime-internal and do not appear as separate Scheme nodes.
 
 ## VOICE
 

@@ -62,6 +62,17 @@ type SeqState = {
   material: 'notes' | 'scale' | null;
 };
 
+type ClockState = {
+  name: string;
+  line: number;
+  indentation: number;
+  parent: string | null;
+  rate: number;
+  rateLabel: string;
+  jitter: number;
+  drift: number;
+};
+
 
 
 type FxParameter = 'position' | 'size' | 'pitch' | 'density' | 'texture' | 'mix' | 'spread' | 'feedback' | 'reverb';
@@ -1302,61 +1313,86 @@ function compileSet(
 }
 
 
+function requireClockReady(clock: ClockState | null, diagnostics: LanguageDiagnostic[]): void {
+  if (clock && !clock.parent) diagnostics.push({ line: clock.line, message: `CLOCK '${clock.name}' requires from <clock> /n or *n` });
+}
+
+function compileClockProperty(
+  clock: ClockState,
+  property: string,
+  rawValue: string,
+  line: number,
+  sourceDefinitions: Map<string, SourceDefinition>,
+): string {
+  const key = property.toLowerCase();
+  const value = rawValue.trim();
+  if (key === 'from') {
+    const match = value.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\s+([/*])\s*(\d+(?:\.\d+)?))?$/i);
+    if (!match) throw new LanguageError([{ line, message: 'CLOCK from expects MASTER or a clock name, optionally followed by /n or *n' }]);
+    const rawParent = match[1];
+    const parent = /^master$/i.test(rawParent) ? 'Clock' : rawParent;
+    if (parent !== 'Clock') {
+      const definition = sourceDefinitions.get(parent);
+      if (!definition || definition.kind !== 'clock') throw new LanguageError([{ line, message: `unknown parent clock '${rawParent}'` }]);
+      if (parent === clock.name) throw new LanguageError([{ line, message: 'CLOCK cannot derive from itself' }]);
+    }
+    const op = match[2] ?? '*';
+    const amount = match[3] ? numberValue(match[3], line, 'CLOCK rate') : 1;
+    if (amount <= 0) throw new LanguageError([{ line, message: 'CLOCK divisor/multiplier must be greater than 0' }]);
+    clock.parent = parent;
+    clock.rate = op === '/' ? 1 / amount : amount;
+    clock.rateLabel = `${op}${formatSourceNumber(amount)}`;
+    const definition = sourceDefinitions.get(clock.name);
+    if (definition?.kind === 'clock') definition.rateLabel = clock.rateLabel;
+    return `__clockparent(${JSON.stringify(clock.name)},${JSON.stringify(parent)},${JSON.stringify(clock.rateLabel)});`;
+  }
+  if (key === 'jitter' || key === 'drift') {
+    const amount = numberValue(value, line, `CLOCK ${key}`);
+    if (amount < 0 || amount > 100) throw new LanguageError([{ line, message: `CLOCK ${key} expects 0..100` }]);
+    if (key === 'jitter') clock.jitter = amount; else clock.drift = amount;
+    return `__clockfeel(${JSON.stringify(clock.name)},${JSON.stringify(key)},${amount});`;
+  }
+  throw new LanguageError([{ line, message: `unknown CLOCK property '${property}'` }]);
+}
+
 function compileClock(lineText: string, line: number): string {
   const match = lineText.match(/^CLOCK\s+set\s+(.+?)\s+bpm(?:\s+with\s+(.+))?$/i);
-  if (!match) {
-    throw new LanguageError([{
-      line,
-      message: 'CLOCK expects: CLOCK set <expression> bpm [with cycle <n> <unit>, drift]',
-    }]);
-  }
-
+  if (!match) throw new LanguageError([{ line, message: 'CLOCK expects: CLOCK set <expression> bpm [with jitter <0..100>, drift <0..100>]' }]);
   const expression = match[1].trim();
-  if (!expression) {
-    throw new LanguageError([{ line, message: 'CLOCK set expects a BPM expression' }]);
-  }
-
+  if (!expression) throw new LanguageError([{ line, message: 'CLOCK set expects a BPM expression' }]);
   let cycleAmount: number | null = null;
   let cycleUnit: 'ms' | 'sec' | 'beat' | null = null;
-  let drift = false;
-
-  const modifiers = (match[2] ?? '')
-    .split(',')
-    .map((item) => item.trim())
-    .filter(Boolean);
-
+  let expressionDrift = false;
+  let jitter = 0;
+  let timingDrift = 0;
+  const modifiers = (match[2] ?? '').split(',').map((item) => item.trim()).filter(Boolean);
   for (const modifier of modifiers) {
     const cycle = modifier.match(/^cycle\s+(\d+(?:\.\d+)?)\s+(ms|sec|secs|second|seconds|beat|beats)$/i);
     if (cycle) {
-      if (cycleAmount !== null) {
-        throw new LanguageError([{ line, message: 'CLOCK accepts only one cycle modifier' }]);
-      }
+      if (cycleAmount !== null) throw new LanguageError([{ line, message: 'CLOCK accepts only one cycle modifier' }]);
       cycleAmount = numberValue(cycle[1], line, 'CLOCK cycle');
-      if (cycleAmount <= 0) {
-        throw new LanguageError([{ line, message: 'CLOCK cycle must be greater than 0' }]);
-      }
+      if (cycleAmount <= 0) throw new LanguageError([{ line, message: 'CLOCK cycle must be greater than 0' }]);
       cycleUnit = normalizeCycleUnit(cycle[2], line);
-      if (cycleUnit === 'beat' && !Number.isInteger(cycleAmount)) {
-        throw new LanguageError([{ line, message: 'CLOCK beat cycles currently require a whole number of beats' }]);
-      }
+      if (cycleUnit === 'beat' && !Number.isInteger(cycleAmount)) throw new LanguageError([{ line, message: 'CLOCK beat cycles currently require a whole number of beats' }]);
       continue;
     }
-
-    if (/^drift$/i.test(modifier)) {
-      drift = true;
+    const jitterMatch = modifier.match(/^jitter\s+(\d+(?:\.\d+)?)$/i);
+    if (jitterMatch) {
+      jitter = numberValue(jitterMatch[1], line, 'CLOCK jitter');
+      if (jitter < 0 || jitter > 100) throw new LanguageError([{ line, message: 'CLOCK jitter expects 0..100' }]);
       continue;
     }
-
+    const driftMatch = modifier.match(/^drift\s+(\d+(?:\.\d+)?)$/i);
+    if (driftMatch) {
+      timingDrift = numberValue(driftMatch[1], line, 'CLOCK drift');
+      if (timingDrift < 0 || timingDrift > 100) throw new LanguageError([{ line, message: 'CLOCK drift expects 0..100' }]);
+      continue;
+    }
+    if (/^drift$/i.test(modifier)) { expressionDrift = true; continue; }
     throw new LanguageError([{ line, message: `CLOCK does not support modifier '${modifier}'` }]);
   }
-
-  if (cycleAmount === null || cycleUnit === null) {
-    return `__masterclock(${JSON.stringify(expression)},0,"ms",${drift});`;
-  }
-
-  return `__masterclock(${JSON.stringify(expression)},${cycleAmount},${JSON.stringify(cycleUnit)},${drift});`;
+  return `__masterclock(${JSON.stringify(expression)},${cycleAmount ?? 0},${JSON.stringify(cycleUnit ?? 'ms')},${expressionDrift},${jitter},${timingDrift});`;
 }
-
 
 function modSourceKey(ownerVoice: string | null, name: string): string {
   return ownerVoice ? `${ownerVoice}:${name}` : name;
@@ -2013,6 +2049,7 @@ export function compileLanguageSource(source: string): string {
   const modSources = new Map<string, ModSourceDefinition>();
   const seqs = new Set<string>();
   let currentSeq: SeqState | null = null;
+  let currentClock: ClockState | null = null;
   let currentVoice: VoiceState | null = null;
   let currentFx: FxState | null = null;
   let currentFilter: FilterState | null = null;
@@ -2034,9 +2071,26 @@ export function compileLanguageSource(source: string): string {
     try {
       if (currentMod && indentation <= currentMod.indentation) currentMod = null;
       if (currentSeq && indentation <= currentSeq.indentation) { requireSeqReady(currentSeq, diagnostics); currentSeq = null; }
+      if (currentClock && indentation <= currentClock.indentation) { requireClockReady(currentClock, diagnostics); currentClock = null; }
       if (currentFilter && indentation <= currentFilter.indentation) {
         requireFilterModel(currentFilter, diagnostics);
         currentFilter = null;
+      }
+
+      const clockBlockMatch = trimmed.match(/^CLOCK\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
+      if (clockBlockMatch) {
+        if (indentation > 0) throw new LanguageError([{ line: lineNumber, message: 'CLOCK declarations are top-level only' }]);
+        requireVoiceSound(currentVoice, diagnostics); requireFxModel(currentFx, diagnostics); requireSeqReady(currentSeq, diagnostics);
+        currentVoice = null; currentFx = null; currentFilter = null; currentMod = null; currentSeq = null;
+        const name = clockBlockMatch[1];
+        if (/^master$/i.test(name) || voices.has(name) || fxs.has(name) || filters.has(name) || scalarNames.has(name) || seqs.has(name) || sourceDefinitions.has(name)) {
+          throw new LanguageError([{ line: lineNumber, message: `CLOCK '${name}' is already defined or reserved` }]);
+        }
+        sourceKinds.set(name, 'clock');
+        sourceDefinitions.set(name, { kind: 'clock', internalName: name, rateLabel: '*1', display: 'clock *1' });
+        currentClock = { name, line: lineNumber, indentation, parent: null, rate: 1, rateLabel: '*1', jitter: 0, drift: 0 };
+        output[index] = `${name} = Clock.rate("*1")${clockBlockMatch[2] ? '.view()' : ''};`;
+        continue;
       }
 
       const seqMatch = trimmed.match(/^SEQ\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
@@ -2055,6 +2109,13 @@ export function compileLanguageSource(source: string): string {
         currentSeq = { name, line: lineNumber, indentation, modelId: null, length: 8, change: 10, values: [], material: null };
         const viewDirective = seqMatch[2] ? `\n__seqview(${JSON.stringify(name)});` : '';
         output[index] = `__seq(${JSON.stringify(name)});${viewDirective}`;
+        continue;
+      }
+
+      if (currentClock && indentation > currentClock.indentation) {
+        const propertyMatch = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s+(.+)$/);
+        if (!propertyMatch) throw new LanguageError([{ line: lineNumber, message: 'expected CLOCK property and value' }]);
+        output[index] = compileClockProperty(currentClock, propertyMatch[1], propertyMatch[2], lineNumber, sourceDefinitions);
         continue;
       }
 
@@ -2163,8 +2224,10 @@ export function compileLanguageSource(source: string): string {
       if (/^CLOCK\b/i.test(trimmed)) {
         requireVoiceSound(currentVoice, diagnostics);
         requireFxModel(currentFx, diagnostics);
-        currentVoice = null;
-        currentFx = null;
+        requireSeqReady(currentSeq, diagnostics);
+  requireClockReady(currentClock, diagnostics);
+        requireClockReady(currentClock, diagnostics);
+        currentVoice = null; currentFx = null; currentSeq = null; currentClock = null;
         output[index] = compileClock(trimmed, lineNumber);
         continue;
       }
@@ -2234,7 +2297,7 @@ export function compileLanguageSource(source: string): string {
       }
 
       if (/^[A-Za-z_][A-Za-z0-9_]*\s*:/.test(trimmed)) {
-        throw new LanguageError([{ line: lineNumber, message: 'only VOICE, FX, FILTER, MOD and SEQ blocks are supported' }]);
+        throw new LanguageError([{ line: lineNumber, message: 'only VOICE, FX, FILTER, MOD, SEQ and CLOCK blocks are supported' }]);
       }
 
       throw new LanguageError([{

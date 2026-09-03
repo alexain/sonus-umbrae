@@ -225,7 +225,13 @@ interface RouteDefinition {
 
 interface ClockDefinition {
   rate: number;
+  localRate: number;
   rateLabel: string;
+  parent: string;
+  jitter: number;
+  drift: number;
+  localJitter: number;
+  localDrift: number;
   parameters: Map<string, string>;
 }
 
@@ -295,7 +301,17 @@ interface LanguageMasterClockDefinition {
   amount: number;
   unit: 'ms' | 'sec' | 'beat';
   drift: boolean;
+  jitter: number;
+  timingDrift: number;
   line: number;
+}
+
+interface LanguageClockConfig {
+  parent: string;
+  rate: number;
+  rateLabel: string;
+  jitter: number;
+  drift: number;
 }
 
 interface LanguageModMetadata {
@@ -624,6 +640,7 @@ export class SonusRuntime {
     const filters = new Map<string, FilterDefinition>();
     const routes = new Map<string, RouteDefinition>();
     const clockSources = new Map<string, ClockDefinition>();
+    const languageClockConfigs = new Map<string, LanguageClockConfig>();
     let clockBpm = 0;
     let mainLevel = 100;
     const views = new Map<string, ViewKind>();
@@ -773,6 +790,25 @@ export class SonusRuntime {
         continue;
       }
 
+      const clockParent = parseLanguageClockParentDirective(line);
+      if (clockParent) {
+        const config = languageClockConfigs.get(clockParent.name) ?? { parent: 'Clock', rate: 1, rateLabel: '*1', jitter: 0, drift: 0 };
+        config.parent = clockParent.parent;
+        config.rate = clockParent.rate;
+        config.rateLabel = clockParent.rateLabel;
+        languageClockConfigs.set(clockParent.name, config);
+        continue;
+      }
+
+      const clockFeel = parseLanguageClockFeelDirective(line);
+      if (clockFeel) {
+        const config = languageClockConfigs.get(clockFeel.name) ?? { parent: 'Clock', rate: 1, rateLabel: '*1', jitter: 0, drift: 0 };
+        if (clockFeel.kind === 'jitter') config.jitter = clockFeel.amount;
+        else config.drift = clockFeel.amount;
+        languageClockConfigs.set(clockFeel.name, config);
+        continue;
+      }
+
       const masterClock = parseLanguageMasterClockDirective(line, lineNumber);
       if (masterClock) {
         if (languageMasterClock) diagnostics.push({ line: lineNumber, message: 'only one CLOCK statement is allowed' });
@@ -919,7 +955,18 @@ export class SonusRuntime {
           diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` });
           continue;
         }
-        const definition: ClockDefinition = { rate, rateLabel: label, parameters: new Map([['RATE', label]]) };
+        const config = languageClockConfigs.get(name);
+        const definition: ClockDefinition = {
+          rate,
+          localRate: config?.rate ?? rate,
+          rateLabel: config?.rateLabel ?? label,
+          parent: config?.parent ?? 'Clock',
+          jitter: 0,
+          drift: 0,
+          localJitter: config?.jitter ?? 0,
+          localDrift: config?.drift ?? 0,
+          parameters: new Map(),
+        };
         clockSources.set(name, definition);
         for (const call of calls) {
           if (call.name === 'view' && call.argument.length === 0) views.set(`${name}.out`, 'trigger');
@@ -1219,7 +1266,7 @@ export class SonusRuntime {
     // source order. All module declarations already exist, so references between
     // modules are still independent from declaration order.
     for (const { source: line, line: lineNumber } of lines) {
-      if (parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageTuringModel(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageFxMetadata(line) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
+      if (parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageTuringModel(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageFxMetadata(line) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
 
       const oscillatorDeclaration = parseOscillatorDeclaration(line);
       if (oscillatorDeclaration) {
@@ -2192,8 +2239,48 @@ export class SonusRuntime {
       }
     }
 
+    const masterJitter = languageMasterClock?.jitter ?? 0;
+    const masterTimingDrift = languageMasterClock?.timingDrift ?? 0;
+    const resolvingClocks = new Set<string>();
+    const resolvedClocks = new Set<string>();
+    const resolveClock = (name: string): ClockDefinition | null => {
+      const definition = clockSources.get(name);
+      if (!definition) return null;
+      if (resolvedClocks.has(name)) return definition;
+      if (resolvingClocks.has(name)) {
+        diagnostics.push({ line: languageMasterClock?.line ?? 1, message: `CLOCK dependency cycle involving '${name}'` });
+        return definition;
+      }
+      resolvingClocks.add(name);
+      let parentRate = 1;
+      let parentJitter = masterJitter;
+      let parentDrift = masterTimingDrift;
+      if (definition.parent !== 'Clock') {
+        const parent = resolveClock(definition.parent);
+        if (!parent) diagnostics.push({ line: languageMasterClock?.line ?? 1, message: `unknown parent CLOCK '${definition.parent}' for '${name}'` });
+        else { parentRate = parent.rate; parentJitter = parent.jitter; parentDrift = parent.drift; }
+      }
+      definition.rate = parentRate * definition.localRate;
+      definition.jitter = Math.min(100, parentJitter + definition.localJitter);
+      definition.drift = Math.min(100, parentDrift + definition.localDrift);
+      definition.parameters = new Map([
+        ['FROM', definition.parent === 'Clock' ? 'MASTER' : definition.parent.toUpperCase()],
+        ['RATE', definition.rateLabel],
+        ['JITTER', `${formatNumber(definition.localJitter)}%`],
+        ['DRIFT', `${formatNumber(definition.localDrift)}%`],
+      ]);
+      resolvingClocks.delete(name);
+      resolvedClocks.add(name);
+      return definition;
+    };
+    for (const name of clockSources.keys()) resolveClock(name);
+
     const schemeNodes: SchemeNode[] = [
-      { id: 'Clock', label: 'CLOCK', kind: 'module' as const, parameters: clockBpm > 0 ? [{ name: 'BPM', value: formatNumber(clockBpm) }] : [], views: embeddedViews.get('Clock') },
+      { id: 'Clock', label: 'CLOCK', kind: 'module' as const, parameters: clockBpm > 0 ? [
+        { name: 'BPM', value: formatNumber(clockBpm) },
+        { name: 'JITTER', value: `${formatNumber(masterJitter)}%` },
+        { name: 'DRIFT', value: `${formatNumber(masterTimingDrift)}%` },
+      ] : [], views: embeddedViews.get('Clock') },
       ...[...clockSources.entries()]
         .filter(([name]) => name.toLowerCase() !== 'clock' && !name.startsWith('__clock_'))
         .map(([name, definition]) => ({ id: name, label: `${name.toUpperCase()} : CLOCK`, kind: 'module' as const, parameters: [...definition.parameters.entries()].map(([parameterName, value]) => ({ name: parameterName, value })), views: embeddedViews.get(name) })),
@@ -2274,7 +2361,11 @@ export class SonusRuntime {
         id: 'Clock',
         label: 'CLOCK',
         kind: 'module' as const,
-        parameters: [{ name: 'BPM', value: `${formatNumber(clockBpm)} BPM` }],
+        parameters: [
+          { name: 'BPM', value: `${formatNumber(clockBpm)} BPM` },
+          { name: 'JITTER', value: `${formatNumber(masterJitter)}%` },
+          { name: 'DRIFT', value: `${formatNumber(masterTimingDrift)}%` },
+        ],
         views: embeddedViews.get('Clock'),
       }] : []),
       { id: 'Audio', label: 'AUDIO OUT', kind: 'module' as const, parameters: [{ name: 'LEVEL', value: `${formatNumber(mainLevel)}%` }], views: embeddedViews.get('Audio') },
@@ -2304,12 +2395,12 @@ export class SonusRuntime {
     this.scheme = { nodes: schemeNodes, connections: schemeConnections };
 
     const program: AudioProgram = {
-      clock: { bpm: clockBpm },
+      clock: { bpm: clockBpm, jitter: masterJitter, drift: masterTimingDrift },
       mainLevel,
       clockSources: [
-        { name: 'Clock', rate: 1 },
-        ...[...clockSources.entries()].map(([name, definition]) => ({ name, rate: definition.rate })),
-        ...whenHandlers.filter((handler) => handler.sourceName !== 'Clock').map((handler) => ({ name: handler.sourceName, rate: handler.rate })),
+        { name: 'Clock', rate: 1, jitter: masterJitter, drift: masterTimingDrift },
+        ...[...clockSources.entries()].map(([name, definition]) => ({ name, rate: definition.rate, jitter: definition.jitter, drift: definition.drift })),
+        ...whenHandlers.filter((handler) => handler.sourceName !== 'Clock').map((handler) => ({ name: handler.sourceName, rate: handler.rate, jitter: masterJitter, drift: masterTimingDrift })),
       ],
       oscillators: [...oscillators.entries()].map(([name, definition]) => ({
         name,
@@ -3582,20 +3673,31 @@ function parseLanguageModMetadata(line: string): LanguageModMetadata | null {
   return { internalName: match[1], displayName: match[2], ownerVoice: match[3] || null };
 }
 
+function parseLanguageClockParentDirective(line: string): { name: string; parent: string; rate: number; rateLabel: string } | null {
+  const match = line.match(/^__clockparent\("([A-Za-z_]\w*)","([A-Za-z_]\w*)","([/*]\d+(?:\.\d+)?)"\)$/);
+  if (!match) return null;
+  const parsed = parseClockRate(match[3]);
+  return parsed ? { name: match[1], parent: match[2], rate: parsed.rate, rateLabel: parsed.label } : null;
+}
+
+function parseLanguageClockFeelDirective(line: string): { name: string; kind: 'jitter' | 'drift'; amount: number } | null {
+  const match = line.match(/^__clockfeel\("([A-Za-z_]\w*)","(jitter|drift)",(\d+(?:\.\d+)?)\)$/);
+  if (!match) return null;
+  return { name: match[1], kind: match[2] as 'jitter' | 'drift', amount: Number(match[3]) };
+}
+
 function parseLanguageMasterClockDirective(line: string, lineNumber: number): LanguageMasterClockDefinition | null {
-  const match = line.match(/^__masterclock\("((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(true|false)\)$/);
+  const match = line.match(/^__masterclock\("((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(true|false),(\d+(?:\.\d+)?),(\d+(?:\.\d+)?)\)$/);
   if (!match) return null;
   let expression: string;
-  try {
-    expression = JSON.parse(`"${match[1]}"`) as string;
-  } catch {
-    return null;
-  }
+  try { expression = JSON.parse(`"${match[1]}"`) as string; } catch { return null; }
   return {
     expression,
     amount: Number(match[2]),
     unit: match[3] as LanguageMasterClockDefinition['unit'],
     drift: match[4] === 'true',
+    jitter: Number(match[5]),
+    timingDrift: Number(match[6]),
     line: lineNumber,
   };
 }

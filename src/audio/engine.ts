@@ -13,9 +13,9 @@ export type SignalKind = 'signal' | 'gate' | 'trigger';
 const DEFAULT_HARDWARE_OUTPUT_GAIN = 0.12;
 
 export interface AudioProgram {
-  clock: { bpm: number };
+  clock: { bpm: number; jitter: number; drift: number };
   mainLevel: number;
-  clockSources: Array<{ name: string; rate: number }>;
+  clockSources: Array<{ name: string; rate: number; jitter: number; drift: number }>;
   oscillators: Array<{
     name: string;
     frequency: number;
@@ -182,6 +182,8 @@ interface TriggerVisualEvent {
 interface ClockSource {
   node: AudioWorkletNode;
   rate: number;
+  jitter: number;
+  drift: number;
   lastTriggerTime: number | null;
   triggerCount: number;
   visualEvents: TriggerVisualEvent[];
@@ -340,7 +342,7 @@ export class AudioEngine {
       if (!desiredMists.has(name)) this.removeMist(name);
     }
 
-    for (const definition of program.clockSources) this.createOrUpdateClock(definition.name, definition.rate);
+    for (const definition of program.clockSources) this.createOrUpdateClock(definition.name, definition.rate, definition.jitter, definition.drift);
     this.updateAllClocks();
 
     for (const definition of program.oscillators) {
@@ -1167,7 +1169,7 @@ export class AudioEngine {
     });
   }
 
-  private createOrUpdateClock(name: string, rate: number): void {
+  private createOrUpdateClock(name: string, rate: number, jitter: number, drift: number): void {
     if (!this.clockWorkletLoaded) return;
     let clock = this.clocks.get(name);
     if (!clock) {
@@ -1176,9 +1178,9 @@ export class AudioEngine {
         numberOfInputs: 0,
         numberOfOutputs: 1,
         outputChannelCount: [1],
-        processorOptions: { bpm: this.masterClockBpm, rate },
+        processorOptions: { bpm: this.masterClockBpm, rate, jitter, drift },
       });
-      clock = { node, rate, lastTriggerTime: null, triggerCount: 0, visualEvents: [] };
+      clock = { node, rate, jitter, drift, lastTriggerTime: null, triggerCount: 0, visualEvents: [] };
       node.port.onmessage = (event) => {
         const message = event.data;
         if (!message || message.type !== 'trigger' || !Number.isFinite(message.frame)) return;
@@ -1188,25 +1190,32 @@ export class AudioEngine {
         current.lastTriggerTime = emittedAt;
         current.triggerCount += 1;
         for (const listener of this.clockTriggerListeners.get(name) ?? []) listener();
-        const effectiveBpm = this.masterClockBpm * current.rate;
-        if (effectiveBpm > 0) {
-          const periodAtEmission = 60 / effectiveBpm;
-          current.visualEvents.push({
-            emittedAt,
-            travelDuration: Math.max(0.05, periodAtEmission * 4),
-          });
+        const periodAtEmission = Number.isFinite(message.periodSamples) && message.periodSamples > 0
+          ? message.periodSamples / this.context.sampleRate
+          : (this.masterClockBpm * current.rate > 0 ? 60 / (this.masterClockBpm * current.rate) : 0);
+        if (periodAtEmission > 0) {
+          current.visualEvents.push({ emittedAt, travelDuration: Math.max(0.05, periodAtEmission * 4) });
           if (current.visualEvents.length > 128) current.visualEvents.splice(0, current.visualEvents.length - 128);
         }
       };
       this.clocks.set(name, clock);
     }
     clock.rate = rate;
-    clock.node.port.postMessage({ type: 'clock', bpm: this.masterClockBpm, rate, running: this.clockTransportRunning });
+    clock.jitter = jitter;
+    clock.drift = drift;
+    clock.node.port.postMessage({ type: 'clock', bpm: this.masterClockBpm, rate, jitter, drift, running: this.clockTransportRunning });
   }
 
   private updateAllClocks(): void {
     for (const clock of this.clocks.values()) {
-      clock.node.port.postMessage({ type: 'clock', bpm: this.masterClockBpm, rate: clock.rate, running: this.clockTransportRunning });
+      clock.node.port.postMessage({
+        type: 'clock',
+        bpm: this.masterClockBpm,
+        rate: clock.rate,
+        jitter: clock.jitter,
+        drift: clock.drift,
+        running: this.clockTransportRunning,
+      });
     }
   }
 

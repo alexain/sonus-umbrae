@@ -96,15 +96,15 @@ The language should not depend on the identity of any one upstream hardware modu
 
 Planned directions include:
 
-- Master BPM.
-- Clock-derived trigger sources using ratios such as `/2`, `/4`, `*2`, and non-binary ratios.
+- Master BPM with per-clock `jitter` and slow correlated `drift`.
+- Named hierarchical clock sources derived from `MASTER` or another clock, with ratios such as `/2`, `/4`, `*2`, and non-binary ratios.
 - Meter information.
 - Phase offsets.
 - Swing.
 - Probability.
 - Trigger skipping.
 - Ratchets.
-- Irregular and algorithmically changing rates.
+- Additional clock feel controls such as swing, phase, probability and algorithmically changing rates.
 - Event-driven scripting connected to clock and trigger ports.
 
 The design is conceptually closer to a programmable modular timing source than to a conventional DAW transport.
