@@ -8,6 +8,7 @@ const RESERVED_IDENTIFIERS = new Set([
   'clock',
   'midi',
   'voice',
+  'fx',
   'swell',
   'mist',
   'pattern',
@@ -213,6 +214,15 @@ interface LanguageParameterCycleDefinition {
   line: number;
 }
 
+interface LanguageParameterDefaultDefinition {
+  voice: string;
+  parameter: 'harmo' | 'timbre' | 'morph';
+  expression: string;
+  line: number;
+}
+
+type LanguageObjectEveryDefinition = LanguageCycleDefinition;
+
 interface LanguageMasterClockDefinition {
   expression: string;
   amount: number;
@@ -231,6 +241,46 @@ interface LanguageModSetDirective {
   internalName: string;
   parameter: 'freq' | 'slope' | 'shape' | 'smooth' | 'shift' | 'output' | 'range';
   value: string;
+  line: number;
+}
+
+interface LanguageFxMetadata {
+  name: string;
+  modelId: string | null;
+}
+
+type LanguageFxParameter = 'position' | 'size' | 'pitch' | 'density' | 'texture' | 'mix' | 'spread' | 'feedback' | 'reverb';
+
+interface LanguageFxParameterCycleDefinition {
+  fx: string;
+  parameter: LanguageFxParameter;
+  expression: string;
+  amount: number;
+  unit: 'ms' | 'sec' | 'beat';
+  chance: number;
+  drift: boolean;
+  loose: boolean;
+  line: number;
+}
+
+interface LanguageFxParameterDefaultDefinition {
+  fx: string;
+  parameter: LanguageFxParameter;
+  expression: string;
+  line: number;
+}
+
+interface LanguageFxPitchSequenceDefinition {
+  values: number[];
+  mode: 'order' | 'random' | 'walk' | 'shuffle' | 'reverse';
+}
+
+interface LanguageFxModulationDefinition {
+  fx: string;
+  parameter: LanguageFxParameter;
+  mod: string;
+  channel: 1 | 2 | 3 | 4;
+  depth: number;
   line: number;
 }
 
@@ -462,10 +512,58 @@ export class SonusRuntime {
     const languageCycles = new Map<string, LanguageCycleDefinition>();
     const languageSetCycles = new Map<string, LanguageSetCycleDefinition>();
     const languageParameterCycles: LanguageParameterCycleDefinition[] = [];
+    const languageParameterDefaults: LanguageParameterDefaultDefinition[] = [];
+    const languageObjectEvery = new Map<string, LanguageObjectEveryDefinition>();
+    const languageFxMeta = new Map<string, LanguageFxMetadata>();
+    const languageFxParameterCycles: LanguageFxParameterCycleDefinition[] = [];
+    const languageFxParameterDefaults: LanguageFxParameterDefaultDefinition[] = [];
+    const languageFxPitchSequences = new Map<string, LanguageFxPitchSequenceDefinition>();
+    const languageFxPitchCycles = new Map<string, LanguageCycleDefinition>();
+    const languageFxModulations: LanguageFxModulationDefinition[] = [];
     const languageMods = new Map<string, LanguageModMetadata>();
     const languageModSets: LanguageModSetDirective[] = [];
     let languageMasterClock: LanguageMasterClockDefinition | null = null;
     for (const { source: line, line: lineNumber } of lines) {
+      const fxMetadata = parseLanguageFxMetadata(line);
+      if (fxMetadata) {
+        const existing = languageFxMeta.get(fxMetadata.name);
+        languageFxMeta.set(fxMetadata.name, {
+          name: fxMetadata.name,
+          modelId: fxMetadata.modelId ?? existing?.modelId ?? null,
+        });
+        continue;
+      }
+
+      const fxParameterCycle = parseLanguageFxParameterCycleDirective(line, lineNumber);
+      if (fxParameterCycle) {
+        languageFxParameterCycles.push(fxParameterCycle);
+        continue;
+      }
+
+      const fxParameterDefault = parseLanguageFxParameterDefaultDirective(line, lineNumber);
+      if (fxParameterDefault) {
+        languageFxParameterDefaults.push(fxParameterDefault);
+        continue;
+      }
+
+      const fxSequence = parseLanguageFxPitchSequenceDirective(line);
+      if (fxSequence) {
+        languageFxPitchSequences.set(fxSequence.name, { values: fxSequence.values, mode: fxSequence.mode });
+        continue;
+      }
+
+      const fxPitchCycle = parseLanguageFxPitchCycleDirective(line);
+      if (fxPitchCycle) {
+        languageFxPitchCycles.set(fxPitchCycle.name, fxPitchCycle.timing);
+        continue;
+      }
+
+      const fxModulation = parseLanguageFxModulationDirective(line, lineNumber);
+      if (fxModulation) {
+        languageFxModulations.push(fxModulation);
+        continue;
+      }
+
       const modMetadata = parseLanguageModMetadata(line);
       if (modMetadata) {
         languageMods.set(modMetadata.internalName, modMetadata);
@@ -512,6 +610,24 @@ export class SonusRuntime {
         continue;
       }
 
+      const parameterDefault = parseLanguageParameterDefaultDirective(line, lineNumber);
+      if (parameterDefault) {
+        languageParameterDefaults.push(parameterDefault);
+        continue;
+      }
+
+      const objectEvery = parseLanguageObjectEveryDirective(line);
+      if (objectEvery) {
+        languageObjectEvery.set(objectEvery.name, {
+          amount: objectEvery.amount,
+          unit: objectEvery.unit,
+          chance: objectEvery.chance,
+          drift: objectEvery.drift,
+          loose: objectEvery.loose,
+        });
+        continue;
+      }
+
       const setCycle = parseLanguageSetCycleDirective(line);
       if (setCycle) {
         languageSetCycles.set(setCycle.name, {
@@ -522,6 +638,46 @@ export class SonusRuntime {
           loose: setCycle.loose,
         });
       }
+    }
+
+    // Resolve object-level `every` only for dynamic properties that did not
+    // declare their own cadence. All resulting jobs still run on the single
+    // RuntimeScheduler epoch / master-clock transport.
+    for (const [name, timing] of languageObjectEvery) {
+      if (languageSequences.has(name) && !languageCycles.has(name)) {
+        languageCycles.set(name, { ...timing });
+      }
+    }
+
+    const explicitParameterEvery = new Set(
+      languageParameterCycles.map((cycle) => `${cycle.voice}:${cycle.parameter}`),
+    );
+    for (const definition of languageParameterDefaults) {
+      const timing = languageObjectEvery.get(definition.voice);
+      if (!timing) continue;
+      const key = `${definition.voice}:${definition.parameter}`;
+      if (explicitParameterEvery.has(key)) continue;
+      languageParameterCycles.push({
+        ...definition,
+        ...timing,
+      });
+    }
+
+    const explicitFxParameterEvery = new Set(
+      languageFxParameterCycles.map((cycle) => `${cycle.fx}:${cycle.parameter}`),
+    );
+    for (const definition of languageFxParameterDefaults) {
+      const timing = languageObjectEvery.get(definition.fx);
+      if (!timing) continue;
+      const key = `${definition.fx}:${definition.parameter}`;
+      if (explicitFxParameterEvery.has(key)) continue;
+      languageFxParameterCycles.push({ ...definition, ...timing });
+    }
+
+    for (const [name] of languageFxPitchSequences) {
+      if (languageFxPitchCycles.has(name)) continue;
+      const timing = languageObjectEvery.get(name);
+      if (timing) languageFxPitchCycles.set(name, { ...timing });
     }
 
     // Pass 1: declarations. Objects are collected before the remaining statements
@@ -818,7 +974,7 @@ export class SonusRuntime {
     // source order. All module declarations already exist, so references between
     // modules are still independent from declaration order.
     for (const { source: line, line: lineNumber } of lines) {
-      if (parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
+      if (parseLanguageFxMetadata(line) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
 
       const oscillatorDeclaration = parseOscillatorDeclaration(line);
       if (oscillatorDeclaration) {
@@ -1175,6 +1331,21 @@ export class SonusRuntime {
         continue;
       }
 
+      match = line.match(/^([A-Za-z_]\w*)\.(position|size|pitch|density|texture|mix|spread|feedback|reverb|freeze|reverse|mode)\(\s*(.+)\s*\)\s*$/);
+      if (match && mists.has(match[1])) {
+        const definition = mists.get(match[1])!;
+        const error = applyMistCall(
+          match[1],
+          definition,
+          { name: match[2], argument: match[3] },
+          moduleViews,
+          (expression) => evalValue(expression, lineNumber),
+        );
+        if (error) diagnostics.push({ line: lineNumber, message: error });
+        else results.push({ message: `${match[1]}.${match[2]}` });
+        continue;
+      }
+
       match = line.match(/^([A-Za-z_]\w*)\.(slope|shape|smooth|shift)\(\s*(.+)\s*\)\s*$/);
       if (match) {
         const [, name, parameter, rawValue] = match;
@@ -1418,6 +1589,14 @@ export class SonusRuntime {
       }
     }
 
+    for (const cycle of languageFxParameterCycles) {
+      if (!mists.has(cycle.fx)) diagnostics.push({ line: cycle.line, message: `FX parameter timing references unknown FX: ${cycle.fx}` });
+    }
+    for (const modulation of languageFxModulations) {
+      if (!mists.has(modulation.fx)) diagnostics.push({ line: modulation.line, message: `FX modulation references unknown FX: ${modulation.fx}` });
+      if (!swells.has(modulation.mod)) diagnostics.push({ line: modulation.line, message: `FX modulation references unknown MOD: ${modulation.mod}` });
+    }
+
     for (const directive of languageModSets) {
       const swell = swells.get(directive.internalName);
       if (!swell) {
@@ -1583,7 +1762,7 @@ export class SonusRuntime {
         value: mod ? 'Mod' : 'Swell',
       });
     }
-    for (const [name] of mists) variableViews.push({ name, value: 'Mist' });
+    for (const [name] of mists) variableViews.push({ name, value: languageFxMeta.has(name) ? 'Fx' : 'Mist' });
     for (const [name] of clockSources) variableViews.push({ name, value: 'Clock' });
     for (const [name] of oscillators) variableViews.push({ name, value: 'Osc' });
     for (const [name] of gains) variableViews.push({ name, value: 'Gain' });
@@ -1737,16 +1916,21 @@ export class SonusRuntime {
           views: embeddedViews.get(name),
         };
       }),
-      ...[...mists.entries()].map(([name, definition]) => ({
-        id: name,
-        label: `${name.toUpperCase()} : MIST`,
-        kind: 'module' as const,
-        parameters: [...definition.parameters.entries()].map(([parameterName, value]) => ({
-          name: parameterName,
-          value,
-        })),
-        views: embeddedViews.get(name),
-      })),
+      ...[...mists.entries()].map(([name, definition]) => {
+        const fx = languageFxMeta.get(name);
+        return {
+          id: name,
+          label: `${name.toUpperCase()} : ${fx ? 'FX' : 'MIST'}`,
+          kind: 'module' as const,
+          parameters: [
+            ...(fx?.modelId ? [{ name: 'MODEL', value: fx.modelId.toUpperCase() }] : []),
+            ...[...definition.parameters.entries()]
+              .filter(([parameterName]) => !fx || parameterName !== 'MODE')
+              .map(([parameterName, value]) => ({ name: parameterName, value })),
+          ],
+          views: embeddedViews.get(name),
+        };
+      }),
       ...[...gains.entries()].map(([name, definition]) => ({
         id: name,
         label: `${name.toUpperCase()} : GAIN`,
@@ -1972,6 +2156,124 @@ export class SonusRuntime {
         }
         const looseRatio = cycle.loose ? 0.94 + random() * 0.12 : 1;
         return baseMs * driftRatio * looseRatio;
+      });
+    }
+
+
+    const clampFxParameter = (parameter: LanguageFxParameter, value: number): number | null => {
+      if (!Number.isFinite(value)) return null;
+      if (parameter === 'pitch') return value >= -48 && value <= 48 ? value : null;
+      return value >= 0 && value <= 100 ? value : null;
+    };
+
+    for (const cycle of languageFxParameterCycles) {
+      const fx = mists.get(cycle.fx);
+      if (!fx) continue;
+      let driftRatio = 1;
+
+      const updateFxParameter = (): void => {
+        if (cycle.chance < 100 && random() * 100 >= cycle.chance) return;
+        const value = evalNumber(cycle.expression, cycle.line, `FX ${cycle.parameter}`);
+        if (value === undefined) return;
+        const checked = clampFxParameter(cycle.parameter, value);
+        if (checked === null) return;
+        fx[cycle.parameter] = checked;
+        this.audio.setMistParameter(cycle.fx, cycle.parameter, checked);
+      };
+
+      if (cycle.unit === 'beat') {
+        this.scheduler.addBeatJob(cycle.amount, updateFxParameter, cycle.loose);
+        continue;
+      }
+      const baseMs = cycle.unit === 'sec' ? cycle.amount * 1000 : cycle.amount;
+      this.scheduler.addWallJob(baseMs, updateFxParameter, () => {
+        if (cycle.drift) {
+          driftRatio += (random() - 0.5) * 0.06;
+          driftRatio = Math.min(1.2, Math.max(0.8, driftRatio));
+        } else driftRatio = 1;
+        const looseRatio = cycle.loose ? 0.94 + random() * 0.12 : 1;
+        return baseMs * driftRatio * looseRatio;
+      });
+    }
+
+    for (const [name, cycle] of languageFxPitchCycles) {
+      const fx = mists.get(name);
+      const sequence = languageFxPitchSequences.get(name);
+      if (!fx || !sequence || sequence.values.length === 0) continue;
+      let cursor = 0;
+      let walkCursor = 0;
+      let shuffleOrder: number[] = [];
+      let shuffleCursor = 0;
+      let driftRatio = 1;
+
+      const reshuffle = (): void => {
+        shuffleOrder = Array.from({ length: sequence.values.length }, (_, index) => index);
+        for (let index = shuffleOrder.length - 1; index > 0; index -= 1) {
+          const swap = Math.floor(random() * (index + 1));
+          [shuffleOrder[index], shuffleOrder[swap]] = [shuffleOrder[swap], shuffleOrder[index]];
+        }
+        shuffleCursor = 0;
+      };
+
+      const nextPitch = (): number => {
+        const values = sequence.values;
+        if (values.length === 1) return values[0];
+        if (sequence.mode === 'random') return values[Math.floor(random() * values.length)];
+        if (sequence.mode === 'walk') {
+          walkCursor += random() < 0.5 ? -1 : 1;
+          if (walkCursor < 0) walkCursor = 1;
+          if (walkCursor >= values.length) walkCursor = Math.max(0, values.length - 2);
+          return values[walkCursor];
+        }
+        if (sequence.mode === 'shuffle') {
+          if (shuffleOrder.length !== values.length || shuffleCursor >= shuffleOrder.length) reshuffle();
+          return values[shuffleOrder[shuffleCursor++]];
+        }
+        if (sequence.mode === 'reverse') {
+          cursor = (cursor - 1 + values.length) % values.length;
+          return values[cursor];
+        }
+        cursor = (cursor + 1) % values.length;
+        return values[cursor];
+      };
+
+      const fire = (): void => {
+        if (cycle.chance < 100 && random() * 100 >= cycle.chance) return;
+        const pitch = nextPitch();
+        fx.pitch = pitch;
+        this.audio.setMistParameter(name, 'pitch', pitch);
+      };
+
+      if (cycle.unit === 'beat') {
+        this.scheduler.addBeatJob(cycle.amount, fire, cycle.loose);
+        continue;
+      }
+      const baseMs = cycle.unit === 'sec' ? cycle.amount * 1000 : cycle.amount;
+      this.scheduler.addWallJob(baseMs, fire, () => {
+        if (cycle.drift) {
+          driftRatio += (random() - 0.5) * 0.06;
+          driftRatio = Math.min(1.2, Math.max(0.8, driftRatio));
+        } else driftRatio = 1;
+        const looseRatio = cycle.loose ? 0.94 + random() * 0.12 : 1;
+        return baseMs * driftRatio * looseRatio;
+      });
+    }
+
+    if (languageFxModulations.length > 0) {
+      // One control-rate scheduler job services every FX modulation route.
+      this.scheduler.addWallJob(1000 / 60, () => {
+        for (const modulation of languageFxModulations) {
+          const fx = mists.get(modulation.fx);
+          if (!fx) continue;
+          const cv = this.audio.readModOutput(modulation.mod, modulation.channel);
+          if (cv === null) continue;
+          const normalized = Math.max(-1, Math.min(1, cv / 5));
+          const base = fx[modulation.parameter] as number;
+          const span = modulation.parameter === 'pitch' ? 48 : 100;
+          const next = base + normalized * span * (modulation.depth / 100);
+          const checked = clampFxParameter(modulation.parameter, next);
+          if (checked !== null) this.audio.setMistParameter(modulation.fx, modulation.parameter, checked);
+        }
       });
     }
 
@@ -2291,6 +2593,94 @@ function parseLanguageCycleDirective(line: string): ({ name: string; amount: num
   };
 }
 
+function parseLanguageFxMetadata(line: string): LanguageFxMetadata | null {
+  const match = line.match(/^__fxmeta\("([A-Za-z_]\w*)"(?:,"([^"]+)")?\)$/);
+  return match ? { name: match[1], modelId: match[2] ?? null } : null;
+}
+
+function parseLanguageFxParameterCycleDirective(
+  line: string,
+  lineNumber: number,
+): LanguageFxParameterCycleDefinition | null {
+  const match = line.match(
+    /^__fxparamcycle\("([A-Za-z_]\w*)","(position|size|pitch|density|texture|mix|spread|feedback|reverb)","((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false)\)$/,
+  );
+  if (!match) return null;
+  let expression: string;
+  try { expression = JSON.parse(`"${match[3]}"`) as string; } catch { return null; }
+  return {
+    fx: match[1],
+    parameter: match[2] as LanguageFxParameter,
+    expression,
+    amount: Number(match[4]),
+    unit: match[5] as LanguageFxParameterCycleDefinition['unit'],
+    chance: Number(match[6]),
+    drift: match[7] === 'true',
+    loose: match[8] === 'true',
+    line: lineNumber,
+  };
+}
+
+function parseLanguageFxParameterDefaultDirective(
+  line: string,
+  lineNumber: number,
+): LanguageFxParameterDefaultDefinition | null {
+  const match = line.match(
+    /^__fxparamdefault\("([A-Za-z_]\w*)","(position|size|pitch|density|texture|mix|spread|feedback|reverb)","((?:[^"\\]|\\.)*)"\)$/,
+  );
+  if (!match) return null;
+  let expression: string;
+  try { expression = JSON.parse(`"${match[3]}"`) as string; } catch { return null; }
+  return { fx: match[1], parameter: match[2] as LanguageFxParameter, expression, line: lineNumber };
+}
+
+function parseLanguageFxPitchSequenceDirective(
+  line: string,
+): ({ name: string } & LanguageFxPitchSequenceDefinition) | null {
+  const match = line.match(/^__fxsequence\("([A-Za-z_]\w*)","([^"]*)","(order|random|walk|shuffle|reverse)"\)$/);
+  if (!match) return null;
+  return {
+    name: match[1],
+    values: match[2].split('|').filter(Boolean).map(Number),
+    mode: match[3] as LanguageFxPitchSequenceDefinition['mode'],
+  };
+}
+
+function parseLanguageFxPitchCycleDirective(
+  line: string,
+): { name: string; timing: LanguageCycleDefinition } | null {
+  const match = line.match(/^__fxpitchcycle\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false)\)$/);
+  if (!match) return null;
+  return {
+    name: match[1],
+    timing: {
+      amount: Number(match[2]),
+      unit: match[3] as LanguageCycleDefinition['unit'],
+      chance: Number(match[4]),
+      drift: match[5] === 'true',
+      loose: match[6] === 'true',
+    },
+  };
+}
+
+function parseLanguageFxModulationDirective(
+  line: string,
+  lineNumber: number,
+): LanguageFxModulationDefinition | null {
+  const match = line.match(
+    /^__fxmod\("([A-Za-z_]\w*)","(position|size|pitch|density|texture|mix|spread|feedback|reverb)","([A-Za-z_]\w*)",([1-4]),(-?\d+(?:\.\d+)?)\)$/,
+  );
+  if (!match) return null;
+  return {
+    fx: match[1],
+    parameter: match[2] as LanguageFxParameter,
+    mod: match[3],
+    channel: Number(match[4]) as 1 | 2 | 3 | 4,
+    depth: Number(match[5]),
+    line: lineNumber,
+  };
+}
+
 function parseLanguageModSetDirective(line: string, lineNumber: number): LanguageModSetDirective | null {
   const match = line.match(
     /^__modset\("([A-Za-z_]\w*)","(freq|slope|shape|smooth|shift|output|range)","((?:[^"\\]|\\.)*)"\);?$/,
@@ -2362,6 +2752,47 @@ function parseLanguageParameterCycleDirective(
     drift: match[7] === 'true',
     loose: match[8] === 'true',
     line: lineNumber,
+  };
+}
+
+function parseLanguageParameterDefaultDirective(
+  line: string,
+  lineNumber: number,
+): LanguageParameterDefaultDefinition | null {
+  const match = line.match(
+    /^__paramdefault\("([A-Za-z_]\w*)","(harmo|timbre|morph)","((?:[^"\\]|\\.)*)"\)$/,
+  );
+  if (!match) return null;
+
+  let expression: string;
+  try {
+    expression = JSON.parse(`"${match[3]}"`) as string;
+  } catch {
+    return null;
+  }
+
+  return {
+    voice: match[1],
+    parameter: match[2] as LanguageParameterDefaultDefinition['parameter'],
+    expression,
+    line: lineNumber,
+  };
+}
+
+function parseLanguageObjectEveryDirective(
+  line: string,
+): ({ name: string } & LanguageObjectEveryDefinition) | null {
+  const match = line.match(
+    /^__objectevery\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false)\)$/,
+  );
+  if (!match) return null;
+  return {
+    name: match[1],
+    amount: Number(match[2]),
+    unit: match[3] as LanguageObjectEveryDefinition['unit'],
+    chance: Number(match[4]),
+    drift: match[5] === 'true',
+    loose: match[6] === 'true',
   };
 }
 

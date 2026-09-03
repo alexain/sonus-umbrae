@@ -964,6 +964,46 @@ export class AudioEngine {
     voice.node.port.postMessage({ type: 'params', [parameter]: value / 100 });
   }
 
+  setMistParameter(
+    name: string,
+    parameter: 'position' | 'size' | 'pitch' | 'density' | 'texture' | 'mix' | 'spread' | 'feedback' | 'reverb',
+    value: number,
+  ): void {
+    const mist = this.mists.get(name);
+    if (!mist) throw new Error(`unknown Mist object: ${name}`);
+
+    if (parameter === 'pitch') {
+      if (!Number.isFinite(value) || value < -48 || value > 48) {
+        throw new RangeError('Mist pitch must be between -48 and 48 semitones');
+      }
+    } else if (!Number.isFinite(value) || value < 0 || value > 100) {
+      throw new RangeError(`Mist ${parameter} must be between 0 and 100`);
+    }
+
+    mist[parameter] = value;
+    const context = this.ensureContext();
+
+    if (parameter === 'mix') {
+      const mix = Math.max(0, Math.min(1, value / 100));
+      const dryGain = Math.cos(mix * Math.PI * 0.5);
+      const wetGain = Math.sin(mix * Math.PI * 0.5);
+      mist.dryL.gain.setTargetAtTime(dryGain, context.currentTime, 0.008);
+      mist.dryR.gain.setTargetAtTime(dryGain, context.currentTime, 0.008);
+      mist.wetL.gain.setTargetAtTime(wetGain, context.currentTime, 0.008);
+      mist.wetR.gain.setTargetAtTime(wetGain, context.currentTime, 0.008);
+    }
+
+    mist.node.port.postMessage({
+      type: 'params',
+      [parameter]: parameter === 'pitch' ? value : value / 100,
+    });
+  }
+
+  readModOutput(name: string, channel: 1 | 2 | 3 | 4): number | null {
+    const swell = this.swells.get(name);
+    return swell ? swell.monitorValues[channel - 1] : null;
+  }
+
   setMasterClockBpm(bpm: number): void {
     if (!Number.isFinite(bpm) || bpm < 0 || bpm > 300) {
       throw new RangeError('master clock BPM must be between 0 and 300');

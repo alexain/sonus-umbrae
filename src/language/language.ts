@@ -29,6 +29,22 @@ type VoiceState = {
   soundId: string | null;
 };
 
+type FxState = {
+  name: string;
+  line: number;
+  indentation: number;
+  hasModel: boolean;
+  modelId: string | null;
+};
+
+type FxParameter = 'position' | 'size' | 'pitch' | 'density' | 'texture' | 'mix' | 'spread' | 'feedback' | 'reverb';
+
+type FxModelSchema = {
+  lowLevelMode: string;
+  parameters: ReadonlySet<FxParameter>;
+  musicalPitch: boolean;
+};
+
 type ModState = {
   name: string;
   internalName: string;
@@ -106,6 +122,22 @@ const SOUND_ENGINE_REGISTRY: Record<string, SoundEngineSchema> = {
   'macro.strings': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
   'macro.chiptune': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
 };
+
+const MIST_PARAMETERS = new Set<FxParameter>([
+  'position', 'size', 'pitch', 'density', 'texture', 'mix', 'spread', 'feedback', 'reverb',
+]);
+
+const FX_MODEL_REGISTRY: Record<string, FxModelSchema> = {
+  'mist.grain':     { lowLevelMode: 'granular',        parameters: MIST_PARAMETERS, musicalPitch: true },
+  'mist.stretch':   { lowLevelMode: 'stretch',         parameters: MIST_PARAMETERS, musicalPitch: true },
+  'mist.delay':     { lowLevelMode: 'looping_delay',   parameters: MIST_PARAMETERS, musicalPitch: true },
+  'mist.spectral':  { lowLevelMode: 'spectral',        parameters: MIST_PARAMETERS, musicalPitch: true },
+  'mist.reverb':    { lowLevelMode: 'oliverb',         parameters: MIST_PARAMETERS, musicalPitch: true },
+  'mist.resonator': { lowLevelMode: 'resonestor',      parameters: MIST_PARAMETERS, musicalPitch: true },
+  'mist.repeat':    { lowLevelMode: 'beat_repeat',     parameters: MIST_PARAMETERS, musicalPitch: true },
+  'mist.smear':     { lowLevelMode: 'spectral_clouds', parameters: MIST_PARAMETERS, musicalPitch: true },
+};
+
 
 const MODE_INTERVALS: Record<string, number[]> = {
   major: [0, 2, 4, 5, 7, 9, 11],
@@ -357,7 +389,7 @@ function parseTimingModifiers(modifiers: string[], line: number, unit: string): 
     const normalized = modifier.toLowerCase();
     if (normalized === 'drift') {
       if (unit === 'beat') {
-        throw new LanguageError([{ line, message: 'drift is available only for sec/ms cycles; beat cycles stay locked to the master clock' }]);
+        throw new LanguageError([{ line, message: 'drift is available only for sec/ms timing; beat timing stays locked to the master clock' }]);
       }
       result.drift = true;
       continue;
@@ -366,7 +398,7 @@ function parseTimingModifiers(modifiers: string[], line: number, unit: string): 
       result.loose = true;
       continue;
     }
-    throw new LanguageError([{ line, message: `cycle does not support modifier '${modifier}'` }]);
+    throw new LanguageError([{ line, message: `timing does not support modifier '${modifier}'` }]);
   }
 
   return result;
@@ -488,34 +520,18 @@ function compileVoiceProperty(
       throw new LanguageError([{ line, message: `${key} is not available for ${voice.soundId ?? 'this sound'}` }]);
     }
 
-    const cycleMatch = value.match(
-      /^(.*?)\s+cycle\s+(\d+(?:\.\d+)?)\s+(ms|sec|secs|second|seconds|beat|beats)(?:\s+with\s+(.+))?$/i,
-    );
-    const expression = (cycleMatch ? cycleMatch[1] : value).trim();
+    const split = splitEveryClause(value);
+    const expression = split.base.trim();
     if (!expression) {
       throw new LanguageError([{ line, message: `${key} expects a numeric expression` }]);
     }
 
-    if (!cycleMatch) {
-      return `${voice.name}.${key}(${expression});`;
+    if (split.every === null) {
+      return `${voice.name}.${key}(${expression}); __paramdefault(${JSON.stringify(voice.name)},${JSON.stringify(key)},${JSON.stringify(expression)});`;
     }
 
-    const amount = numberValue(cycleMatch[2], line, `${key} cycle`);
-    if (amount <= 0) {
-      throw new LanguageError([{ line, message: `${key} cycle interval must be greater than 0` }]);
-    }
-    const unit = normalizeCycleUnit(cycleMatch[3], line);
-    if (unit === 'beat' && !Number.isInteger(amount)) {
-      throw new LanguageError([{ line, message: `${key} beat cycles currently require a whole number of beats` }]);
-    }
-
-    const modifiers = (cycleMatch[4] ?? '')
-      .split(',')
-      .map((item) => item.trim())
-      .filter(Boolean);
-    const timing = parseTimingModifiers(modifiers, line, unit);
-
-    return `${voice.name}.${key}(${expression}); __paramcycle(${JSON.stringify(voice.name)},${JSON.stringify(key)},${JSON.stringify(expression)},${amount},${JSON.stringify(unit)},${timing.chance},${timing.drift},${timing.loose});`;
+    const timing = parseEverySpec(split.every, line, sourceDefinitions);
+    return `${voice.name}.${key}(${expression}); __paramcycle(${JSON.stringify(voice.name)},${JSON.stringify(key)},${JSON.stringify(expression)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose});`;
   }
 
   switch (key) {
@@ -548,7 +564,8 @@ function compileVoiceProperty(
     }
 
     case 'note': {
-      const { base, modifiers } = splitWith(value);
+      const split = splitEveryClause(value);
+      const { base, modifiers } = splitWith(split.base);
       const notes = parseList(base, line, 'note');
       const frequencies = notes.map((note) => {
         const midi = midiFromNote(note);
@@ -559,12 +576,14 @@ function compileVoiceProperty(
       if (frequencies.length === 1 && modifiers.length > 0) {
         throw new LanguageError([{ line, message: 'note selection modifiers require a list' }]);
       }
-      const directive = frequencies.length > 1 ? ` ${sequenceDirective(voice.name, frequencies, mode)}` : '';
-      return `${voice.name}.freq(${frequencies[0]});${directive}`;
+      const sequence = frequencies.length > 1 ? ` ${sequenceDirective(voice.name, frequencies, mode)}` : '';
+      const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
+      return `${voice.name}.freq(${frequencies[0]});${sequence}${every}`;
     }
 
     case 'freq': {
-      const { base, modifiers } = splitWith(value);
+      const split = splitEveryClause(value);
+      const { base, modifiers } = splitWith(split.base);
       const values = parseList(base, line, 'freq').map((item) => numberValue(item, line, 'freq'));
       if (values.some((item) => item <= 0)) {
         throw new LanguageError([{ line, message: 'freq must be greater than 0' }]);
@@ -573,50 +592,31 @@ function compileVoiceProperty(
       if (values.length === 1 && modifiers.length > 0) {
         throw new LanguageError([{ line, message: 'freq selection modifiers require a list' }]);
       }
-      const directive = values.length > 1 ? ` ${sequenceDirective(voice.name, values, mode)}` : '';
-      return `${voice.name}.freq(${values[0]});${directive}`;
+      const sequence = values.length > 1 ? ` ${sequenceDirective(voice.name, values, mode)}` : '';
+      const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
+      return `${voice.name}.freq(${values[0]});${sequence}${every}`;
     }
 
     case 'scale': {
-      const parsed = parseScaleSpec(value, line, true);
+      const split = splitEveryClause(value);
+      const parsed = parseScaleSpec(split.base, line, true);
       if (!parsed) {
         throw new LanguageError([{
           line,
           message: 'scale expects root and mode, optionally followed by with range <note> <note> and one sequencing modifier',
         }]);
       }
-      return sourceSequenceCode(voice.name, parsed.values, parsed.mode);
+      const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
+      return `${sourceSequenceCode(voice.name, parsed.values, parsed.mode)}${every}`;
     }
 
-    case 'cycle': {
-      const { base, modifiers } = splitWith(value);
-      const parts = base.split(/\s+/).filter(Boolean);
-      if (parts.length !== 2) {
-        throw new LanguageError([{ line, message: 'cycle expects a number followed by ms, sec, beat, or beats' }]);
-      }
-      const amount = numberValue(parts[0], line, 'cycle');
-      if (amount <= 0) {
-        throw new LanguageError([{ line, message: 'cycle interval must be greater than 0' }]);
-      }
-
-      const rawUnit = parts[1].toLowerCase();
-      const unit = rawUnit === 'ms'
-        ? 'ms'
-        : rawUnit === 'sec' || rawUnit === 'secs' || rawUnit === 'second' || rawUnit === 'seconds'
-          ? 'sec'
-          : rawUnit === 'beat' || rawUnit === 'beats'
-            ? 'beat'
-            : null;
-      if (!unit) {
-        throw new LanguageError([{ line, message: `unknown cycle unit '${parts[1]}'` }]);
-      }
-      if (unit === 'beat' && !Number.isInteger(amount)) {
-        throw new LanguageError([{ line, message: 'beat cycles currently require a whole number of beats' }]);
-      }
-
-      const timing = parseTimingModifiers(modifiers, line, unit);
-      return `__cycle(${JSON.stringify(voice.name)},${amount},${JSON.stringify(unit)},${timing.chance},${timing.drift},${timing.loose});`;
+    case 'every': {
+      const timing = parseEverySpec(value, line, sourceDefinitions);
+      return `__objectevery(${JSON.stringify(voice.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose});`;
     }
+
+    case 'cycle':
+      throw new LanguageError([{ line, message: "standalone cycle is deprecated; use 'every' or an inline 'every' clause" }]);
 
     case 'level': {
       const level = numberValue(value, line, 'level');
@@ -638,6 +638,59 @@ function normalizeCycleUnit(rawUnit: string, line: number): 'ms' | 'sec' | 'beat
   if (unit === 'sec' || unit === 'secs' || unit === 'second' || unit === 'seconds') return 'sec';
   if (unit === 'beat' || unit === 'beats') return 'beat';
   throw new LanguageError([{ line, message: `unknown cycle unit '${rawUnit}'` }]);
+}
+
+type EverySpec = {
+  amount: number;
+  unit: 'ms' | 'sec' | 'beat';
+  chance: number;
+  drift: boolean;
+  loose: boolean;
+};
+
+function splitEveryClause(value: string): { base: string; every: string | null } {
+  const match = value.match(/^(.*?)\s+every\s+(.+)$/i);
+  if (!match) return { base: value.trim(), every: null };
+  return { base: match[1].trim(), every: match[2].trim() };
+}
+
+function parseEverySpec(
+  raw: string,
+  line: number,
+  sourceDefinitions: Map<string, SourceDefinition>,
+): EverySpec {
+  const { base, modifiers } = splitWith(raw.trim());
+
+  let amount: number;
+  let unit: 'ms' | 'sec' | 'beat';
+
+  const literal = base.match(/^(\d+(?:\.\d+)?)\s+(ms|sec|secs|second|seconds|beat|beats)$/i);
+  if (literal) {
+    amount = numberValue(literal[1], line, 'every');
+    unit = normalizeCycleUnit(literal[2], line);
+  } else if (IDENTIFIER.test(base)) {
+    const definition = sourceDefinitions.get(base);
+    if (!definition) throw new LanguageError([{ line, message: `unknown timing source '${base}'` }]);
+    if (definition.kind !== 'time') {
+      throw new LanguageError([{ line, message: `source '${base}' is ${definition.kind}, expected time source for every` }]);
+    }
+    amount = definition.amount;
+    unit = definition.unit;
+  } else {
+    throw new LanguageError([{ line, message: 'every expects <time> or a SET time variable' }]);
+  }
+
+  if (amount <= 0) throw new LanguageError([{ line, message: 'every interval must be greater than 0' }]);
+  if (unit === 'beat' && !Number.isInteger(amount)) {
+    throw new LanguageError([{ line, message: 'beat timing currently requires a whole number of beats' }]);
+  }
+
+  const timing = parseTimingModifiers(modifiers, line, unit);
+  return { amount, unit, ...timing };
+}
+
+function everyDirective(name: string, spec: EverySpec): string {
+  return `__cycle(${JSON.stringify(name)},${spec.amount},${JSON.stringify(spec.unit)},${spec.chance},${spec.drift},${spec.loose});`;
 }
 
 function compileSet(
@@ -941,25 +994,253 @@ function compileModulationRoute(
   return `${source.internalName}.out${port}(${depth}) -> ${voice.name}.${parameter};`;
 }
 
-function compilePlay(lineText: string, line: number): string {
-  const match = lineText.trim().match(
-    /^PLAY\s+([A-Za-z_][A-Za-z0-9_]*)(?:\.(out|aux))?(?:\s+at\s+(.+?))?\s+through\s+MAIN(?:\.(L|R))?$/i,
-  );
-  if (!match) {
-    throw new LanguageError([{
-      line,
-      message: 'PLAY expects: PLAY <voice>[.out|.aux] [at <value>] through MAIN[.L|.R]',
-    }]);
+
+function compileFxModulation(
+  fx: FxState,
+  parameter: FxParameter,
+  value: string,
+  line: number,
+  modSources: Map<string, ModSourceDefinition>,
+): string | null {
+  const match = value.match(/^from\s+([A-Za-z_][A-Za-z0-9_]*)\.([a-d])(?:\s+with\s+depth\s+(-?\d+(?:\.\d+)?))?$/i);
+  if (!match) return null;
+  const source = modSources.get(modSourceKey(fx.name, match[1])) ?? modSources.get(match[1]);
+  if (!source) throw new LanguageError([{ line, message: `unknown MOD source '${match[1]}'` }]);
+  const depth = match[3] === undefined ? 100 : Number(match[3]);
+  if (!Number.isFinite(depth) || depth < -100 || depth > 100) {
+    throw new LanguageError([{ line, message: 'modulation depth must be between -100 and 100' }]);
+  }
+  const channel = ({ a: 1, b: 2, c: 3, d: 4 } as const)[match[2].toLowerCase() as 'a'|'b'|'c'|'d'];
+  return `__fxmod(${JSON.stringify(fx.name)},${JSON.stringify(parameter)},${JSON.stringify(source.internalName)},${channel},${depth});`;
+}
+
+function requireFxModel(fx: FxState | null, diagnostics: LanguageDiagnostic[]): void {
+  if (fx && !fx.hasModel) diagnostics.push({ line: fx.line, message: `FX '${fx.name}' requires model` });
+}
+
+function semitonesFromFrequency(frequency: number): number {
+  const c4 = midiToFrequency(60);
+  return 12 * Math.log2(frequency / c4);
+}
+
+function fxPitchSequenceDirective(name: string, values: number[], mode: SelectionMode): string {
+  return `__fxsequence(${JSON.stringify(name)},${JSON.stringify(values.join('|'))},${JSON.stringify(mode)});`;
+}
+
+function compileFxProperty(
+  fx: FxState,
+  property: string,
+  rawValue: string,
+  line: number,
+  sourceKinds: Map<string, SourceKind>,
+  sourceDefinitions: Map<string, SourceDefinition>,
+  modSources: Map<string, ModSourceDefinition>,
+): string {
+  const key = property.toLowerCase();
+  const value = rawValue.trim();
+
+  if (key === 'model') {
+    const modelId = value.toLowerCase();
+    const schema = FX_MODEL_REGISTRY[modelId];
+    if (!schema) throw new LanguageError([{ line, message: `unknown FX model '${modelId}'` }]);
+    fx.modelId = modelId;
+    fx.hasModel = true;
+    return `${fx.name}.mode(${JSON.stringify(schema.lowLevelMode)});\n__fxmeta(${JSON.stringify(fx.name)},${JSON.stringify(modelId)});`;
   }
 
-  const name = match[1];
-  const sourcePort = (match[2] ?? 'out').toLowerCase();
-  const amount = match[3] === undefined ? 100 : normalizedAmount(match[3].trim(), line);
-  const targetChannel = match[4]?.toUpperCase() ?? null;
-  const source = `${name}.${sourcePort}`;
-  const target = targetChannel === 'L' ? 'Audio.out_L' : targetChannel === 'R' ? 'Audio.out_R' : 'Audio.out';
-  return `${source}(${amount}) -> ${target};`;
+  if (key === 'every') {
+    const timing = parseEverySpec(value, line, sourceDefinitions);
+    return `__objectevery(${JSON.stringify(fx.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose});`;
+  }
+
+  if (!fx.modelId) {
+    throw new LanguageError([{ line, message: `${property} requires FX model to be declared first` }]);
+  }
+  const schema = FX_MODEL_REGISTRY[fx.modelId];
+
+  if (key === 'freeze' || key === 'reverse') {
+    if (!/^(on|off|true|false)$/i.test(value)) {
+      throw new LanguageError([{ line, message: `${key} expects on or off` }]);
+    }
+    const enabled = /^(on|true)$/i.test(value);
+    return `${fx.name}.${key}(${enabled});`;
+  }
+
+  if (key === 'note' || key === 'scale' || key === 'freq') {
+    if (!schema.musicalPitch) {
+      throw new LanguageError([{ line, message: `${key} is not available for ${fx.modelId}` }]);
+    }
+
+    const split = splitEveryClause(value);
+    let pitchValues: number[] = [];
+    let mode: SelectionMode = 'order';
+
+    if (key === 'note') {
+      const parsed = splitWith(split.base);
+      const notes = parseList(parsed.base, line, 'note');
+      pitchValues = notes.map((note) => {
+        const midi = midiFromNote(note);
+        if (midi === null) throw new LanguageError([{ line, message: `invalid note '${note}'` }]);
+        return midi - 60;
+      });
+      mode = parseSelectionMode(parsed.modifiers, line, 'note');
+    } else if (key === 'freq') {
+      const parsed = splitWith(split.base);
+      const frequencies = parseList(parsed.base, line, 'freq').map((item) => numberValue(item, line, 'freq'));
+      if (frequencies.some((frequency) => frequency <= 0)) {
+        throw new LanguageError([{ line, message: 'freq must be greater than 0' }]);
+      }
+      pitchValues = frequencies.map(semitonesFromFrequency);
+      mode = parseSelectionMode(parsed.modifiers, line, 'freq');
+    } else {
+      const parsed = parseScaleSpec(split.base, line, true);
+      if (!parsed) throw new LanguageError([{ line, message: 'scale expects root and mode with optional range and sequencing modifier' }]);
+      pitchValues = parsed.values.map(semitonesFromFrequency);
+      mode = parsed.mode;
+    }
+
+    if (pitchValues.some((pitch) => pitch < -48 || pitch > 48)) {
+      throw new LanguageError([{ line, message: 'FX musical pitch must resolve inside -48..48 semitones relative to C4' }]);
+    }
+
+    const sequence = pitchValues.length > 1 ? ` ${fxPitchSequenceDirective(fx.name, pitchValues, mode)}` : '';
+    const every = split.every
+      ? (() => {
+          const timing = parseEverySpec(split.every!, line, sourceDefinitions);
+          return ` __fxpitchcycle(${JSON.stringify(fx.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose});`;
+        })()
+      : '';
+    return `${fx.name}.pitch(${pitchValues[0]});${sequence}${every}`;
+  }
+
+  if (!schema.parameters.has(key as FxParameter)) {
+    throw new LanguageError([{ line, message: `unknown FX property '${property}' for ${fx.modelId}` }]);
+  }
+
+  const parameter = key as FxParameter;
+  const modulation = /^from\s+/i.test(value) ? compileFxModulation(fx, parameter, value, line, modSources) : null;
+  if (modulation) return modulation;
+
+  const split = splitEveryClause(value);
+  const expression = split.base;
+  if (!expression) throw new LanguageError([{ line, message: `${parameter} expects a value` }]);
+
+  if (parameter === 'pitch') {
+    const literal = Number(expression);
+    if (Number.isFinite(literal) && (literal < -48 || literal > 48)) {
+      throw new LanguageError([{ line, message: 'pitch expects -48..48 semitones' }]);
+    }
+  }
+
+  const initial = `${fx.name}.${parameter}(${expression});`;
+  if (split.every) {
+    const timing = parseEverySpec(split.every, line, sourceDefinitions);
+    return `${initial} __fxparamcycle(${JSON.stringify(fx.name)},${JSON.stringify(parameter)},${JSON.stringify(expression)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose});`;
+  }
+  return `${initial} __fxparamdefault(${JSON.stringify(fx.name)},${JSON.stringify(parameter)},${JSON.stringify(expression)});`;
 }
+
+type PlayEndpoint = {
+  name: string;
+  channel: 'L' | 'R' | null;
+  port: 'out' | 'aux' | null;
+  amount: number;
+};
+
+function parsePlayEndpoint(raw: string, line: number): PlayEndpoint {
+  const match = raw.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\.(out|aux|L|R))?(?:\s+at\s+(.+))?$/i);
+  if (!match) throw new LanguageError([{ line, message: `invalid PLAY endpoint '${raw.trim()}'` }]);
+  const suffix = match[2]?.toLowerCase() ?? null;
+  return {
+    name: match[1],
+    port: suffix === 'out' || suffix === 'aux' ? suffix : null,
+    channel: suffix === 'l' ? 'L' : suffix === 'r' ? 'R' : null,
+    amount: match[3] === undefined ? 100 : normalizedAmount(match[3].trim(), line),
+  };
+}
+
+function compilePlay(
+  lineText: string,
+  line: number,
+  voices: Set<string>,
+  fxs: Set<string>,
+): string {
+  const body = lineText.trim().replace(/^PLAY\s+/i, '');
+  if (body === lineText.trim()) throw new LanguageError([{ line, message: 'PLAY expects a source' }]);
+
+  const pieces = body.split(/\s+(through|then)\s+/i);
+  if (pieces.length < 3 || pieces[1].toLowerCase() !== 'through' || pieces.length % 2 === 0) {
+    throw new LanguageError([{ line, message: 'PLAY expects source through destination [then destination ...]' }]);
+  }
+
+  const endpoints: PlayEndpoint[] = [];
+  const separators: string[] = [];
+  for (let index = 0; index < pieces.length; index += 2) {
+    endpoints.push(parsePlayEndpoint(pieces[index], line));
+    if (index + 1 < pieces.length) separators.push(pieces[index + 1].toLowerCase());
+  }
+  if (separators.slice(1).some((separator) => separator !== 'then')) {
+    throw new LanguageError([{ line, message: "after the first 'through', PLAY chains use 'then'" }]);
+  }
+
+  const kindOf = (name: string): 'voice' | 'fx' | 'main' => {
+    if (voices.has(name)) return 'voice';
+    if (fxs.has(name)) return 'fx';
+    if (name.toUpperCase() === 'MAIN') return 'main';
+    throw new LanguageError([{ line, message: `unknown PLAY object '${name}'` }]);
+  };
+
+  const routes: string[] = [];
+  for (let edge = 0; edge < endpoints.length - 1; edge += 1) {
+    const source = endpoints[edge];
+    const target = endpoints[edge + 1];
+    const sourceKind = kindOf(source.name);
+    const targetKind = kindOf(target.name);
+    if (sourceKind === 'main') throw new LanguageError([{ line, message: 'MAIN cannot be used as a PLAY source' }]);
+    if (targetKind === 'voice') throw new LanguageError([{ line, message: 'VOICE cannot be used as an audio destination' }]);
+    if (target.port) throw new LanguageError([{ line, message: 'destination uses .L/.R channel selectors, not .out/.aux' }]);
+    if (sourceKind === 'fx' && source.port) throw new LanguageError([{ line, message: 'FX outputs use .L/.R, not .out/.aux' }]);
+    if (sourceKind === 'voice' && source.channel) throw new LanguageError([{ line, message: 'VOICE outputs use .out/.aux; .L/.R are for stereo FX' }]);
+
+    const amount = source.amount;
+    const sourceMono = sourceKind === 'voice' || source.channel !== null;
+    const sourceMonoSignal = sourceKind === 'voice'
+      ? `${source.name}.${source.port ?? 'out'}`
+      : `${source.name}.${source.channel === 'R' ? 'out_R' : 'out_L'}`;
+
+    if (targetKind === 'main') {
+      if (target.channel) {
+        if (!sourceMono) throw new LanguageError([{ line, message: `stereo FX '${source.name}' must select .L or .R when routing to MAIN.${target.channel}` }]);
+        routes.push(`${sourceMonoSignal}(${amount}) -> Audio.out_${target.channel};`);
+      } else if (sourceMono) {
+        routes.push(`${sourceMonoSignal}(${amount}) -> Audio.out;`);
+      } else {
+        routes.push(`${source.name}.out_L(${amount}) -> Audio.out_L;`);
+        routes.push(`${source.name}.out_R(${amount}) -> Audio.out_R;`);
+      }
+      continue;
+    }
+
+    // Target is stereo FX.
+    if (target.channel) {
+      if (!sourceMono) throw new LanguageError([{ line, message: `stereo FX '${source.name}' must select .L or .R when routing to ${target.name}.${target.channel}` }]);
+      routes.push(`${sourceMonoSignal}(${amount}) -> ${target.name}.in${target.channel};`);
+    } else if (sourceMono) {
+      // Mono convenience input duplicates to both channels in the Mist engine.
+      routes.push(`${sourceMonoSignal}(${amount}) -> ${target.name}.in;`);
+    } else {
+      routes.push(`${source.name}.out_L(${amount}) -> ${target.name}.inL;`);
+      routes.push(`${source.name}.out_R(${amount}) -> ${target.name}.inR;`);
+    }
+  }
+
+  if (endpoints[endpoints.length - 1].amount !== 100) {
+    throw new LanguageError([{ line, message: "'at' belongs to the outgoing route; the final PLAY destination cannot have 'at'" }]);
+  }
+
+  return routes.join('\n');
+}
+
 
 function requireVoiceSound(voice: VoiceState | null, diagnostics: LanguageDiagnostic[]): void {
   if (voice && !voice.hasSound) {
@@ -969,14 +1250,35 @@ function requireVoiceSound(voice: VoiceState | null, diagnostics: LanguageDiagno
 
 export function compileLanguageSource(source: string): string {
   const lines = source.replace(/\r\n/g, '\n').split('\n');
+
+  // PLAY continuations are physical lines beginning with indented THROUGH/THEN.
+  // Collapse them onto the first line for parsing while preserving output line count.
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!/^\s*PLAY\b/i.test(stripComment(lines[index]).trimStart())) continue;
+    let combined = stripComment(lines[index]).trim();
+    let next = index + 1;
+    while (next < lines.length) {
+      const continuationRaw = stripComment(lines[next]);
+      const continuation = continuationRaw.trim();
+      const indentation = continuationRaw.length - continuationRaw.trimStart().length;
+      if (indentation <= 0 || !/^(through|then)\b/i.test(continuation)) break;
+      combined += ` ${continuation}`;
+      lines[next] = '';
+      next += 1;
+    }
+    lines[index] = combined;
+  }
+
   const output = Array(lines.length).fill('') as string[];
   const diagnostics: LanguageDiagnostic[] = [];
   const voices = new Set<string>();
+  const fxs = new Set<string>();
   const scalarNames = new Set<string>();
   const sourceKinds = new Map<string, SourceKind>();
   const sourceDefinitions = new Map<string, SourceDefinition>();
   const modSources = new Map<string, ModSourceDefinition>();
   let currentVoice: VoiceState | null = null;
+  let currentFx: FxState | null = null;
   let currentMod: ModState | null = null;
 
   for (let index = 0; index < lines.length; index += 1) {
@@ -998,19 +1300,28 @@ export function compileLanguageSource(source: string): string {
       const modMatch = trimmed.match(/^MOD\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
       if (modMatch) {
         const name = modMatch[1];
-        const ownerVoice = indentation > 0 && currentVoice ? currentVoice.name : null;
-        if (indentation > 0 && !ownerVoice) throw new LanguageError([{ line: lineNumber, message: 'local MOD must be inside a VOICE' }]);
-        if (!ownerVoice) {
-          requireVoiceSound(currentVoice, diagnostics);
-          currentVoice = null;
+        const ownerObject = indentation > 0
+          ? (currentVoice?.name ?? currentFx?.name ?? null)
+          : null;
+        if (indentation > 0 && !ownerObject) {
+          throw new LanguageError([{ line: lineNumber, message: 'local MOD must be inside a VOICE or FX' }]);
         }
-        const scopeKey = modSourceKey(ownerVoice, name);
+        if (!ownerObject) {
+          requireVoiceSound(currentVoice, diagnostics);
+          requireFxModel(currentFx, diagnostics);
+          currentVoice = null;
+          currentFx = null;
+          if (voices.has(name) || fxs.has(name) || scalarNames.has(name)) {
+            throw new LanguageError([{ line: lineNumber, message: `MOD '${name}' conflicts with an existing object or variable` }]);
+          }
+        }
+        const scopeKey = modSourceKey(ownerObject, name);
         if (modSources.has(scopeKey)) throw new LanguageError([{ line: lineNumber, message: `MOD '${name}' is already defined in this scope` }]);
-        const internalName = ownerVoice ? `__mod_${ownerVoice}_${name}` : name;
-        currentMod = { name, internalName, line: lineNumber, indentation, ownerVoice };
-        modSources.set(scopeKey, { internalName, ownerVoice });
+        const internalName = ownerObject ? `__mod_${ownerObject}_${name}` : name;
+        currentMod = { name, internalName, line: lineNumber, indentation, ownerVoice: ownerObject };
+        modSources.set(scopeKey, { internalName, ownerVoice: ownerObject });
         const viewDirective = modMatch[2] ? `\n${internalName}.view();` : '';
-        output[index] = `${internalName} = Swell();\n__modmeta(${JSON.stringify(internalName)},${JSON.stringify(name)},${JSON.stringify(ownerVoice ?? '')});${viewDirective}`;
+        output[index] = `${internalName} = Swell();\n__modmeta(${JSON.stringify(internalName)},${JSON.stringify(name)},${JSON.stringify(ownerObject ?? '')});${viewDirective}`;
         continue;
       }
 
@@ -1021,11 +1332,31 @@ export function compileLanguageSource(source: string): string {
         continue;
       }
 
+      const fxMatch = trimmed.match(/^FX\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
+      if (fxMatch) {
+        if (indentation > 0) throw new LanguageError([{ line: lineNumber, message: 'FX declarations are top-level only' }]);
+        requireVoiceSound(currentVoice, diagnostics);
+        requireFxModel(currentFx, diagnostics);
+        currentVoice = null;
+        currentMod = null;
+        const name = fxMatch[1];
+        if (fxs.has(name) || voices.has(name) || scalarNames.has(name)) {
+          throw new LanguageError([{ line: lineNumber, message: `FX '${name}' is already defined` }]);
+        }
+        fxs.add(name);
+        currentFx = { name, line: lineNumber, indentation, hasModel: false, modelId: null };
+        const viewDirective = fxMatch[2] ? `\n${name}.view();` : '';
+        output[index] = `${name} = Mist();\n__fxmeta(${JSON.stringify(name)});${viewDirective}`;
+        continue;
+      }
+
       const voiceMatch = trimmed.match(/^VOICE\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
       if (voiceMatch) {
         requireVoiceSound(currentVoice, diagnostics);
+        requireFxModel(currentFx, diagnostics);
+        currentFx = null;
         const name = voiceMatch[1];
-        if (voices.has(name) || scalarNames.has(name)) {
+        if (voices.has(name) || fxs.has(name) || scalarNames.has(name)) {
           throw new LanguageError([{ line: lineNumber, message: `VOICE '${name}' is already defined` }]);
         }
         voices.add(name);
@@ -1037,22 +1368,35 @@ export function compileLanguageSource(source: string): string {
 
       if (/^CLOCK\b/i.test(trimmed)) {
         requireVoiceSound(currentVoice, diagnostics);
+        requireFxModel(currentFx, diagnostics);
         currentVoice = null;
+        currentFx = null;
         output[index] = compileClock(trimmed, lineNumber);
         continue;
       }
 
       if (/^SET\b/i.test(trimmed)) {
         requireVoiceSound(currentVoice, diagnostics);
+        requireFxModel(currentFx, diagnostics);
         currentVoice = null;
-        output[index] = compileSet(trimmed, lineNumber, sourceKinds, sourceDefinitions, scalarNames, voices);
+        currentFx = null;
+        output[index] = compileSet(
+          trimmed,
+          lineNumber,
+          sourceKinds,
+          sourceDefinitions,
+          scalarNames,
+          new Set([...voices, ...fxs]),
+        );
         continue;
       }
 
       const mainMatch = trimmed.match(/^MAIN\s+level\s+(.+)$/i);
       if (mainMatch) {
         requireVoiceSound(currentVoice, diagnostics);
+        requireFxModel(currentFx, diagnostics);
         currentVoice = null;
+        currentFx = null;
         currentMod = null;
         const level = numberValue(mainMatch[1].trim(), lineNumber, 'MAIN level');
         if (level < 0 || level > 100) throw new LanguageError([{ line: lineNumber, message: 'MAIN level expects 0..100' }]);
@@ -1062,13 +1406,19 @@ export function compileLanguageSource(source: string): string {
 
       if (/^PLAY\b/i.test(trimmed)) {
         requireVoiceSound(currentVoice, diagnostics);
+        requireFxModel(currentFx, diagnostics);
         currentVoice = null;
-        const playToken = trimmed.split(/\s+/)[1] ?? '';
-        const playName = playToken.replace(/\.(?:out|aux)$/i, '');
-        if (!voices.has(playName)) {
-          throw new LanguageError([{ line: lineNumber, message: `unknown voice '${playName}'` }]);
+        currentFx = null;
+        output[index] = compilePlay(trimmed, lineNumber, voices, fxs);
+        continue;
+      }
+
+      if (indentation > 0 && currentFx) {
+        const propertyMatch = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s+(.+)$/);
+        if (!propertyMatch) {
+          throw new LanguageError([{ line: lineNumber, message: 'expected FX property and value' }]);
         }
-        output[index] = compilePlay(trimmed, lineNumber);
+        output[index] = compileFxProperty(currentFx, propertyMatch[1], propertyMatch[2], lineNumber, sourceKinds, sourceDefinitions, modSources);
         continue;
       }
 
@@ -1083,12 +1433,12 @@ export function compileLanguageSource(source: string): string {
       }
 
       if (/^[A-Za-z_][A-Za-z0-9_]*\s*:/.test(trimmed)) {
-        throw new LanguageError([{ line: lineNumber, message: 'only VOICE and MOD blocks are supported' }]);
+        throw new LanguageError([{ line: lineNumber, message: 'only VOICE, FX and MOD blocks are supported' }]);
       }
 
       throw new LanguageError([{
         line: lineNumber,
-        message: 'each top-level statement must begin with VOICE, MOD, SET, CLOCK, MAIN, or PLAY',
+        message: 'each top-level statement must begin with VOICE, FX, MOD, SET, CLOCK, MAIN, or PLAY',
       }]);
     } catch (error) {
       if (error instanceof LanguageError) diagnostics.push(...error.diagnostics);
@@ -1097,6 +1447,7 @@ export function compileLanguageSource(source: string): string {
   }
 
   requireVoiceSound(currentVoice, diagnostics);
+  requireFxModel(currentFx, diagnostics);
 
   if (diagnostics.length > 0) throw new LanguageError(diagnostics);
   return output.join('\n');

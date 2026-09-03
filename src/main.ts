@@ -288,13 +288,25 @@ function notify(text: string): void {
 function normalizeLanguageCommandCase(): void {
   const normalized = editor.value
     .replace(
-      /^(\s*)(voice|mod|play|set|clock|main)\b/gim,
+      /^(\s*)(voice|fx|mod|play|set|clock|main)\b/gim,
       (_match, indentation: string, commandName: string) => `${indentation}${commandName.toUpperCase()}`,
     )
     .replace(
       /^(\s*PLAY\s+[A-Za-z_]\w*(?:\.(?:out|aux))?\s+through\s+)main(?:\.([lr]))?/gim,
       (_match, prefix: string, channel: string | undefined) =>
         `${prefix}MAIN${channel ? `.${channel.toUpperCase()}` : ''}`,
+    )
+    .replace(
+      /^(\s*PLAY\b.*)$/gim,
+      (line: string) => line
+        .replace(/\bmain\b/gi, 'MAIN')
+        .replace(/\.([lr])\b/gi, (_match, channel: string) => `.${channel.toUpperCase()}`),
+    )
+    .replace(
+      /^(\s*(?:through|then)\b.*)$/gim,
+      (line: string) => line
+        .replace(/\bmain\b/gi, 'MAIN')
+        .replace(/\.([lr])\b/gi, (_match, channel: string) => `.${channel.toUpperCase()}`),
     )
     .replace(
       /^(\s*scale\s+)([a-g])([#b]?)(?=\s|$)/gim,
@@ -484,7 +496,7 @@ function syncViews(): void {
         ? [1, 2, 3, 4].map((port) => `${node.id}.out${port}`)
         : / : VOICE$/i.test(node.label)
           ? [`${node.id}.out`, `${node.id}.aux`]
-          : / : MIST$/i.test(node.label)
+          : / : (?:MIST|FX)$/i.test(node.label)
             ? [`${node.id}.out_L`, `${node.id}.out_R`]
             : []
       : [];
@@ -567,7 +579,7 @@ function buildModuleMonitorPanel(options: {
     label.className = 'monitor-section-label';
     label.textContent = options.id === 'Audio'
       ? 'STEREO OUT'
-      : options.title.endsWith(': MIST')
+      : (/: (?:MIST|FX)$/.test(options.title))
         ? 'OUT L / R'
         : options.compositeSignals!.length === 2
           ? 'OUT / AUX'
@@ -575,7 +587,7 @@ function buildModuleMonitorPanel(options: {
             ? 'A / B / C / D'
             : 'OUT 1-4';
 
-    if (options.stereoLegend) {
+    if (options.stereoLegend || (/: (?:MIST|FX)$/.test(options.title) && options.compositeSignals?.length === 2)) {
       const legend = document.createElement('span');
       legend.className = 'scope-stereo-legend';
       legend.innerHTML = '<span class="scope-legend-l">● L</span><span class="scope-legend-r">● R</span>';
@@ -1767,7 +1779,9 @@ editor.addEventListener('keydown', (event) => {
 
     let indentation = currentIndent;
     if (!trimmed) indentation = currentIndent.length >= 4 ? currentIndent.slice(0, -4) : '';
-    else if (/^(VOICE|MOD)\b.*:\s*$/i.test(trimmed)) indentation = `${currentIndent}    `;
+    else if (/^(VOICE|FX|MOD)\b.*:\s*$/i.test(trimmed)) indentation = `${currentIndent}    `;
+    else if (/^PLAY\b/i.test(trimmed) && !/\bthrough\b/i.test(trimmed)) indentation = `${currentIndent}    `;
+    else if (currentIndent.length > 0 && /^(through|then)\b/i.test(trimmed)) indentation = currentIndent;
 
     editor.setRangeText(`\n${indentation}`, start, end, 'end');
 
