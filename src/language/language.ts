@@ -618,14 +618,6 @@ function compileVoiceProperty(
     case 'cycle':
       throw new LanguageError([{ line, message: "standalone cycle is deprecated; use 'every' or an inline 'every' clause" }]);
 
-    case 'level': {
-      const level = numberValue(value, line, 'level');
-      if (level < 0 || level > 100) {
-        throw new LanguageError([{ line, message: 'level must be between 0 and 100' }]);
-      }
-      return `${voice.name}.level(${level});`;
-    }
-
     default:
       throw new LanguageError([{ line, message: `unknown VOICE property '${property}'` }]);
   }
@@ -1032,7 +1024,6 @@ function compileFxProperty(
   property: string,
   rawValue: string,
   line: number,
-  sourceKinds: Map<string, SourceKind>,
   sourceDefinitions: Map<string, SourceDefinition>,
   modSources: Map<string, ModSourceDefinition>,
 ): string {
@@ -1418,7 +1409,7 @@ export function compileLanguageSource(source: string): string {
         if (!propertyMatch) {
           throw new LanguageError([{ line: lineNumber, message: 'expected FX property and value' }]);
         }
-        output[index] = compileFxProperty(currentFx, propertyMatch[1], propertyMatch[2], lineNumber, sourceKinds, sourceDefinitions, modSources);
+        output[index] = compileFxProperty(currentFx, propertyMatch[1], propertyMatch[2], lineNumber, sourceDefinitions, modSources);
         continue;
       }
 

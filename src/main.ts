@@ -5,7 +5,7 @@ import { compileLanguageSource, LanguageError } from './language/language';
 
 type Screen = 'live' | 'config' | 'help' | 'scheme';
 
-const VERSION = '0.0.4';
+const VERSION = '0.1.0';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Missing #app');
@@ -336,23 +336,6 @@ function setCodeRunning(running: boolean): void {
   codeStatus.textContent = running ? '▶' : '○';
   codeStatus.classList.toggle('disabled', !running);
   codeStatus.setAttribute('aria-label', running ? 'code running' : 'code stopped');
-}
-
-function validateLanguageSource(): boolean {
-  try {
-    clearDiagnostic();
-    const source = sourceText();
-    if (source.trim()) compileLanguageSource(source);
-    notify('source valid');
-    return true;
-  } catch (error) {
-    if (error instanceof LanguageError) {
-      showDiagnostics(error.diagnostics);
-      return false;
-    }
-    notify(error instanceof Error ? error.message : 'validation failed');
-    return false;
-  }
 }
 
 function refreshStoppedPreview(): boolean {
@@ -1333,19 +1316,6 @@ function statementNumberForPhysicalLine(labels: string[], physicalLine: number):
   return null;
 }
 
-function statementCompleteBeforeCaret(source: string): boolean {
-  const lines = source.replace(/\r\n/g, '\n').split('\n');
-  const current = lines.at(-1)?.trim() ?? '';
-  if (!current) return false;
-
-  if (/^PLAY\b/i.test(current)) return true;
-
-  // VOICE blocks stay open while entering indented properties. They are
-  // evaluated with CMD/CTRL+ENTER for v1; later temporal statements will
-  // provide richer completion rules.
-  return false;
-}
-
 function renderSyntaxLayer(): void {
   const source = editor.value;
   const editorStyle = getComputedStyle(editor);
@@ -1697,7 +1667,7 @@ async function loadSource(): Promise<void> {
     const file = input.files?.[0];
     if (!file) return;
     setSourceText(await file.text());
-    const applied = refreshCodeFromEditor();
+    const applied = codeRunning ? evaluateLiveSource() : refreshStoppedPreview();
     if (applied) notify(`loaded ${file.name}`);
     else notify(`loaded ${file.name} — runtime unchanged`);
   }, { once: true });
