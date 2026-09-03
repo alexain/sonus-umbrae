@@ -96,6 +96,7 @@ void su_voice_set_v_oct(VoiceState* state, float value) {
 
 void su_voice_set_trigger(VoiceState* state, float value, int patched) {
   if (!state) return;
+  // A patched trigger drives Plaits' internal excitation/LPG path.
   state->trigger = value;
   state->modulations.trigger_patched = patched != 0;
 }

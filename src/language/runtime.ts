@@ -8,8 +8,8 @@ const RESERVED_IDENTIFIERS = new Set([
   'clock',
   'midi',
   'voice',
+  'fx',
   'swell',
-  'dices',
   'mist',
   'pattern',
   'scale',
@@ -40,6 +40,10 @@ const RESERVED_IDENTIFIERS = new Set([
   'while',
   'after',
   'repeat',
+  'set',
+  'cycle',
+  'from',
+  'with',
   'walk',
   'chaos',
   'seed',
@@ -126,6 +130,8 @@ interface GainDefinition {
 
 interface VoiceDefinition {
   model: number;
+  lpg: boolean;
+  level: number;
   frequency: number;
   harmo: number;
   timbre: number;
@@ -145,20 +151,6 @@ interface SwellDefinition {
   parameters: Map<string, string>;
 }
 
-interface DicesDefinition {
-  rate: number;
-  jitter: number;
-  gateBias: number;
-  gateLength: number;
-  gateJitter: number;
-  spread: number;
-  bias: number;
-  steps: number;
-  deja: number;
-  length: number;
-  scale: number;
-  parameters: Map<string, string>;
-}
 
 interface MistDefinition {
   position: number;
@@ -189,6 +181,240 @@ interface ClockDefinition {
   parameters: Map<string, string>;
 }
 
+interface LanguageSequenceDefinition {
+  values: number[];
+  mode: 'order' | 'random' | 'walk' | 'shuffle' | 'reverse';
+}
+
+interface LanguageCycleDefinition {
+  amount: number;
+  unit: 'ms' | 'sec' | 'beat';
+  chance: number;
+  drift: boolean;
+  loose: boolean;
+}
+
+interface LanguageSetCycleDefinition {
+  amount: number;
+  unit: 'ms' | 'sec' | 'beat';
+  chance: number;
+  drift: boolean;
+  loose: boolean;
+}
+
+interface LanguageParameterCycleDefinition {
+  voice: string;
+  parameter: 'harmo' | 'timbre' | 'morph';
+  expression: string;
+  amount: number;
+  unit: 'ms' | 'sec' | 'beat';
+  chance: number;
+  drift: boolean;
+  loose: boolean;
+  line: number;
+}
+
+interface LanguageParameterDefaultDefinition {
+  voice: string;
+  parameter: 'harmo' | 'timbre' | 'morph';
+  expression: string;
+  line: number;
+}
+
+type LanguageObjectEveryDefinition = LanguageCycleDefinition;
+
+interface LanguageMasterClockDefinition {
+  expression: string;
+  amount: number;
+  unit: 'ms' | 'sec' | 'beat';
+  drift: boolean;
+  line: number;
+}
+
+interface LanguageModMetadata {
+  internalName: string;
+  displayName: string;
+  ownerVoice: string | null;
+}
+
+interface LanguageModSetDirective {
+  internalName: string;
+  parameter: 'freq' | 'slope' | 'shape' | 'smooth' | 'shift' | 'output' | 'range';
+  value: string;
+  line: number;
+}
+
+interface LanguageFxMetadata {
+  name: string;
+  modelId: string | null;
+}
+
+type LanguageFxParameter = 'position' | 'size' | 'pitch' | 'density' | 'texture' | 'mix' | 'spread' | 'feedback' | 'reverb';
+
+interface LanguageFxParameterCycleDefinition {
+  fx: string;
+  parameter: LanguageFxParameter;
+  expression: string;
+  amount: number;
+  unit: 'ms' | 'sec' | 'beat';
+  chance: number;
+  drift: boolean;
+  loose: boolean;
+  line: number;
+}
+
+interface LanguageFxParameterDefaultDefinition {
+  fx: string;
+  parameter: LanguageFxParameter;
+  expression: string;
+  line: number;
+}
+
+interface LanguageFxPitchSequenceDefinition {
+  values: number[];
+  mode: 'order' | 'random' | 'walk' | 'shuffle' | 'reverse';
+}
+
+interface LanguageFxModulationDefinition {
+  fx: string;
+  parameter: LanguageFxParameter;
+  mod: string;
+  channel: 1 | 2 | 3 | 4;
+  depth: number;
+  line: number;
+}
+
+
+
+type RuntimeWallJob = {
+  intervalMs: number;
+  nextAtMs: number;
+  callback: () => void;
+  intervalFactory?: () => number;
+};
+
+type RuntimeBeatJob = {
+  everyBeats: number;
+  nextBeat: number;
+  callback: () => void;
+  loose: boolean;
+};
+
+class RuntimeScheduler {
+  private wallJobs: RuntimeWallJob[] = [];
+  private beatJobs: RuntimeBeatJob[] = [];
+  private deferred: Array<{ dueAtMs: number; callback: () => void }> = [];
+  private epochMs = 0;
+  private beatCounter = 0;
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private clockUnsubscribe: (() => void) | null = null;
+
+  constructor(private readonly audio: AudioEngine) {}
+
+  clear(): void {
+    this.stop();
+    this.wallJobs = [];
+    this.beatJobs = [];
+    this.deferred = [];
+    this.beatCounter = 0;
+  }
+
+  addWallJob(intervalMs: number, callback: () => void, intervalFactory?: () => number): void {
+    this.wallJobs.push({
+      intervalMs,
+      nextAtMs: intervalMs,
+      callback,
+      intervalFactory,
+    });
+  }
+
+  addBeatJob(everyBeats: number, callback: () => void, loose = false): void {
+    this.beatJobs.push({
+      everyBeats,
+      nextBeat: everyBeats,
+      callback,
+      loose,
+    });
+  }
+
+  start(): void {
+    this.stop();
+    this.epochMs = performance.now();
+    this.beatCounter = 0;
+    for (const job of this.wallJobs) job.nextAtMs = job.intervalMs;
+    for (const job of this.beatJobs) job.nextBeat = job.everyBeats;
+
+    if (this.wallJobs.length > 0 || this.deferred.length > 0) {
+      this.timer = setInterval(() => this.tickWallClock(), 10);
+    }
+
+    if (this.beatJobs.length > 0) {
+      this.clockUnsubscribe = this.audio.subscribeClockTrigger('Clock', () => this.tickBeat());
+    }
+  }
+
+  stop(): void {
+    if (this.timer !== null) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    if (this.clockUnsubscribe) {
+      this.clockUnsubscribe();
+      this.clockUnsubscribe = null;
+    }
+    this.deferred = [];
+  }
+
+  private tickWallClock(): void {
+    const elapsed = performance.now() - this.epochMs;
+
+    for (const job of this.wallJobs) {
+      if (elapsed < job.nextAtMs) continue;
+      job.callback();
+
+      const nextInterval = Math.max(1, job.intervalFactory?.() ?? job.intervalMs);
+      job.nextAtMs += nextInterval;
+
+      if (job.nextAtMs <= elapsed) {
+        const missed = Math.floor((elapsed - job.nextAtMs) / nextInterval) + 1;
+        job.nextAtMs += missed * nextInterval;
+      }
+    }
+
+    if (this.deferred.length > 0) {
+      const now = performance.now();
+      const ready = this.deferred.filter((entry) => entry.dueAtMs <= now);
+      this.deferred = this.deferred.filter((entry) => entry.dueAtMs > now);
+      for (const entry of ready) entry.callback();
+    }
+  }
+
+  private tickBeat(): void {
+    this.beatCounter += 1;
+
+    for (const job of this.beatJobs) {
+      if (this.beatCounter < job.nextBeat) continue;
+      job.nextBeat += job.everyBeats;
+
+      if (!job.loose) {
+        job.callback();
+        continue;
+      }
+
+      const bpm = this.audio.getClockStatus().bpm;
+      const beatMs = bpm > 0 ? 60000 / bpm : 0;
+      this.deferred.push({
+        dueAtMs: performance.now() + beatMs * 0.08 * Math.random(),
+        callback: job.callback,
+      });
+
+      if (this.timer === null) {
+        this.timer = setInterval(() => this.tickWallClock(), 10);
+      }
+    }
+  }
+}
+
 export class SonusRuntime {
   private parameterViews: ParameterViewState[] = [];
   private variableViews: VariableViewState[] = [];
@@ -201,8 +427,24 @@ export class SonusRuntime {
   };
 
   private whenUnsubscribers: Array<() => void> = [];
+  private readonly scheduler: RuntimeScheduler;
 
-  constructor(private readonly audio: AudioEngine) {}
+  constructor(private readonly audio: AudioEngine) {
+    this.scheduler = new RuntimeScheduler(audio);
+  }
+
+  stopExecution(): void {
+    this.stopSchedulers();
+    this.audio.setModTransport(false);
+    this.audio.stopProgramOutput();
+    this.audio.panic();
+  }
+
+  private stopSchedulers(): void {
+    for (const unsubscribe of this.whenUnsubscribers) unsubscribe();
+    this.whenUnsubscribers = [];
+    this.scheduler.clear();
+  }
 
   getParameterViews(): ParameterViewState[] {
     return this.parameterViews.map((view) => ({ ...view }));
@@ -231,21 +473,23 @@ export class SonusRuntime {
     };
   }
 
-  evaluate(source: string): EvaluationResult[] {
+  evaluate(source: string, options: { applyAudio?: boolean } = {}): EvaluationResult[] {
+    const applyAudio = options.applyAudio ?? true;
     const oscillators = new Map<string, OscillatorDefinition>();
     const gains = new Map<string, GainDefinition>();
     const voices = new Map<string, VoiceDefinition>();
     const swells = new Map<string, SwellDefinition>();
-    const dices = new Map<string, DicesDefinition>();
     const mists = new Map<string, MistDefinition>();
     const routes = new Map<string, RouteDefinition>();
     const clockSources = new Map<string, ClockDefinition>();
     let clockBpm = 0;
+    let mainLevel = 100;
     const views = new Map<string, ViewKind>();
     const moduleViews = new Set<string>();
     const parameterViews = new Map<string, ParameterViewState>();
     const variableViewRequests: Array<{ name: string; line: number }> = [];
     const variables = new Map<string, ScalarValue>();
+    const scalarExpressions = new Map<string, { expression: string; line: number }>();
     const generativeState = new Map<string, number | { x: number; y: number }>();
     let randomState = 0x6d2b79f5;
     const random = (): number => {
@@ -263,6 +507,178 @@ export class SonusRuntime {
     const parsedWhen = extractWhenBlocks(source);
     if (parsedWhen.diagnostics.length > 0) throw new SonusEvaluationError(parsedWhen.diagnostics);
     const lines = parseStatements(parsedWhen.source);
+
+    const languageSequences = new Map<string, LanguageSequenceDefinition>();
+    const languageCycles = new Map<string, LanguageCycleDefinition>();
+    const languageSetCycles = new Map<string, LanguageSetCycleDefinition>();
+    const languageParameterCycles: LanguageParameterCycleDefinition[] = [];
+    const languageParameterDefaults: LanguageParameterDefaultDefinition[] = [];
+    const languageObjectEvery = new Map<string, LanguageObjectEveryDefinition>();
+    const languageFxMeta = new Map<string, LanguageFxMetadata>();
+    const languageFxParameterCycles: LanguageFxParameterCycleDefinition[] = [];
+    const languageFxParameterDefaults: LanguageFxParameterDefaultDefinition[] = [];
+    const languageFxPitchSequences = new Map<string, LanguageFxPitchSequenceDefinition>();
+    const languageFxPitchCycles = new Map<string, LanguageCycleDefinition>();
+    const languageFxModulations: LanguageFxModulationDefinition[] = [];
+    const languageMods = new Map<string, LanguageModMetadata>();
+    const languageModSets: LanguageModSetDirective[] = [];
+    let languageMasterClock: LanguageMasterClockDefinition | null = null;
+    for (const { source: line, line: lineNumber } of lines) {
+      const fxMetadata = parseLanguageFxMetadata(line);
+      if (fxMetadata) {
+        const existing = languageFxMeta.get(fxMetadata.name);
+        languageFxMeta.set(fxMetadata.name, {
+          name: fxMetadata.name,
+          modelId: fxMetadata.modelId ?? existing?.modelId ?? null,
+        });
+        continue;
+      }
+
+      const fxParameterCycle = parseLanguageFxParameterCycleDirective(line, lineNumber);
+      if (fxParameterCycle) {
+        languageFxParameterCycles.push(fxParameterCycle);
+        continue;
+      }
+
+      const fxParameterDefault = parseLanguageFxParameterDefaultDirective(line, lineNumber);
+      if (fxParameterDefault) {
+        languageFxParameterDefaults.push(fxParameterDefault);
+        continue;
+      }
+
+      const fxSequence = parseLanguageFxPitchSequenceDirective(line);
+      if (fxSequence) {
+        languageFxPitchSequences.set(fxSequence.name, { values: fxSequence.values, mode: fxSequence.mode });
+        continue;
+      }
+
+      const fxPitchCycle = parseLanguageFxPitchCycleDirective(line);
+      if (fxPitchCycle) {
+        languageFxPitchCycles.set(fxPitchCycle.name, fxPitchCycle.timing);
+        continue;
+      }
+
+      const fxModulation = parseLanguageFxModulationDirective(line, lineNumber);
+      if (fxModulation) {
+        languageFxModulations.push(fxModulation);
+        continue;
+      }
+
+      const modMetadata = parseLanguageModMetadata(line);
+      if (modMetadata) {
+        languageMods.set(modMetadata.internalName, modMetadata);
+        continue;
+      }
+
+      const modSet = parseLanguageModSetDirective(line, lineNumber);
+      if (modSet) {
+        languageModSets.push(modSet);
+        continue;
+      }
+
+      const masterClock = parseLanguageMasterClockDirective(line, lineNumber);
+      if (masterClock) {
+        if (languageMasterClock) diagnostics.push({ line: lineNumber, message: 'only one CLOCK statement is allowed' });
+        else languageMasterClock = masterClock;
+        continue;
+      }
+
+      const sequence = parseLanguageSequenceDirective(line);
+      if (sequence) {
+        if (sequence.values.length === 0 || sequence.values.some((value) => !Number.isFinite(value) || value <= 0)) {
+          diagnostics.push({ line: lineNumber, message: 'invalid internal sequence values' });
+        } else {
+          languageSequences.set(sequence.name, { values: sequence.values, mode: sequence.mode });
+        }
+        continue;
+      }
+
+      const cycle = parseLanguageCycleDirective(line);
+      if (cycle) {
+        languageCycles.set(cycle.name, {
+          amount: cycle.amount,
+          unit: cycle.unit,
+          chance: cycle.chance,
+          drift: cycle.drift,
+          loose: cycle.loose,
+        });
+      }
+
+      const parameterCycle = parseLanguageParameterCycleDirective(line, lineNumber);
+      if (parameterCycle) {
+        languageParameterCycles.push(parameterCycle);
+        continue;
+      }
+
+      const parameterDefault = parseLanguageParameterDefaultDirective(line, lineNumber);
+      if (parameterDefault) {
+        languageParameterDefaults.push(parameterDefault);
+        continue;
+      }
+
+      const objectEvery = parseLanguageObjectEveryDirective(line);
+      if (objectEvery) {
+        languageObjectEvery.set(objectEvery.name, {
+          amount: objectEvery.amount,
+          unit: objectEvery.unit,
+          chance: objectEvery.chance,
+          drift: objectEvery.drift,
+          loose: objectEvery.loose,
+        });
+        continue;
+      }
+
+      const setCycle = parseLanguageSetCycleDirective(line);
+      if (setCycle) {
+        languageSetCycles.set(setCycle.name, {
+          amount: setCycle.amount,
+          unit: setCycle.unit,
+          chance: setCycle.chance,
+          drift: setCycle.drift,
+          loose: setCycle.loose,
+        });
+      }
+    }
+
+    // Resolve object-level `every` only for dynamic properties that did not
+    // declare their own cadence. All resulting jobs still run on the single
+    // RuntimeScheduler epoch / master-clock transport.
+    for (const [name, timing] of languageObjectEvery) {
+      if (languageSequences.has(name) && !languageCycles.has(name)) {
+        languageCycles.set(name, { ...timing });
+      }
+    }
+
+    const explicitParameterEvery = new Set(
+      languageParameterCycles.map((cycle) => `${cycle.voice}:${cycle.parameter}`),
+    );
+    for (const definition of languageParameterDefaults) {
+      const timing = languageObjectEvery.get(definition.voice);
+      if (!timing) continue;
+      const key = `${definition.voice}:${definition.parameter}`;
+      if (explicitParameterEvery.has(key)) continue;
+      languageParameterCycles.push({
+        ...definition,
+        ...timing,
+      });
+    }
+
+    const explicitFxParameterEvery = new Set(
+      languageFxParameterCycles.map((cycle) => `${cycle.fx}:${cycle.parameter}`),
+    );
+    for (const definition of languageFxParameterDefaults) {
+      const timing = languageObjectEvery.get(definition.fx);
+      if (!timing) continue;
+      const key = `${definition.fx}:${definition.parameter}`;
+      if (explicitFxParameterEvery.has(key)) continue;
+      languageFxParameterCycles.push({ ...definition, ...timing });
+    }
+
+    for (const [name] of languageFxPitchSequences) {
+      if (languageFxPitchCycles.has(name)) continue;
+      const timing = languageObjectEvery.get(name);
+      if (timing) languageFxPitchCycles.set(name, { ...timing });
+    }
 
     // Pass 1: declarations. Objects are collected before the remaining statements
     // so the source remains declarative rather than execution-order dependent.
@@ -292,7 +708,7 @@ export class SonusRuntime {
       const oscillatorDeclaration = parseOscillatorDeclaration(line);
       if (oscillatorDeclaration) {
         const { name, calls } = oscillatorDeclaration;
-        if (swells.has(name) || dices.has(name) || reservedOrDuplicate(name, oscillators, gains, voices, diagnostics, lineNumber)) { if (swells.has(name) || dices.has(name)) diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue; }
+        if (swells.has(name) || reservedOrDuplicate(name, oscillators, gains, voices, diagnostics, lineNumber)) { if (swells.has(name)) diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue; }
 
         const definition: OscillatorDefinition = { frequency: 440, parameters: new Map() };
         oscillators.set(name, definition);
@@ -304,7 +720,7 @@ export class SonusRuntime {
       const gainDeclaration = parseGainDeclaration(line);
       if (gainDeclaration) {
         const { name, calls } = gainDeclaration;
-        if (swells.has(name) || dices.has(name) || reservedOrDuplicate(name, oscillators, gains, voices, diagnostics, lineNumber)) { if (swells.has(name) || dices.has(name)) diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue; }
+        if (swells.has(name) || reservedOrDuplicate(name, oscillators, gains, voices, diagnostics, lineNumber)) { if (swells.has(name)) diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue; }
 
         const definition: GainDefinition = { level: 100, parameters: new Map() };
         gains.set(name, definition);
@@ -316,10 +732,12 @@ export class SonusRuntime {
       const voiceDeclaration = parseVoiceDeclaration(line);
       if (voiceDeclaration) {
         const { name, calls } = voiceDeclaration;
-        if (swells.has(name) || dices.has(name) || reservedOrDuplicate(name, oscillators, gains, voices, diagnostics, lineNumber)) { if (swells.has(name) || dices.has(name)) diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue; }
+        if (swells.has(name) || reservedOrDuplicate(name, oscillators, gains, voices, diagnostics, lineNumber)) { if (swells.has(name)) diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue; }
 
         const definition: VoiceDefinition = {
           model: 1,
+          lpg: false,
+          level: 100,
           frequency: 440,
           harmo: 50,
           timbre: 50,
@@ -335,12 +753,16 @@ export class SonusRuntime {
       const swellDeclaration = parseSwellDeclaration(line);
       if (swellDeclaration) {
         const { name } = swellDeclaration;
-        const reservationError = identifierReservationError(name);
+        // High-level MOD objects use a compiler-generated __mod_* identifier.
+        // The matching __modmeta directive is collected in the pre-pass, so
+        // only those known generated objects may bypass the user identifier
+        // reservation. User-authored __* identifiers remain rejected.
+        const reservationError = languageMods.has(name) ? null : identifierReservationError(name);
         if (reservationError) {
           diagnostics.push({ line: lineNumber, message: reservationError });
           continue;
         }
-        if (objectExists(name, oscillators, gains, voices) || swells.has(name) || dices.has(name) || clockSources.has(name)) {
+        if (objectExists(name, oscillators, gains, voices) || swells.has(name) || clockSources.has(name)) {
           diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` });
           continue;
         }
@@ -359,35 +781,6 @@ export class SonusRuntime {
         continue;
       }
 
-      const dicesDeclaration = parseDicesDeclaration(line);
-      if (dicesDeclaration) {
-        const { name } = dicesDeclaration;
-        const reservationError = identifierReservationError(name);
-        if (reservationError) {
-          diagnostics.push({ line: lineNumber, message: reservationError });
-          continue;
-        }
-        if (objectExists(name, oscillators, gains, voices) || swells.has(name) || dices.has(name) || clockSources.has(name)) {
-          diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` });
-          continue;
-        }
-        dices.set(name, {
-          rate: 50,
-          jitter: 0,
-          gateBias: 50,
-          gateLength: 45,
-          gateJitter: 0,
-          spread: 50,
-          bias: 50,
-          steps: 75,
-          deja: 0,
-          length: 8,
-          scale: 0,
-          parameters: new Map(),
-        });
-        results.push({ message: `${name} = Dices` });
-        continue;
-      }
 
       const mistDeclaration = parseMistDeclaration(line);
       if (mistDeclaration) {
@@ -397,7 +790,7 @@ export class SonusRuntime {
           diagnostics.push({ line: lineNumber, message: reservationError });
           continue;
         }
-        if (objectExists(name, oscillators, gains, voices) || swells.has(name) || dices.has(name) || mists.has(name) || clockSources.has(name)) {
+        if (objectExists(name, oscillators, gains, voices) || swells.has(name) || mists.has(name) || clockSources.has(name)) {
           diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` });
           continue;
         }
@@ -416,7 +809,6 @@ export class SonusRuntime {
           mode: 0,
           parameters: new Map([
             ['MODE', 'GRANULAR'],
-            ['BACKEND', 'SUPERPARASITES'],
           ]),
         });
         results.push({ message: `${name} = Mist` });
@@ -582,6 +974,8 @@ export class SonusRuntime {
     // source order. All module declarations already exist, so references between
     // modules are still independent from declaration order.
     for (const { source: line, line: lineNumber } of lines) {
+      if (parseLanguageFxMetadata(line) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
+
       const oscillatorDeclaration = parseOscillatorDeclaration(line);
       if (oscillatorDeclaration) {
         const definition = oscillators.get(oscillatorDeclaration.name)!;
@@ -614,15 +1008,6 @@ export class SonusRuntime {
         const definition = swells.get(swellDeclaration.name)!;
         for (const call of swellDeclaration.calls) {
           const error = applySwellCall(swellDeclaration.name, definition, call, moduleViews, (expr) => evalValue(expr, lineNumber));
-          if (error) diagnostics.push({ line: lineNumber, message: error });
-        }
-        continue;
-      }
-      const dicesDeclaration = parseDicesDeclaration(line);
-      if (dicesDeclaration) {
-        const definition = dices.get(dicesDeclaration.name)!;
-        for (const call of dicesDeclaration.calls) {
-          const error = applyDicesCall(dicesDeclaration.name, definition, call, moduleViews, (expr) => evalValue(expr, lineNumber));
           if (error) diagnostics.push({ line: lineNumber, message: error });
         }
         continue;
@@ -763,6 +1148,7 @@ export class SonusRuntime {
           diagnostics.push({ line: lineNumber, message: `cannot assign scalar value to object: ${name}` });
           continue;
         }
+        scalarExpressions.set(name, { expression, line: lineNumber });
         const value = evalValue(expression, lineNumber);
         if (value !== undefined) {
           variables.set(name, value);
@@ -860,12 +1246,6 @@ export class SonusRuntime {
       match = line.match(/^([A-Za-z_]\w*)\.level\(\s*(.+)\s*\)\s*$/);
       if (match) {
         const [, name, rawLevel] = match;
-        const gain = gains.get(name);
-        if (!gain) {
-          diagnostics.push({ line: lineNumber, message: `unknown gain object: ${name}` });
-          continue;
-        }
-
         const level = evalNumber(rawLevel, lineNumber, 'level');
         if (level === undefined) continue;
         const error = gainLevelError(level);
@@ -874,9 +1254,38 @@ export class SonusRuntime {
           continue;
         }
 
-        gain.level = level;
-        gain.parameters.set('LEVEL', `${formatNumber(level)}%`);
-        results.push({ message: `${name}.level ${formatNumber(level)}%` });
+        if (name === 'Audio') {
+          mainLevel = level;
+          results.push({ message: `MAIN level ${formatNumber(level)}%` });
+          continue;
+        }
+
+        const voice = voices.get(name);
+        if (voice) {
+          voice.level = level;
+          voice.parameters.set('LEVEL', `${formatNumber(level)}%`);
+          results.push({ message: `${name}.level ${formatNumber(level)}%` });
+          continue;
+        }
+
+        const gain = gains.get(name);
+        if (gain) {
+          gain.level = level;
+          gain.parameters.set('LEVEL', `${formatNumber(level)}%`);
+          results.push({ message: `${name}.level ${formatNumber(level)}%` });
+          continue;
+        }
+
+        diagnostics.push({ line: lineNumber, message: `unknown level-capable object: ${name}` });
+        continue;
+      }
+
+      match = line.match(/^([A-Za-z_]\w*)\.lpg\(\s*(true|false)\s*\)\s*$/i);
+      if (match) {
+        const voice = voices.get(match[1]);
+        if (!voice) { diagnostics.push({ line: lineNumber, message: `unknown Voice: ${match[1]}` }); continue; }
+        voice.lpg = match[2].toLowerCase() === 'true';
+        voice.parameters.set('LPG', voice.lpg ? 'ON' : 'OFF');
         continue;
       }
 
@@ -922,6 +1331,21 @@ export class SonusRuntime {
         continue;
       }
 
+      match = line.match(/^([A-Za-z_]\w*)\.(position|size|pitch|density|texture|mix|spread|feedback|reverb|freeze|reverse|mode)\(\s*(.+)\s*\)\s*$/);
+      if (match && mists.has(match[1])) {
+        const definition = mists.get(match[1])!;
+        const error = applyMistCall(
+          match[1],
+          definition,
+          { name: match[2], argument: match[3] },
+          moduleViews,
+          (expression) => evalValue(expression, lineNumber),
+        );
+        if (error) diagnostics.push({ line: lineNumber, message: error });
+        else results.push({ message: `${match[1]}.${match[2]}` });
+        continue;
+      }
+
       match = line.match(/^([A-Za-z_]\w*)\.(slope|shape|smooth|shift)\(\s*(.+)\s*\)\s*$/);
       if (match) {
         const [, name, parameter, rawValue] = match;
@@ -937,52 +1361,6 @@ export class SonusRuntime {
         swell[parameter as 'slope' | 'shape' | 'smooth' | 'shift'] = value;
         swell.parameters.set(parameter.toUpperCase(), `${formatNumber(value)}%`);
         results.push({ message: `${name}.${parameter} ${formatNumber(value)}%` });
-        continue;
-      }
-
-      match = line.match(/^([A-Za-z_]\w*)\.(rate|jitter|gate_bias|gate_length|gate_jitter|spread|bias|steps|deja|length)\(\s*(.+)\s*\)\s*$/);
-      if (match) {
-        const [, name, parameter, rawValue] = match;
-        const definition = dices.get(name);
-        if (!definition) {
-          diagnostics.push({ line: lineNumber, message: `unknown Dices object: ${name}` });
-          continue;
-        }
-        const value = evalNumber(rawValue, lineNumber, parameter);
-        if (value === undefined) continue;
-
-        if (parameter === 'length') {
-          if (!Number.isInteger(value) || value < 1 || value > 16) {
-            diagnostics.push({ line: lineNumber, message: 'length expects an integer from 1 to 16' });
-            continue;
-          }
-          definition.length = value;
-          definition.parameters.set('LENGTH', formatNumber(value));
-        } else {
-          const error = percentError(value, parameter);
-          if (error) { diagnostics.push({ line: lineNumber, message: error }); continue; }
-          if (parameter === 'gate_bias') definition.gateBias = value;
-          else if (parameter === 'gate_length') definition.gateLength = value;
-          else if (parameter === 'gate_jitter') definition.gateJitter = value;
-          else definition[parameter as 'rate' | 'jitter' | 'spread' | 'bias' | 'steps' | 'deja'] = value;
-          definition.parameters.set(parameter.toUpperCase(), `${formatNumber(value)}%`);
-        }
-        results.push({ message: `${name}.${parameter} ${formatNumber(value)}` });
-        continue;
-      }
-
-      match = line.match(/^([A-Za-z_]\w*)\.scale\(\s*["']([^"']+)["']\s*\)\s*$/);
-      if (match && dices.has(match[1])) {
-        const [, name, rawScale] = match;
-        const scale = parseDicesScale(rawScale);
-        if (scale === null) {
-          diagnostics.push({ line: lineNumber, message: 'scale expects major, minor, pentatonic, chromatic, dorian, or fifths' });
-          continue;
-        }
-        const definition = dices.get(name)!;
-        definition.scale = scale;
-        definition.parameters.set('SCALE', rawScale.toUpperCase());
-        results.push({ message: `${name}.scale ${rawScale}` });
         continue;
       }
 
@@ -1049,25 +1427,6 @@ export class SonusRuntime {
         continue;
       }
 
-      match = line.match(/^([A-Za-z_]\w*)\.(t[1-3]|x[1-3]|y)\.view\(\s*\)\s*$/);
-      if (match) {
-        const [, name, port] = match;
-        if (!dices.has(name)) {
-          diagnostics.push({ line: lineNumber, message: `${port} is only available on Dices objects: ${name}` });
-          continue;
-        }
-        views.set(`${name}.${port}`, port.startsWith('t') ? 'gate' : 'signal');
-        results.push({ message: `${name}.${port} view` });
-        continue;
-      }
-
-      match = line.match(/^([A-Za-z_]\w*)\.view\(\s*\)\s*$/);
-      if (match && dices.has(match[1])) {
-        moduleViews.add(match[1]);
-        results.push({ message: `${match[1]} module view` });
-        continue;
-      }
-
       match = line.match(/^([A-Za-z_]\w*)\.(out_L|out_R)\.view\(\s*\)\s*$/);
       if (match && mists.has(match[1])) {
         views.set(`${match[1]}.${match[2]}`, 'signal');
@@ -1123,7 +1482,7 @@ export class SonusRuntime {
       const parsedRoute = parseRouteLine(line);
       if (parsedRoute) {
         const { sourceName, sourcePort, amountExpression, targetName, targetPort } = parsedRoute;
-        if (sourceName !== 'Clock' && !clockSources.has(sourceName) && !objectExists(sourceName, oscillators, gains, voices) && !swells.has(sourceName) && !dices.has(sourceName) && !mists.has(sourceName)) {
+        if (sourceName !== 'Clock' && !clockSources.has(sourceName) && !objectExists(sourceName, oscillators, gains, voices) && !swells.has(sourceName) && !mists.has(sourceName)) {
           diagnostics.push({ line: lineNumber, message: `unknown source object: ${sourceName}` });
           continue;
         }
@@ -1139,14 +1498,10 @@ export class SonusRuntime {
           diagnostics.push({ line: lineNumber, message: `${sourcePort} is only available on stereo objects: ${sourceName}` });
           continue;
         }
-        if (/^(t[1-3]|x[1-3]|y)$/.test(sourcePort) && !dices.has(sourceName)) {
-          diagnostics.push({ line: lineNumber, message: `${sourcePort} is only available on Dices objects: ${sourceName}` });
-          continue;
-        }
         if (targetPort === 'trig') {
           if (!voices.has(targetName) && !swells.has(targetName) && !mists.has(targetName)) { diagnostics.push({ line: lineNumber, message: `trigger input is only available on Voice, Swell or Mist objects: ${targetName}` }); continue; }
         } else if (targetPort === 'clock') {
-          if (!swells.has(targetName) && !dices.has(targetName)) { diagnostics.push({ line: lineNumber, message: `clock input is only available on Swell or Dices objects: ${targetName}` }); continue; }
+          if (!swells.has(targetName)) { diagnostics.push({ line: lineNumber, message: `clock input is only available on Swell objects: ${targetName}` }); continue; }
         } else if (targetPort === 'v_oct') {
           if (!voices.has(targetName) && !swells.has(targetName)) { diagnostics.push({ line: lineNumber, message: `v_oct input is only available on Voice or Swell objects: ${targetName}` }); continue; }
         } else if (targetPort === 'harmo' || targetPort === 'timbre' || targetPort === 'morph') {
@@ -1217,6 +1572,84 @@ export class SonusRuntime {
 
       diagnostics.push({ line: lineNumber, message: `cannot evaluate: ${line}` });
     }
+
+    for (const name of languageCycles.keys()) {
+      if (!voices.has(name)) diagnostics.push({ line: 1, message: `cycle references unknown Voice object: ${name}` });
+    }
+
+    for (const name of languageSetCycles.keys()) {
+      if (!variables.has(name) || !scalarExpressions.has(name)) {
+        diagnostics.push({ line: 1, message: `cycle references unknown SET variable: ${name}` });
+      }
+    }
+
+    for (const cycle of languageParameterCycles) {
+      if (!voices.has(cycle.voice)) {
+        diagnostics.push({ line: cycle.line, message: `parameter cycle references unknown Voice: ${cycle.voice}` });
+      }
+    }
+
+    for (const cycle of languageFxParameterCycles) {
+      if (!mists.has(cycle.fx)) diagnostics.push({ line: cycle.line, message: `FX parameter timing references unknown FX: ${cycle.fx}` });
+    }
+    for (const modulation of languageFxModulations) {
+      if (!mists.has(modulation.fx)) diagnostics.push({ line: modulation.line, message: `FX modulation references unknown FX: ${modulation.fx}` });
+      if (!swells.has(modulation.mod)) diagnostics.push({ line: modulation.line, message: `FX modulation references unknown MOD: ${modulation.mod}` });
+    }
+
+    for (const directive of languageModSets) {
+      const swell = swells.get(directive.internalName);
+      if (!swell) {
+        diagnostics.push({ line: directive.line, message: `unknown MOD object: ${directive.internalName}` });
+        continue;
+      }
+
+      const parameter = directive.parameter;
+      if (parameter === 'freq') {
+        const value = Number(directive.value);
+        if (!Number.isFinite(value) || value <= 0 || value > 10000) {
+          diagnostics.push({ line: directive.line, message: 'MOD rate resolves outside the supported frequency range' });
+          continue;
+        }
+        swell.frequency = value;
+        swell.parameters.set('RATE', `${formatNumber(value)} HZ`);
+        continue;
+      }
+
+      if (parameter === 'slope' || parameter === 'shape' || parameter === 'smooth' || parameter === 'shift') {
+        const value = Number(directive.value);
+        if (!Number.isFinite(value) || value < 0 || value > 100) {
+          diagnostics.push({ line: directive.line, message: `MOD ${parameter} expects 0..100` });
+          continue;
+        }
+        swell[parameter] = value;
+        swell.parameters.set(parameter.toUpperCase(), `${formatNumber(value)}%`);
+        continue;
+      }
+
+      if (parameter === 'output') {
+        const modes: Record<string, number> = { different: 0, amplitude: 1, phase: 2, frequency: 3 };
+        const mode = modes[directive.value.toLowerCase()];
+        if (mode === undefined) {
+          diagnostics.push({ line: directive.line, message: 'MOD relation expects phase, amplitude, frequency, or different' });
+          continue;
+        }
+        swell.outputMode = mode;
+        swell.parameters.set('RELATION', directive.value.toUpperCase());
+        continue;
+      }
+
+      if (parameter === 'range') {
+        const normalized = directive.value.toLowerCase();
+        if (normalized !== 'control' && normalized !== 'audio') {
+          diagnostics.push({ line: directive.line, message: 'MOD range expects control or audio' });
+          continue;
+        }
+        swell.range = normalized === 'audio' ? 1 : 0;
+        swell.parameters.set('RANGE', normalized.toUpperCase());
+      }
+    }
+
 
     const variableViews: VariableViewState[] = [];
     const seenVariableViews = new Set<string>();
@@ -1322,9 +1755,14 @@ export class SonusRuntime {
     // Built-in singletons such as Audio and Clock are intentionally omitted.
     variableViews.length = 0;
     for (const [name] of voices) variableViews.push({ name, value: 'Voice' });
-    for (const [name] of swells) variableViews.push({ name, value: 'Swell' });
-    for (const [name] of dices) variableViews.push({ name, value: 'Dices' });
-    for (const [name] of mists) variableViews.push({ name, value: 'Mist' });
+    for (const [name] of swells) {
+      const mod = languageMods.get(name);
+      variableViews.push({
+        name: mod ? (mod.ownerVoice ? `${mod.ownerVoice}.${mod.displayName}` : mod.displayName) : name,
+        value: mod ? 'Mod' : 'Swell',
+      });
+    }
+    for (const [name] of mists) variableViews.push({ name, value: languageFxMeta.has(name) ? 'Fx' : 'Mist' });
     for (const [name] of clockSources) variableViews.push({ name, value: 'Clock' });
     for (const [name] of oscillators) variableViews.push({ name, value: 'Osc' });
     for (const [name] of gains) variableViews.push({ name, value: 'Gain' });
@@ -1414,13 +1852,6 @@ export class SonusRuntime {
           signalKind: 'signal',
           port: 'OUT / AUX',
         });
-      } else if (dices.has(name)) {
-        ownerViews.push({
-          signal: `${name}.x1`,
-          signals: [`${name}.t1`, `${name}.t2`, `${name}.t3`, `${name}.x1`, `${name}.x2`, `${name}.x3`],
-          signalKind: 'signal',
-          port: 'SEQUENCE',
-        });
       } else if (mists.has(name)) {
         ownerViews.push({
           signal: `${name}.out_L`,
@@ -1432,6 +1863,18 @@ export class SonusRuntime {
         continue;
       }
       embeddedViews.set(name, ownerViews);
+    }
+
+    if (languageMasterClock) {
+      const initialBpm = evalNumber(languageMasterClock.expression, languageMasterClock.line, 'CLOCK');
+      if (initialBpm !== undefined) {
+        if (initialBpm <= 0 || initialBpm > 300) {
+          diagnostics.push({ line: languageMasterClock.line, message: 'CLOCK BPM must be greater than 0 and <= 300' });
+        } else {
+          clockBpm = initialBpm;
+          results.push({ message: `Clock ${formatNumber(initialBpm)} BPM` });
+        }
+      }
     }
 
     const schemeNodes: SchemeNode[] = [
@@ -1462,33 +1905,32 @@ export class SonusRuntime {
         ],
         views: embeddedViews.get(name),
       })),
-      ...[...swells.entries()].map(([name, definition]) => ({
-        id: name,
-        label: `${name.toUpperCase()} : SWELL`,
-        kind: 'module' as const,
-        parameters: [...definition.parameters.entries()].map(([parameterName, value]) => ({ name: parameterName, value })),
-        views: embeddedViews.get(name),
-      })),
-      ...[...dices.entries()].map(([name, definition]) => ({
-        id: name,
-        label: `${name.toUpperCase()} : DICES`,
-        kind: 'module' as const,
-        parameters: [...definition.parameters.entries()].map(([parameterName, value]) => ({
-          name: parameterName,
-          value,
-        })),
-        views: embeddedViews.get(name),
-      })),
-      ...[...mists.entries()].map(([name, definition]) => ({
-        id: name,
-        label: `${name.toUpperCase()} : MIST`,
-        kind: 'module' as const,
-        parameters: [...definition.parameters.entries()].map(([parameterName, value]) => ({
-          name: parameterName,
-          value,
-        })),
-        views: embeddedViews.get(name),
-      })),
+      ...[...swells.entries()].map(([name, definition]) => {
+        const mod = languageMods.get(name);
+        const displayName = mod ? (mod.ownerVoice ? `${mod.ownerVoice}.${mod.displayName}` : mod.displayName) : name;
+        return {
+          id: name,
+          label: `${displayName.toUpperCase()} : ${mod ? 'MOD' : 'SWELL'}`,
+          kind: 'module' as const,
+          parameters: [...definition.parameters.entries()].map(([parameterName, value]) => ({ name: parameterName, value })),
+          views: embeddedViews.get(name),
+        };
+      }),
+      ...[...mists.entries()].map(([name, definition]) => {
+        const fx = languageFxMeta.get(name);
+        return {
+          id: name,
+          label: `${name.toUpperCase()} : ${fx ? 'FX' : 'MIST'}`,
+          kind: 'module' as const,
+          parameters: [
+            ...(fx?.modelId ? [{ name: 'MODEL', value: fx.modelId.toUpperCase() }] : []),
+            ...[...definition.parameters.entries()]
+              .filter(([parameterName]) => !fx || parameterName !== 'MODE')
+              .map(([parameterName, value]) => ({ name: parameterName, value })),
+          ],
+          views: embeddedViews.get(name),
+        };
+      }),
       ...[...gains.entries()].map(([name, definition]) => ({
         id: name,
         label: `${name.toUpperCase()} : GAIN`,
@@ -1499,7 +1941,14 @@ export class SonusRuntime {
         })),
         views: embeddedViews.get(name),
       })),
-      { id: 'Audio', label: 'AUDIO OUT', kind: 'module' as const, parameters: [], views: embeddedViews.get('Audio') },
+      ...(languageMasterClock ? [{
+        id: 'Clock',
+        label: 'CLOCK',
+        kind: 'module' as const,
+        parameters: [{ name: 'BPM', value: `${formatNumber(clockBpm)} BPM` }],
+        views: embeddedViews.get('Clock'),
+      }] : []),
+      { id: 'Audio', label: 'AUDIO OUT', kind: 'module' as const, parameters: [{ name: 'LEVEL', value: `${formatNumber(mainLevel)}%` }], views: embeddedViews.get('Audio') },
     ];
 
     const schemeConnections: SchemeConnection[] = [
@@ -1527,6 +1976,7 @@ export class SonusRuntime {
 
     const program: AudioProgram = {
       clock: { bpm: clockBpm },
+      mainLevel,
       clockSources: [
         { name: 'Clock', rate: 1 },
         ...[...clockSources.entries()].map(([name, definition]) => ({ name, rate: definition.rate })),
@@ -1539,6 +1989,8 @@ export class SonusRuntime {
       voices: [...voices.entries()].map(([name, definition]) => ({
         name,
         model: definition.model,
+        lpg: definition.lpg,
+        level: definition.level,
         frequency: definition.frequency,
         harmo: definition.harmo,
         timbre: definition.timbre,
@@ -1554,20 +2006,6 @@ export class SonusRuntime {
         mode: definition.mode,
         outputMode: definition.outputMode,
         range: definition.range,
-      })),
-      dices: [...dices.entries()].map(([name, definition]) => ({
-        name,
-        rate: definition.rate,
-        jitter: definition.jitter,
-        gateBias: definition.gateBias,
-        gateLength: definition.gateLength,
-        gateJitter: definition.gateJitter,
-        spread: definition.spread,
-        bias: definition.bias,
-        steps: definition.steps,
-        deja: definition.deja,
-        length: definition.length,
-        scale: definition.scale,
       })),
       mists: [...mists.entries()].map(([name, definition]) => ({
         name,
@@ -1610,12 +2048,6 @@ export class SonusRuntime {
           } else if (voices.has(name)) {
             monitors.set(`${name}.out`, 'signal');
             monitors.set(`${name}.aux`, 'signal');
-          } else if (dices.has(name)) {
-            for (let port = 1; port <= 3; port += 1) {
-              monitors.set(`${name}.t${port}`, 'gate');
-              monitors.set(`${name}.x${port}`, 'signal');
-            }
-            monitors.set(`${name}.y`, 'signal');
           } else if (mists.has(name)) {
             monitors.set(`${name}.out_L`, 'signal');
             monitors.set(`${name}.out_R`, 'signal');
@@ -1631,62 +2063,346 @@ export class SonusRuntime {
       .filter(([, kind]) => kind !== 'parameter')
       .map(([signal, kind]) => ({ signal, kind: kind as SignalKind }));
     this.moduleViews = new Set(moduleViews);
-    for (const unsubscribe of this.whenUnsubscribers) unsubscribe();
-    this.whenUnsubscribers = [];
+    if (applyAudio) {
+      this.stopSchedulers();
+      this.audio.applyProgram(program);
+    for (const [name, voice] of voices) {
+      if (voice.lpg) this.audio.triggerVoice(name);
+    }
 
-    this.audio.applyProgram(program);
+    this.scheduler.clear();
 
-    for (const handler of whenHandlers) {
-      let eventIndex = 0;
-      const unsubscribe = this.audio.subscribeClockTrigger(handler.sourceName, () => {
-        eventIndex += 1;
-        if (!matchesCycle(handler.cycle, eventIndex)) return;
-        if (handler.probability < 100 && random() * 100 >= handler.probability) return;
+    if (languageMasterClock && languageMasterClock.amount > 0) {
+      const clockSpec = languageMasterClock;
+      let driftValue = clockBpm;
 
-        for (const statement of parseStatements(handler.body)) {
-          const lineNumber = handler.line + statement.line - 1;
-          const line = statement.source;
+      const updateClock = (): void => {
+        const next = evalNumber(clockSpec.expression, clockSpec.line, 'CLOCK');
+        if (next === undefined || next <= 0 || next > 300) return;
+        const bpm = clockSpec.drift
+          ? driftValue + (next - driftValue) * 0.35
+          : next;
+        driftValue = bpm;
+        clockBpm = bpm;
+        this.audio.setMasterClockBpm(bpm);
+      };
 
-          let match = line.match(/^([A-Za-z_]\w*)\.(freq|model|harmo|timbre|morph)\(\s*(.+)\s*\)$/);
-          if (match) {
-            const [, name, parameter, rawValue] = match;
-            const voice = voices.get(name);
-            if (!voice) return;
-            const value = evalNumber(rawValue, lineNumber, parameter);
-            if (value === undefined) continue;
-            if (parameter === 'freq') {
-              if (frequencyError(value)) continue;
-              voice.frequency = value;
-            } else if (parameter === 'model') {
-              const model = parseVoiceModelValue(value);
-              if (model === null) continue;
-              voice.model = model;
-              this.audio.setVoiceParameter(name, 'model', model);
-              continue;
-            } else {
-              if (percentError(value, parameter)) continue;
-              const modulationParameter = parameter as 'harmo' | 'timbre' | 'morph';
-              voice[modulationParameter] = value;
-            }
-            this.audio.setVoiceParameter(name, parameter as 'freq' | 'harmo' | 'timbre' | 'morph', value);
-            continue;
-          }
+      if (clockSpec.unit === 'beat') {
+        this.scheduler.addBeatJob(clockSpec.amount, updateClock);
+      } else {
+        const intervalMs = clockSpec.unit === 'sec' ? clockSpec.amount * 1000 : clockSpec.amount;
+        this.scheduler.addWallJob(intervalMs, updateClock);
+      }
+    }
 
-          match = line.match(/^([A-Za-z_]\w*)\s*=\s*(.+)$/);
-          if (match) {
-            const [, name, expression] = match;
-            if (identifierReservationError(name) || objectExists(name, oscillators, gains, voices) || clockSources.has(name)) continue;
-            const value = evalValue(expression, lineNumber);
-            if (value !== undefined) {
-              variables.set(name, value);
-              const existing = this.variableViews.find((view) => view.name === name);
-              if (existing) existing.value = formatScalar(value);
-              else this.variableViews.push({ name, value: formatScalar(value) });
-            }
-          }
+    for (const [name, cycle] of languageSetCycles) {
+      const definition = scalarExpressions.get(name);
+      if (!definition) continue;
+      let driftRatio = 1;
+
+      const updateValue = (): void => {
+        if (cycle.chance < 100 && random() * 100 >= cycle.chance) return;
+        const value = evalValue(definition.expression, definition.line);
+        if (value === undefined) return;
+        variables.set(name, value);
+        const existing = this.variableViews.find((view) => view.name === name);
+        if (existing) existing.value = formatScalar(value);
+        else this.variableViews.push({ name, value: formatScalar(value) });
+      };
+
+      if (cycle.unit === 'beat') {
+        this.scheduler.addBeatJob(cycle.amount, updateValue, cycle.loose);
+        continue;
+      }
+
+      const baseMs = cycle.unit === 'sec' ? cycle.amount * 1000 : cycle.amount;
+      this.scheduler.addWallJob(baseMs, updateValue, () => {
+        if (cycle.drift) {
+          driftRatio += (random() - 0.5) * 0.06;
+          driftRatio = Math.min(1.2, Math.max(0.8, driftRatio));
+        } else {
+          driftRatio = 1;
+        }
+        const looseRatio = cycle.loose ? 0.94 + random() * 0.12 : 1;
+        return baseMs * driftRatio * looseRatio;
+      });
+    }
+
+    for (const cycle of languageParameterCycles) {
+      const voice = voices.get(cycle.voice);
+      if (!voice) continue;
+      let driftRatio = 1;
+
+      const updateParameter = (): void => {
+        if (cycle.chance < 100 && random() * 100 >= cycle.chance) return;
+        const value = evalNumber(cycle.expression, cycle.line, cycle.parameter);
+        if (value === undefined || percentError(value, cycle.parameter)) return;
+        voice[cycle.parameter] = value;
+        this.audio.setVoiceParameter(cycle.voice, cycle.parameter, value);
+      };
+
+      if (cycle.unit === 'beat') {
+        this.scheduler.addBeatJob(cycle.amount, updateParameter, cycle.loose);
+        continue;
+      }
+
+      const baseMs = cycle.unit === 'sec' ? cycle.amount * 1000 : cycle.amount;
+      this.scheduler.addWallJob(baseMs, updateParameter, () => {
+        if (cycle.drift) {
+          driftRatio += (random() - 0.5) * 0.06;
+          driftRatio = Math.min(1.2, Math.max(0.8, driftRatio));
+        } else {
+          driftRatio = 1;
+        }
+        const looseRatio = cycle.loose ? 0.94 + random() * 0.12 : 1;
+        return baseMs * driftRatio * looseRatio;
+      });
+    }
+
+
+    const clampFxParameter = (parameter: LanguageFxParameter, value: number): number | null => {
+      if (!Number.isFinite(value)) return null;
+      if (parameter === 'pitch') return value >= -48 && value <= 48 ? value : null;
+      return value >= 0 && value <= 100 ? value : null;
+    };
+
+    for (const cycle of languageFxParameterCycles) {
+      const fx = mists.get(cycle.fx);
+      if (!fx) continue;
+      let driftRatio = 1;
+
+      const updateFxParameter = (): void => {
+        if (cycle.chance < 100 && random() * 100 >= cycle.chance) return;
+        const value = evalNumber(cycle.expression, cycle.line, `FX ${cycle.parameter}`);
+        if (value === undefined) return;
+        const checked = clampFxParameter(cycle.parameter, value);
+        if (checked === null) return;
+        fx[cycle.parameter] = checked;
+        this.audio.setMistParameter(cycle.fx, cycle.parameter, checked);
+      };
+
+      if (cycle.unit === 'beat') {
+        this.scheduler.addBeatJob(cycle.amount, updateFxParameter, cycle.loose);
+        continue;
+      }
+      const baseMs = cycle.unit === 'sec' ? cycle.amount * 1000 : cycle.amount;
+      this.scheduler.addWallJob(baseMs, updateFxParameter, () => {
+        if (cycle.drift) {
+          driftRatio += (random() - 0.5) * 0.06;
+          driftRatio = Math.min(1.2, Math.max(0.8, driftRatio));
+        } else driftRatio = 1;
+        const looseRatio = cycle.loose ? 0.94 + random() * 0.12 : 1;
+        return baseMs * driftRatio * looseRatio;
+      });
+    }
+
+    for (const [name, cycle] of languageFxPitchCycles) {
+      const fx = mists.get(name);
+      const sequence = languageFxPitchSequences.get(name);
+      if (!fx || !sequence || sequence.values.length === 0) continue;
+      let cursor = 0;
+      let walkCursor = 0;
+      let shuffleOrder: number[] = [];
+      let shuffleCursor = 0;
+      let driftRatio = 1;
+
+      const reshuffle = (): void => {
+        shuffleOrder = Array.from({ length: sequence.values.length }, (_, index) => index);
+        for (let index = shuffleOrder.length - 1; index > 0; index -= 1) {
+          const swap = Math.floor(random() * (index + 1));
+          [shuffleOrder[index], shuffleOrder[swap]] = [shuffleOrder[swap], shuffleOrder[index]];
+        }
+        shuffleCursor = 0;
+      };
+
+      const nextPitch = (): number => {
+        const values = sequence.values;
+        if (values.length === 1) return values[0];
+        if (sequence.mode === 'random') return values[Math.floor(random() * values.length)];
+        if (sequence.mode === 'walk') {
+          walkCursor += random() < 0.5 ? -1 : 1;
+          if (walkCursor < 0) walkCursor = 1;
+          if (walkCursor >= values.length) walkCursor = Math.max(0, values.length - 2);
+          return values[walkCursor];
+        }
+        if (sequence.mode === 'shuffle') {
+          if (shuffleOrder.length !== values.length || shuffleCursor >= shuffleOrder.length) reshuffle();
+          return values[shuffleOrder[shuffleCursor++]];
+        }
+        if (sequence.mode === 'reverse') {
+          cursor = (cursor - 1 + values.length) % values.length;
+          return values[cursor];
+        }
+        cursor = (cursor + 1) % values.length;
+        return values[cursor];
+      };
+
+      const fire = (): void => {
+        if (cycle.chance < 100 && random() * 100 >= cycle.chance) return;
+        const pitch = nextPitch();
+        fx.pitch = pitch;
+        this.audio.setMistParameter(name, 'pitch', pitch);
+      };
+
+      if (cycle.unit === 'beat') {
+        this.scheduler.addBeatJob(cycle.amount, fire, cycle.loose);
+        continue;
+      }
+      const baseMs = cycle.unit === 'sec' ? cycle.amount * 1000 : cycle.amount;
+      this.scheduler.addWallJob(baseMs, fire, () => {
+        if (cycle.drift) {
+          driftRatio += (random() - 0.5) * 0.06;
+          driftRatio = Math.min(1.2, Math.max(0.8, driftRatio));
+        } else driftRatio = 1;
+        const looseRatio = cycle.loose ? 0.94 + random() * 0.12 : 1;
+        return baseMs * driftRatio * looseRatio;
+      });
+    }
+
+    if (languageFxModulations.length > 0) {
+      // One control-rate scheduler job services every FX modulation route.
+      this.scheduler.addWallJob(1000 / 60, () => {
+        for (const modulation of languageFxModulations) {
+          const fx = mists.get(modulation.fx);
+          if (!fx) continue;
+          const cv = this.audio.readModOutput(modulation.mod, modulation.channel);
+          if (cv === null) continue;
+          const normalized = Math.max(-1, Math.min(1, cv / 5));
+          const base = fx[modulation.parameter] as number;
+          const span = modulation.parameter === 'pitch' ? 48 : 100;
+          const next = base + normalized * span * (modulation.depth / 100);
+          const checked = clampFxParameter(modulation.parameter, next);
+          if (checked !== null) this.audio.setMistParameter(modulation.fx, modulation.parameter, checked);
         }
       });
-      this.whenUnsubscribers.push(unsubscribe);
+    }
+
+    for (const [name, cycle] of languageCycles) {
+      const voice = voices.get(name);
+      if (!voice) continue;
+      const sequence = languageSequences.get(name);
+      let cursor = 0;
+      let walkCursor = 0;
+      let shuffleOrder: number[] = [];
+      let shuffleCursor = 0;
+      let driftRatio = 1;
+
+      const reshuffle = (): void => {
+        const count = sequence?.values.length ?? 0;
+        shuffleOrder = Array.from({ length: count }, (_, index) => index);
+        for (let index = shuffleOrder.length - 1; index > 0; index -= 1) {
+          const swap = Math.floor(random() * (index + 1));
+          [shuffleOrder[index], shuffleOrder[swap]] = [shuffleOrder[swap], shuffleOrder[index]];
+        }
+        shuffleCursor = 0;
+      };
+
+      const nextFrequency = (): number => {
+        if (!sequence || sequence.values.length === 0) return voice.frequency;
+        const values = sequence.values;
+        if (values.length === 1) return values[0];
+
+        if (sequence.mode === 'random') return values[Math.floor(random() * values.length)];
+        if (sequence.mode === 'walk') {
+          const direction = random() < 0.5 ? -1 : 1;
+          walkCursor += direction;
+          if (walkCursor < 0) walkCursor = 1;
+          if (walkCursor >= values.length) walkCursor = Math.max(0, values.length - 2);
+          return values[walkCursor];
+        }
+        if (sequence.mode === 'shuffle') {
+          if (shuffleOrder.length !== values.length || shuffleCursor >= shuffleOrder.length) reshuffle();
+          return values[shuffleOrder[shuffleCursor++]];
+        }
+        if (sequence.mode === 'reverse') {
+          cursor = (cursor - 1 + values.length) % values.length;
+          return values[cursor];
+        }
+
+        cursor = (cursor + 1) % values.length;
+        return values[cursor];
+      };
+
+      const fire = (): void => {
+        if (cycle.chance < 100 && random() * 100 >= cycle.chance) return;
+        const frequency = nextFrequency();
+        voice.frequency = frequency;
+        this.audio.setVoiceParameter(name, 'freq', frequency);
+        if (voice.lpg) this.audio.triggerVoice(name);
+      };
+
+      if (cycle.unit === 'beat') {
+        this.scheduler.addBeatJob(cycle.amount, fire, cycle.loose);
+        continue;
+      }
+
+      const baseMs = cycle.unit === 'sec' ? cycle.amount * 1000 : cycle.amount;
+      this.scheduler.addWallJob(baseMs, fire, () => {
+        if (cycle.drift) {
+          driftRatio += (random() - 0.5) * 0.06;
+          driftRatio = Math.min(1.2, Math.max(0.8, driftRatio));
+        } else {
+          driftRatio = 1;
+        }
+        const looseRatio = cycle.loose ? 0.94 + random() * 0.12 : 1;
+        return baseMs * driftRatio * looseRatio;
+      });
+    }
+
+    this.scheduler.start();
+
+      for (const handler of whenHandlers) {
+        let eventIndex = 0;
+        const unsubscribe = this.audio.subscribeClockTrigger(handler.sourceName, () => {
+          eventIndex += 1;
+          if (!matchesCycle(handler.cycle, eventIndex)) return;
+          if (handler.probability < 100 && random() * 100 >= handler.probability) return;
+
+          for (const statement of parseStatements(handler.body)) {
+            const lineNumber = handler.line + statement.line - 1;
+            const line = statement.source;
+
+            let match = line.match(/^([A-Za-z_]\w*)\.(freq|model|harmo|timbre|morph)\(\s*(.+)\s*\)$/);
+            if (match) {
+              const [, name, parameter, rawValue] = match;
+              const voice = voices.get(name);
+              if (!voice) return;
+              const value = evalNumber(rawValue, lineNumber, parameter);
+              if (value === undefined) continue;
+              if (parameter === 'freq') {
+                if (frequencyError(value)) continue;
+                voice.frequency = value;
+              } else if (parameter === 'model') {
+                const model = parseVoiceModelValue(value);
+                if (model === null) continue;
+                voice.model = model;
+                this.audio.setVoiceParameter(name, 'model', model);
+                continue;
+              } else {
+                if (percentError(value, parameter)) continue;
+                const modulationParameter = parameter as 'harmo' | 'timbre' | 'morph';
+                voice[modulationParameter] = value;
+              }
+              this.audio.setVoiceParameter(name, parameter as 'freq' | 'harmo' | 'timbre' | 'morph', value);
+              continue;
+            }
+
+            match = line.match(/^([A-Za-z_]\w*)\s*=\s*(.+)$/);
+            if (match) {
+              const [, name, expression] = match;
+              if (identifierReservationError(name) || objectExists(name, oscillators, gains, voices) || clockSources.has(name)) continue;
+              const value = evalValue(expression, lineNumber);
+              if (value !== undefined) {
+                variables.set(name, value);
+                const existing = this.variableViews.find((view) => view.name === name);
+                if (existing) existing.value = formatScalar(value);
+                else this.variableViews.push({ name, value: formatScalar(value) });
+              }
+            }
+          }
+        });
+        this.whenUnsubscribers.push(unsubscribe);
+      }
     }
 
     return results.length > 0 ? results : [{ message: 'ok' }];
@@ -1858,6 +2574,246 @@ function matchesCycle(condition: CycleCondition | null, eventIndex: number): boo
   return ((eventIndex - 1) % condition.length!) + 1 === condition.position;
 }
 
+function parseLanguageSequenceDirective(line: string): ({ name: string; values: number[]; mode: LanguageSequenceDefinition['mode'] }) | null {
+  const match = line.match(/^__sequence\("([A-Za-z_]\w*)","([^"]*)","(order|random|walk|shuffle|reverse)"\)$/);
+  if (!match) return null;
+  return { name: match[1], values: match[2].split('|').filter(Boolean).map(Number), mode: match[3] as LanguageSequenceDefinition['mode'] };
+}
+
+function parseLanguageCycleDirective(line: string): ({ name: string; amount: number; unit: LanguageCycleDefinition['unit']; chance: number; drift: boolean; loose: boolean }) | null {
+  const match = line.match(/^__cycle\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false)\)$/);
+  if (!match) return null;
+  return {
+    name: match[1],
+    amount: Number(match[2]),
+    unit: match[3] as LanguageCycleDefinition['unit'],
+    chance: Number(match[4]),
+    drift: match[5] === 'true',
+    loose: match[6] === 'true',
+  };
+}
+
+function parseLanguageFxMetadata(line: string): LanguageFxMetadata | null {
+  const match = line.match(/^__fxmeta\("([A-Za-z_]\w*)"(?:,"([^"]+)")?\)$/);
+  return match ? { name: match[1], modelId: match[2] ?? null } : null;
+}
+
+function parseLanguageFxParameterCycleDirective(
+  line: string,
+  lineNumber: number,
+): LanguageFxParameterCycleDefinition | null {
+  const match = line.match(
+    /^__fxparamcycle\("([A-Za-z_]\w*)","(position|size|pitch|density|texture|mix|spread|feedback|reverb)","((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false)\)$/,
+  );
+  if (!match) return null;
+  let expression: string;
+  try { expression = JSON.parse(`"${match[3]}"`) as string; } catch { return null; }
+  return {
+    fx: match[1],
+    parameter: match[2] as LanguageFxParameter,
+    expression,
+    amount: Number(match[4]),
+    unit: match[5] as LanguageFxParameterCycleDefinition['unit'],
+    chance: Number(match[6]),
+    drift: match[7] === 'true',
+    loose: match[8] === 'true',
+    line: lineNumber,
+  };
+}
+
+function parseLanguageFxParameterDefaultDirective(
+  line: string,
+  lineNumber: number,
+): LanguageFxParameterDefaultDefinition | null {
+  const match = line.match(
+    /^__fxparamdefault\("([A-Za-z_]\w*)","(position|size|pitch|density|texture|mix|spread|feedback|reverb)","((?:[^"\\]|\\.)*)"\)$/,
+  );
+  if (!match) return null;
+  let expression: string;
+  try { expression = JSON.parse(`"${match[3]}"`) as string; } catch { return null; }
+  return { fx: match[1], parameter: match[2] as LanguageFxParameter, expression, line: lineNumber };
+}
+
+function parseLanguageFxPitchSequenceDirective(
+  line: string,
+): ({ name: string } & LanguageFxPitchSequenceDefinition) | null {
+  const match = line.match(/^__fxsequence\("([A-Za-z_]\w*)","([^"]*)","(order|random|walk|shuffle|reverse)"\)$/);
+  if (!match) return null;
+  return {
+    name: match[1],
+    values: match[2].split('|').filter(Boolean).map(Number),
+    mode: match[3] as LanguageFxPitchSequenceDefinition['mode'],
+  };
+}
+
+function parseLanguageFxPitchCycleDirective(
+  line: string,
+): { name: string; timing: LanguageCycleDefinition } | null {
+  const match = line.match(/^__fxpitchcycle\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false)\)$/);
+  if (!match) return null;
+  return {
+    name: match[1],
+    timing: {
+      amount: Number(match[2]),
+      unit: match[3] as LanguageCycleDefinition['unit'],
+      chance: Number(match[4]),
+      drift: match[5] === 'true',
+      loose: match[6] === 'true',
+    },
+  };
+}
+
+function parseLanguageFxModulationDirective(
+  line: string,
+  lineNumber: number,
+): LanguageFxModulationDefinition | null {
+  const match = line.match(
+    /^__fxmod\("([A-Za-z_]\w*)","(position|size|pitch|density|texture|mix|spread|feedback|reverb)","([A-Za-z_]\w*)",([1-4]),(-?\d+(?:\.\d+)?)\)$/,
+  );
+  if (!match) return null;
+  return {
+    fx: match[1],
+    parameter: match[2] as LanguageFxParameter,
+    mod: match[3],
+    channel: Number(match[4]) as 1 | 2 | 3 | 4,
+    depth: Number(match[5]),
+    line: lineNumber,
+  };
+}
+
+function parseLanguageModSetDirective(line: string, lineNumber: number): LanguageModSetDirective | null {
+  const match = line.match(
+    /^__modset\("([A-Za-z_]\w*)","(freq|slope|shape|smooth|shift|output|range)","((?:[^"\\]|\\.)*)"\);?$/,
+  );
+  if (!match) return null;
+
+  let value: string;
+  try {
+    value = JSON.parse(`"${match[3]}"`) as string;
+  } catch {
+    return null;
+  }
+
+  return {
+    internalName: match[1],
+    parameter: match[2] as LanguageModSetDirective['parameter'],
+    value,
+    line: lineNumber,
+  };
+}
+
+function parseLanguageModMetadata(line: string): LanguageModMetadata | null {
+  const match = line.match(/^__modmeta\("([A-Za-z_]\w*)","([A-Za-z_]\w*)","([A-Za-z_]\w*)?"\)$/);
+  if (!match) return null;
+  return { internalName: match[1], displayName: match[2], ownerVoice: match[3] || null };
+}
+
+function parseLanguageMasterClockDirective(line: string, lineNumber: number): LanguageMasterClockDefinition | null {
+  const match = line.match(/^__masterclock\("((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(true|false)\)$/);
+  if (!match) return null;
+  let expression: string;
+  try {
+    expression = JSON.parse(`"${match[1]}"`) as string;
+  } catch {
+    return null;
+  }
+  return {
+    expression,
+    amount: Number(match[2]),
+    unit: match[3] as LanguageMasterClockDefinition['unit'],
+    drift: match[4] === 'true',
+    line: lineNumber,
+  };
+}
+
+function parseLanguageParameterCycleDirective(
+  line: string,
+  lineNumber: number,
+): LanguageParameterCycleDefinition | null {
+  const match = line.match(
+    /^__paramcycle\("([A-Za-z_]\w*)","(harmo|timbre|morph)","((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false)\)$/,
+  );
+  if (!match) return null;
+
+  let expression: string;
+  try {
+    expression = JSON.parse(`"${match[3]}"`) as string;
+  } catch {
+    return null;
+  }
+
+  return {
+    voice: match[1],
+    parameter: match[2] as LanguageParameterCycleDefinition['parameter'],
+    expression,
+    amount: Number(match[4]),
+    unit: match[5] as LanguageParameterCycleDefinition['unit'],
+    chance: Number(match[6]),
+    drift: match[7] === 'true',
+    loose: match[8] === 'true',
+    line: lineNumber,
+  };
+}
+
+function parseLanguageParameterDefaultDirective(
+  line: string,
+  lineNumber: number,
+): LanguageParameterDefaultDefinition | null {
+  const match = line.match(
+    /^__paramdefault\("([A-Za-z_]\w*)","(harmo|timbre|morph)","((?:[^"\\]|\\.)*)"\)$/,
+  );
+  if (!match) return null;
+
+  let expression: string;
+  try {
+    expression = JSON.parse(`"${match[3]}"`) as string;
+  } catch {
+    return null;
+  }
+
+  return {
+    voice: match[1],
+    parameter: match[2] as LanguageParameterDefaultDefinition['parameter'],
+    expression,
+    line: lineNumber,
+  };
+}
+
+function parseLanguageObjectEveryDirective(
+  line: string,
+): ({ name: string } & LanguageObjectEveryDefinition) | null {
+  const match = line.match(
+    /^__objectevery\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false)\)$/,
+  );
+  if (!match) return null;
+  return {
+    name: match[1],
+    amount: Number(match[2]),
+    unit: match[3] as LanguageObjectEveryDefinition['unit'],
+    chance: Number(match[4]),
+    drift: match[5] === 'true',
+    loose: match[6] === 'true',
+  };
+}
+
+function parseLanguageSetCycleDirective(line: string): ({ name: string; amount: number; unit: LanguageSetCycleDefinition['unit']; chance: number; drift: boolean; loose: boolean }) | null {
+  const match = line.match(/^__setcycle\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false)\)$/);
+  if (!match) return null;
+  return {
+    name: match[1],
+    amount: Number(match[2]),
+    unit: match[3] as LanguageSetCycleDefinition['unit'],
+    chance: Number(match[4]),
+    drift: match[5] === 'true',
+    loose: match[6] === 'true',
+  };
+}
+
+function parseLanguageFromDirective(line: string): ({ target: string; property: string; source: string }) | null {
+  const match = line.match(/^__from\("([A-Za-z_]\w*)","(note|freq|cycle)","([A-Za-z_]\w*)"\)$/);
+  return match ? { target: match[1], property: match[2], source: match[3] } : null;
+}
+
 function parseStatements(source: string): Array<{ source: string; line: number }> {
   const statements: Array<{ source: string; line: number }> = [];
   let buffer = '';
@@ -1964,9 +2920,6 @@ function parseSwellDeclaration(line: string): ObjectDeclaration | null {
   return parseDeclaration(line, 'Swell');
 }
 
-function parseDicesDeclaration(line: string): ObjectDeclaration | null {
-  return parseDeclaration(line, 'Dices');
-}
 
 function parseMistDeclaration(line: string): ObjectDeclaration | null {
   return parseDeclaration(line, 'Mist');
@@ -2185,72 +3138,6 @@ function applyMistCall(
   }
 }
 
-function parseDicesScale(value: string): number | null {
-  const scales: Record<string, number> = {
-    major: 0,
-    minor: 1,
-    pentatonic: 2,
-    chromatic: 3,
-    dorian: 4,
-    fifths: 5,
-  };
-  return scales[value.trim().toLowerCase()] ?? null;
-}
-
-function applyDicesCall(
-  objectName: string,
-  definition: DicesDefinition,
-  call: ChainedCall,
-  moduleViews: Set<string>,
-  evaluate: (expression: string) => ScalarValue | undefined,
-): string | null {
-  const percent = (parameter: 'rate' | 'jitter' | 'spread' | 'bias' | 'steps' | 'deja' | 'gateBias' | 'gateLength' | 'gateJitter'): string | null => {
-    const value = evaluate(call.argument);
-    if (value === undefined) return null;
-    if (typeof value !== 'number') return `${call.name} expects one numeric expression`;
-    const error = percentError(value, call.name);
-    if (error) return error;
-    definition[parameter] = value;
-    definition.parameters.set(call.name.toUpperCase(), `${formatNumber(value)}%`);
-    return null;
-  };
-
-  switch (call.name) {
-    case 'rate': return percent('rate');
-    case 'jitter': return percent('jitter');
-    case 'gate_bias': return percent('gateBias');
-    case 'gate_length': return percent('gateLength');
-    case 'gate_jitter': return percent('gateJitter');
-    case 'spread': return percent('spread');
-    case 'bias': return percent('bias');
-    case 'steps': return percent('steps');
-    case 'deja': return percent('deja');
-    case 'length': {
-      const value = evaluate(call.argument);
-      if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 16) {
-        return 'length expects an integer from 1 to 16';
-      }
-      definition.length = value;
-      definition.parameters.set('LENGTH', formatNumber(value));
-      return null;
-    }
-    case 'scale': {
-      const value = evaluate(call.argument);
-      if (typeof value !== 'string') return 'scale expects a scale name';
-      const scale = parseDicesScale(value);
-      if (scale === null) return 'scale expects major, minor, pentatonic, chromatic, dorian, or fifths';
-      definition.scale = scale;
-      definition.parameters.set('SCALE', value.toUpperCase());
-      return null;
-    }
-    case 'view':
-      if (call.argument.length > 0) return 'view does not accept parameters yet';
-      moduleViews.add(objectName);
-      return null;
-    default:
-      return `unknown Dices method: ${call.name}`;
-  }
-}
 
 function applySwellCall(
   objectName: string,
@@ -2401,11 +3288,34 @@ function applyGainCall(
   }
 }
 
-const VOICE_MODEL_NAMES = [
+const VOICE_MODEL_BACKEND_NAMES = [
   'analog', 'waves', 'fm', 'grain', 'additive', 'wavetable', 'chord', 'speech',
   'swarm', 'noise', 'particle', 'string', 'modal', 'kick', 'snare', 'hat',
   'analog-vcf', 'phase', 'fm6-a', 'fm6-b', 'fm6-c', 'terrain', 'strings', 'chiptune',
 ] as const;
+
+const MACRO_MODEL_IDS = new Map<string, number>([
+  ['analog', 1],
+  ['waves', 2],
+  ['fm', 3],
+  ['grain', 4],
+  ['additive', 5],
+  ['wavetable', 6],
+  ['chord', 7],
+  ['speech', 8],
+  ['swarm', 9],
+  ['noise', 10],
+  ['particle', 11],
+  ['string', 12],
+  // Backend slots 13..16 are intentionally not part of the public macro family:
+  // modal synthesis and the three percussion engines are reserved for future
+  // dedicated resonator/physical/drum families.
+  ['analog-vcf', 17],
+  ['phase', 18],
+  ['terrain', 22],
+  ['strings', 23],
+  ['chiptune', 24],
+]);
 
 function applyVoiceCall(
   objectName: string,
@@ -2458,25 +3368,28 @@ function applyVoiceCall(
 function parseVoiceModelValue(value: ScalarValue): number | null {
   if (typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 24) return value;
   if (typeof value !== 'string') return null;
+
   const normalized = value.trim().toLowerCase();
-  const index = VOICE_MODEL_NAMES.indexOf(normalized as typeof VOICE_MODEL_NAMES[number]);
-  return index >= 0 ? index + 1 : null;
+  const macro = normalized.match(/^macro\.([a-z0-9_-]+)$/);
+  if (macro) return MACRO_MODEL_IDS.get(macro[1]) ?? null;
+
+  // Low-level compatibility: backend model names remain accepted internally,
+  // but the high-level language exposes only engine.algorithm identifiers.
+  const backendIndex = VOICE_MODEL_BACKEND_NAMES.indexOf(normalized as typeof VOICE_MODEL_BACKEND_NAMES[number]);
+  return backendIndex >= 0 ? backendIndex + 1 : null;
 }
 
 function formatVoiceModel(model: number): string {
-  return `${model} ${VOICE_MODEL_NAMES[model - 1]?.toUpperCase() ?? ''}`.trim();
+  for (const [algorithm, id] of MACRO_MODEL_IDS) {
+    if (id === model) return `${model} MACRO.${algorithm.toUpperCase()}`;
+  }
+  return `${model} INTERNAL`;
 }
 
 function percentError(value: number, name: string): string | null {
   return !Number.isFinite(value) || value < 0 || value > 100
     ? `${name} must be between 0 and 100`
     : null;
-}
-
-function parseSingleNumber(value: string): number | null {
-  if (!/^-?\d+(?:\.\d+)?$/.test(value)) return null;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function midiToFrequency(note: number): number {
