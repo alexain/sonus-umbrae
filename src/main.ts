@@ -292,7 +292,7 @@ function notify(text: string): void {
 function normalizeLanguageCommandCase(): void {
   const normalized = editor.value
     .replace(
-      /^(\s*)(voice|play|set)\b/gim,
+      /^(\s*)(voice|play|set|clock)\b/gim,
       (_match, indentation: string, commandName: string) => `${indentation}${commandName.toUpperCase()}`,
     )
     .replace(
@@ -390,6 +390,8 @@ function evaluateLiveSource(): boolean {
     }
 
     const compiled = compileLanguageSource(source);
+    const hasMasterClock = /^\s*CLOCK\b/im.test(source);
+    audioEngine.setClockTransport(hasMasterClock);
     const results = runtime.evaluate(compiled);
     const last = results.at(-1);
     syncViews();
@@ -1435,7 +1437,7 @@ function statementLabels(source: string): string[] {
   for (let index = 0; index < lines.length; index += 1) {
     const trimmed = lines[index].trim();
     if (!trimmed || trimmed.startsWith('//')) continue;
-    if (/^(VOICE|SET|PLAY)\b/i.test(trimmed)) {
+    if (/^(VOICE|SET|CLOCK|PLAY)\b/i.test(trimmed)) {
       statement += 1;
       labels[index] = String(statement);
     }
@@ -1697,6 +1699,7 @@ async function runCommand(raw: string): Promise<void> {
       const action = args[0]?.toLowerCase();
       if (action === 'stop') {
         runtime.stopExecution();
+        audioEngine.setClockTransport(false);
         setCodeRunning(false);
         syncViews();
         notify('live code stopped');

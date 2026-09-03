@@ -214,6 +214,14 @@ interface LanguageSetCycleDefinition {
   loose: boolean;
 }
 
+interface LanguageMasterClockDefinition {
+  expression: string;
+  amount: number;
+  unit: 'ms' | 'sec' | 'beat';
+  drift: boolean;
+  line: number;
+}
+
 export class SonusRuntime {
   private parameterViews: ParameterViewState[] = [];
   private variableViews: VariableViewState[] = [];
@@ -232,6 +240,7 @@ export class SonusRuntime {
 
   stopExecution(): void {
     this.stopSchedulers();
+    this.audio.stopProgramOutput();
     this.audio.panic();
   }
 
@@ -307,7 +316,15 @@ export class SonusRuntime {
     const languageSequences = new Map<string, LanguageSequenceDefinition>();
     const languageCycles = new Map<string, LanguageCycleDefinition>();
     const languageSetCycles = new Map<string, LanguageSetCycleDefinition>();
+    let languageMasterClock: LanguageMasterClockDefinition | null = null;
     for (const { source: line, line: lineNumber } of lines) {
+      const masterClock = parseLanguageMasterClockDirective(line, lineNumber);
+      if (masterClock) {
+        if (languageMasterClock) diagnostics.push({ line: lineNumber, message: 'only one CLOCK statement is allowed' });
+        else languageMasterClock = masterClock;
+        continue;
+      }
+
       const sequence = parseLanguageSequenceDirective(line);
       if (sequence) {
         if (sequence.values.length === 0 || sequence.values.some((value) => !Number.isFinite(value) || value <= 0)) {
@@ -659,7 +676,7 @@ export class SonusRuntime {
     // source order. All module declarations already exist, so references between
     // modules are still independent from declaration order.
     for (const { source: line, line: lineNumber } of lines) {
-      if (parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageFromDirective(line)) continue;
+      if (parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageFromDirective(line)) continue;
 
       const oscillatorDeclaration = parseOscillatorDeclaration(line);
       if (oscillatorDeclaration) {
@@ -1524,6 +1541,18 @@ export class SonusRuntime {
       embeddedViews.set(name, ownerViews);
     }
 
+    if (languageMasterClock) {
+      const initialBpm = evalNumber(languageMasterClock.expression, languageMasterClock.line, 'CLOCK');
+      if (initialBpm !== undefined) {
+        if (initialBpm <= 0 || initialBpm > 300) {
+          diagnostics.push({ line: languageMasterClock.line, message: 'CLOCK BPM must be greater than 0 and <= 300' });
+        } else {
+          clockBpm = initialBpm;
+          results.push({ message: `Clock ${formatNumber(initialBpm)} BPM` });
+        }
+      }
+    }
+
     const schemeNodes: SchemeNode[] = [
       { id: 'Clock', label: 'CLOCK', kind: 'module' as const, parameters: clockBpm > 0 ? [{ name: 'BPM', value: formatNumber(clockBpm) }] : [], views: embeddedViews.get('Clock') },
       ...[...clockSources.entries()].map(([name, definition]) => ({ id: name, label: `${name.toUpperCase()} : CLOCK`, kind: 'module' as const, parameters: [...definition.parameters.entries()].map(([parameterName, value]) => ({ name: parameterName, value })), views: embeddedViews.get(name) })),
@@ -1589,6 +1618,13 @@ export class SonusRuntime {
         })),
         views: embeddedViews.get(name),
       })),
+      ...(languageMasterClock ? [{
+        id: 'Clock',
+        label: 'CLOCK',
+        kind: 'module' as const,
+        parameters: [{ name: 'BPM', value: `${formatNumber(clockBpm)} BPM` }],
+        views: embeddedViews.get('Clock'),
+      }] : []),
       { id: 'Audio', label: 'AUDIO OUT', kind: 'module' as const, parameters: [], views: embeddedViews.get('Audio') },
     ];
 
@@ -1725,7 +1761,50 @@ export class SonusRuntime {
       this.stopSchedulers();
       this.audio.applyProgram(program);
 
-      for (const [name, cycle] of languageSetCycles) {
+      if (languageMasterClock && languageMasterClock.amount > 0) {
+      const clockSpec = languageMasterClock;
+      let driftValue = clockBpm;
+
+      const updateClock = (): void => {
+        const next = evalNumber(clockSpec.expression, clockSpec.line, 'CLOCK');
+        if (next === undefined || next <= 0 || next > 300) return;
+        const bpm = clockSpec.drift
+          ? driftValue + (next - driftValue) * 0.35
+          : next;
+        driftValue = bpm;
+        clockBpm = bpm;
+        this.audio.setMasterClockBpm(bpm);
+      };
+
+      if (clockSpec.unit === 'beat') {
+        let beats = 0;
+        const unsubscribeClock = this.audio.subscribeClockTrigger('Clock', () => {
+          beats += 1;
+          if (beats < clockSpec.amount) return;
+          beats = 0;
+          updateClock();
+        });
+        this.cycleUnsubscribers.push(unsubscribeClock);
+      } else {
+        let active = true;
+        let timeout: ReturnType<typeof setTimeout> | null = null;
+        const intervalMs = clockSpec.unit === 'sec' ? clockSpec.amount * 1000 : clockSpec.amount;
+        const schedule = (): void => {
+          if (!active) return;
+          timeout = setTimeout(() => {
+            updateClock();
+            schedule();
+          }, Math.max(1, intervalMs));
+        };
+        schedule();
+        this.cycleUnsubscribers.push(() => {
+          active = false;
+          if (timeout !== null) clearTimeout(timeout);
+        });
+      }
+    }
+
+    for (const [name, cycle] of languageSetCycles) {
         const definition = scalarExpressions.get(name);
         if (!definition) continue;
         let driftRatio = 1;
@@ -2124,6 +2203,24 @@ function parseLanguageCycleDirective(line: string): ({ name: string; amount: num
     chance: Number(match[4]),
     drift: match[5] === 'true',
     loose: match[6] === 'true',
+  };
+}
+
+function parseLanguageMasterClockDirective(line: string, lineNumber: number): LanguageMasterClockDefinition | null {
+  const match = line.match(/^__masterclock\("((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(true|false)\)$/);
+  if (!match) return null;
+  let expression: string;
+  try {
+    expression = JSON.parse(`"${match[1]}"`) as string;
+  } catch {
+    return null;
+  }
+  return {
+    expression,
+    amount: Number(match[2]),
+    unit: match[3] as LanguageMasterClockDefinition['unit'],
+    drift: match[4] === 'true',
+    line: lineNumber,
   };
 }
 

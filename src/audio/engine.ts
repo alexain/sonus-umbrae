@@ -1022,6 +1022,15 @@ export class AudioEngine {
     voice.node.port.postMessage({ type: 'params', [parameter]: value / 100 });
   }
 
+  setMasterClockBpm(bpm: number): void {
+    if (!Number.isFinite(bpm) || bpm < 0 || bpm > 300) {
+      throw new RangeError('master clock BPM must be between 0 and 300');
+    }
+    this.masterClockBpm = bpm;
+    this.updateAllClocks();
+    this.emit();
+  }
+
   setClockTransport(running: boolean): void {
     this.clockTransportRunning = running;
     this.updateAllClocks();
@@ -1157,6 +1166,12 @@ export class AudioEngine {
       gain.disconnect();
     }, { once: true });
     this.emit();
+  }
+
+  stopProgramOutput(): void {
+    // Stop the audible program without destroying DSP objects or runtime state.
+    // A later applyProgram() recreates the declarative routes.
+    for (const key of [...this.routes.keys()]) this.removeRoute(key);
   }
 
   panic(): void {

@@ -13,7 +13,14 @@ export class LanguageError extends Error {
   }
 }
 
-type SourceKind = 'voice' | 'note' | 'freq' | 'time' | 'trigger' | 'scalar';
+type SourceKind = 'voice' | 'note' | 'freq' | 'time' | 'trigger' | 'scalar' | 'scale';
+
+type SourceDefinition =
+  | { kind: 'scalar' }
+  | { kind: 'time'; amount: number; unit: 'ms' | 'sec' | 'beat'; display: string }
+  | { kind: 'freq'; values: number[]; display: string }
+  | { kind: 'note'; values: number[]; display: string }
+  | { kind: 'scale'; values: number[]; display: string };
 
 type VoiceState = {
   name: string;
@@ -110,6 +117,128 @@ function midiToFrequency(midi: number): number {
   return 440 * 2 ** ((midi - 69) / 12);
 }
 
+
+function formatSourceNumber(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+function scaleValues(
+  root: string,
+  modeRaw: string,
+  rangeStart: string | null,
+  rangeEnd: string | null,
+  line: number,
+): { values: number[]; display: string } {
+  const mode = modeRaw.toLowerCase();
+  const intervals = MODE_INTERVALS[mode];
+  if (!intervals) {
+    throw new LanguageError([{ line, message: `unknown scale mode '${modeRaw}'` }]);
+  }
+
+  const rootClass = midiFromRoot(root, 0);
+  if (rootClass === null) {
+    throw new LanguageError([{ line, message: `invalid scale root '${root}'` }]);
+  }
+  const pitchClass = ((rootClass % 12) + 12) % 12;
+  const allowed = new Set(intervals.map((interval) => (pitchClass + interval) % 12));
+
+  if (rangeStart === null || rangeEnd === null) {
+    const rootMidi = midiFromRoot(root);
+    if (rootMidi === null) {
+      throw new LanguageError([{ line, message: `invalid scale root '${root}'` }]);
+    }
+    const values = intervals.map((interval) => midiToFrequency(rootMidi + interval));
+    return { values, display: `${root} ${modeRaw}` };
+  }
+
+  const startMidi = midiFromNote(rangeStart);
+  const endMidi = midiFromNote(rangeEnd);
+  if (startMidi === null) {
+    throw new LanguageError([{ line, message: `invalid scale range note '${rangeStart}'` }]);
+  }
+  if (endMidi === null) {
+    throw new LanguageError([{ line, message: `invalid scale range note '${rangeEnd}'` }]);
+  }
+
+  const direction = startMidi <= endMidi ? 1 : -1;
+  const values: number[] = [];
+  for (let midi = startMidi; direction > 0 ? midi <= endMidi : midi >= endMidi; midi += direction) {
+    if (allowed.has(((midi % 12) + 12) % 12)) values.push(midiToFrequency(midi));
+  }
+
+  if (values.length === 0) {
+    throw new LanguageError([{ line, message: 'scale range contains no notes from the selected scale' }]);
+  }
+
+  return {
+    values,
+    display: `${root} ${modeRaw} ${rangeStart}..${rangeEnd}`,
+  };
+}
+
+function parseScaleSpec(
+  value: string,
+  line: number,
+  allowSelection: boolean,
+): { values: number[]; display: string; mode: SelectionMode } | null {
+  const head = value.match(/^([A-Ga-g][#b]?)\s+([A-Za-z]+)(?:\s+with\s+(.+))?$/i);
+  if (!head) return null;
+  if (!MODE_INTERVALS[head[2].toLowerCase()]) return null;
+
+  let rangeStart: string | null = null;
+  let rangeEnd: string | null = null;
+  let mode: SelectionMode = 'order';
+  let selectionSeen = false;
+
+  const modifiers = (head[3] ?? '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  for (const modifier of modifiers) {
+    const range = modifier.match(/^range\s+([A-Ga-g][#b]?-?\d+)\s+([A-Ga-g][#b]?-?\d+)$/i);
+    if (range) {
+      if (rangeStart !== null) {
+        throw new LanguageError([{ line, message: 'scale accepts only one range modifier' }]);
+      }
+      rangeStart = range[1];
+      rangeEnd = range[2];
+      continue;
+    }
+
+    const normalized = modifier.toLowerCase();
+    if (['random', 'walk', 'shuffle', 'reverse'].includes(normalized)) {
+      if (!allowSelection) {
+        throw new LanguageError([{
+          line,
+          message: `SET scale does not store sequencing modifier '${modifier}'; apply it where the scale is used`,
+        }]);
+      }
+      if (selectionSeen) {
+        throw new LanguageError([{ line, message: 'scale accepts only one sequencing modifier' }]);
+      }
+      mode = normalized as SelectionMode;
+      selectionSeen = true;
+      continue;
+    }
+
+    throw new LanguageError([{ line, message: `scale does not support modifier '${modifier}'` }]);
+  }
+
+  const scale = scaleValues(head[1], head[2], rangeStart, rangeEnd, line);
+  return { ...scale, mode };
+}
+
+function parseScaleSource(value: string, line: number): { values: number[]; display: string } | null {
+  const parsed = parseScaleSpec(value, line, false);
+  return parsed ? { values: parsed.values, display: parsed.display } : null;
+}
+
+function sourceSequenceCode(voiceName: string, values: number[], mode: SelectionMode = 'order'): string {
+  const directive = values.length > 1 ? ` ${sequenceDirective(voiceName, values, mode)}` : '';
+  return `${voiceName}.freq(${values[0]});${directive}`;
+}
+
 function parseList(value: string, line: number, property: string): string[] {
   const trimmed = value.trim();
   if (!trimmed.startsWith('[') || !trimmed.endsWith(']')) return [trimmed];
@@ -202,38 +331,47 @@ function sequenceDirective(name: string, values: number[], mode: SelectionMode):
 
 function compileFrom(
   voice: VoiceState,
-  property: 'note' | 'freq' | 'cycle',
+  property: 'note' | 'freq' | 'scale' | 'cycle',
   sourceName: string,
   line: number,
   sourceKinds: Map<string, SourceKind>,
+  sourceDefinitions: Map<string, SourceDefinition>,
 ): string {
   if (!IDENTIFIER.test(sourceName)) {
     throw new LanguageError([{ line, message: `invalid source name '${sourceName}'` }]);
   }
+
   const actual = sourceKinds.get(sourceName);
-  if (!actual) {
+  const definition = sourceDefinitions.get(sourceName);
+  if (!actual || !definition) {
     throw new LanguageError([{ line, message: `unknown source '${sourceName}'` }]);
   }
 
-  const compatible = property === 'note'
-    ? actual === 'note'
-    : property === 'freq'
-      ? actual === 'freq' || actual === 'scalar'
-      : actual === 'time' || actual === 'trigger';
-
-  if (!compatible) {
-    const expected = property === 'note'
-      ? 'note source'
-      : property === 'freq'
-        ? 'frequency source'
-        : 'time or trigger source';
-    throw new LanguageError([{
-      line,
-      message: `source '${sourceName}' is ${actual}, expected ${expected} for ${property}`,
-    }]);
+  if (property === 'cycle') {
+    if (definition.kind !== 'time') {
+      throw new LanguageError([{ line, message: `source '${sourceName}' is ${actual}, expected time source for cycle` }]);
+    }
+    return `__cycle(${JSON.stringify(voice.name)},${definition.amount},${JSON.stringify(definition.unit)},100,false,false);`;
   }
 
-  return `__from(${JSON.stringify(voice.name)},${JSON.stringify(property)},${JSON.stringify(sourceName)});`;
+  if (property === 'scale') {
+    if (definition.kind !== 'scale') {
+      throw new LanguageError([{ line, message: `source '${sourceName}' is ${actual}, expected scale source for scale` }]);
+    }
+    return sourceSequenceCode(voice.name, definition.values);
+  }
+
+  if (property === 'note') {
+    if (definition.kind !== 'note' && definition.kind !== 'scale') {
+      throw new LanguageError([{ line, message: `source '${sourceName}' is ${actual}, expected note or scale source for note` }]);
+    }
+    return sourceSequenceCode(voice.name, definition.values);
+  }
+
+  if (definition.kind !== 'freq') {
+    throw new LanguageError([{ line, message: `source '${sourceName}' is ${actual}, expected frequency source for freq` }]);
+  }
+  return sourceSequenceCode(voice.name, definition.values);
 }
 
 function compileVoiceProperty(
@@ -242,13 +380,36 @@ function compileVoiceProperty(
   rawValue: string,
   line: number,
   sourceKinds: Map<string, SourceKind>,
+  sourceDefinitions: Map<string, SourceDefinition>,
 ): string {
   const key = property.toLowerCase();
   const value = rawValue.trim();
 
-  if ((key === 'note' || key === 'freq' || key === 'cycle') && /^from\s+/i.test(value)) {
+  if ((key === 'note' || key === 'freq' || key === 'scale' || key === 'cycle') && /^from\s+/i.test(value)) {
+    if (key === 'scale') {
+      const match = value.match(/^from\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(.+))?$/i);
+      if (!match) {
+        throw new LanguageError([{ line, message: 'scale from expects a source name and optional sequencing modifier' }]);
+      }
+      const modifiers = (match[2] ?? '')
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean);
+      const mode = parseSelectionMode(modifiers, line, 'scale');
+      const sourceName = match[1];
+      const actual = sourceKinds.get(sourceName);
+      const definition = sourceDefinitions.get(sourceName);
+      if (!actual || !definition) {
+        throw new LanguageError([{ line, message: `unknown source '${sourceName}'` }]);
+      }
+      if (definition.kind !== 'scale') {
+        throw new LanguageError([{ line, message: `source '${sourceName}' is ${actual}, expected scale source for scale` }]);
+      }
+      return sourceSequenceCode(voice.name, definition.values, mode);
+    }
+
     const sourceName = value.replace(/^from\s+/i, '').trim();
-    return compileFrom(voice, key, sourceName, line, sourceKinds);
+    return compileFrom(voice, key, sourceName, line, sourceKinds, sourceDefinitions);
   }
 
   switch (key) {
@@ -291,24 +452,14 @@ function compileVoiceProperty(
     }
 
     case 'scale': {
-      const { base, modifiers } = splitWith(value);
-      const parts = base.split(/\s+/).filter(Boolean);
-      if (parts.length !== 2) {
-        throw new LanguageError([{ line, message: 'scale expects root and mode, e.g. scale C minor' }]);
+      const parsed = parseScaleSpec(value, line, true);
+      if (!parsed) {
+        throw new LanguageError([{
+          line,
+          message: 'scale expects root and mode, optionally followed by with range <note> <note> and one sequencing modifier',
+        }]);
       }
-      const [root, modeRaw] = parts;
-      const modeName = modeRaw.toLowerCase();
-      const intervals = MODE_INTERVALS[modeName];
-      if (!intervals) {
-        throw new LanguageError([{ line, message: `unknown scale mode '${modeRaw}'` }]);
-      }
-      const rootMidi = midiFromRoot(root);
-      if (rootMidi === null) {
-        throw new LanguageError([{ line, message: `invalid scale root '${root}'` }]);
-      }
-      const frequencies = intervals.map((interval) => midiToFrequency(rootMidi + interval));
-      const mode = parseSelectionMode(modifiers, line, 'scale');
-      return `${voice.name}.freq(${frequencies[0]}); ${sequenceDirective(voice.name, frequencies, mode)}`;
+      return sourceSequenceCode(voice.name, parsed.values, parsed.mode);
     }
 
     case 'cycle': {
@@ -367,12 +518,13 @@ function compileSet(
   lineText: string,
   line: number,
   sourceKinds: Map<string, SourceKind>,
+  sourceDefinitions: Map<string, SourceDefinition>,
   scalarNames: Set<string>,
   voiceNames: Set<string>,
 ): string {
   const match = lineText.match(/^SET\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+)$/i);
   if (!match) {
-    throw new LanguageError([{ line, message: 'SET expects a name, colon, and scalar expression' }]);
+    throw new LanguageError([{ line, message: 'SET expects a name, colon, and value' }]);
   }
 
   const name = match[1];
@@ -381,6 +533,77 @@ function compileSet(
   }
 
   const body = match[2].trim();
+
+  const scale = parseScaleSource(body, line);
+  if (scale) {
+    scalarNames.add(name);
+    sourceKinds.set(name, 'scale');
+    sourceDefinitions.set(name, { kind: 'scale', values: scale.values, display: scale.display });
+    return `${name} = ${JSON.stringify(scale.display)};`;
+  }
+
+  const noteList = body.match(/^\[([^\]]+)\]$/);
+  if (noteList) {
+    const items = noteList[1].trim().split(/\s+/).filter(Boolean);
+    if (items.length > 0 && items.every((item) => midiFromNote(item) !== null)) {
+      const values = items.map((item) => midiToFrequency(midiFromNote(item)!));
+      scalarNames.add(name);
+      sourceKinds.set(name, 'note');
+      sourceDefinitions.set(name, { kind: 'note', values, display: `[${items.join(' ')}]` });
+      return `${name} = ${JSON.stringify(`[${items.join(' ')}]`)};`;
+    }
+  }
+
+  const freqList = body.match(/^\[([^\]]+)\]\s+hz$/i);
+  if (freqList) {
+    const items = freqList[1].trim().split(/\s+/).filter(Boolean);
+    const values = items.map(Number);
+    if (values.length === 0 || values.some((value) => !Number.isFinite(value) || value <= 0)) {
+      throw new LanguageError([{ line, message: 'frequency list expects positive numeric values' }]);
+    }
+    scalarNames.add(name);
+    sourceKinds.set(name, 'freq');
+    sourceDefinitions.set(name, { kind: 'freq', values, display: `[${items.join(' ')}] hz` });
+    return `${name} = ${JSON.stringify(`[${items.join(' ')}] hz`)};`;
+  }
+
+  const note = body.match(/^([A-Ga-g][#b]?-?\d+)$/);
+  if (note) {
+    const midi = midiFromNote(note[1]);
+    if (midi === null) throw new LanguageError([{ line, message: `invalid note '${note[1]}'` }]);
+    const frequency = midiToFrequency(midi);
+    scalarNames.add(name);
+    sourceKinds.set(name, 'note');
+    sourceDefinitions.set(name, { kind: 'note', values: [frequency], display: note[1] });
+    return `${name} = ${JSON.stringify(note[1])};`;
+  }
+
+  const frequency = body.match(/^(\d+(?:\.\d+)?)\s+hz$/i);
+  if (frequency) {
+    const value = numberValue(frequency[1], line, 'frequency');
+    if (value <= 0) throw new LanguageError([{ line, message: 'frequency must be greater than 0' }]);
+    scalarNames.add(name);
+    sourceKinds.set(name, 'freq');
+    sourceDefinitions.set(name, { kind: 'freq', values: [value], display: `${formatSourceNumber(value)} hz` });
+    return `${name} = ${value};`;
+  }
+
+  const time = body.match(/^(\d+(?:\.\d+)?)\s+(ms|sec|secs|second|seconds|beat|beats)$/i);
+  if (time) {
+    const amount = numberValue(time[1], line, 'time');
+    if (amount <= 0) throw new LanguageError([{ line, message: 'time must be greater than 0' }]);
+    const unit = normalizeCycleUnit(time[2], line);
+    if (unit === 'beat' && !Number.isInteger(amount)) {
+      throw new LanguageError([{ line, message: 'beat time currently requires a whole number of beats' }]);
+    }
+    const unitDisplay = unit === 'beat' ? (amount === 1 ? 'beat' : 'beats') : unit;
+    const display = `${formatSourceNumber(amount)} ${unitDisplay}`;
+    scalarNames.add(name);
+    sourceKinds.set(name, 'time');
+    sourceDefinitions.set(name, { kind: 'time', amount, unit, display });
+    return `${name} = ${JSON.stringify(display)};`;
+  }
+
   const cycleMatch = body.match(
     /^(.*)\s+cycle\s+(\d+(?:\.\d+)?)\s+(ms|sec|secs|second|seconds|beat|beats)(?:\s+with\s+(.+))?$/i,
   );
@@ -392,6 +615,7 @@ function compileSet(
 
   scalarNames.add(name);
   sourceKinds.set(name, 'scalar');
+  sourceDefinitions.set(name, { kind: 'scalar' });
 
   if (!cycleMatch) return `${name} = ${expression};`;
 
@@ -412,6 +636,62 @@ function compileSet(
   const timing = parseTimingModifiers(modifiers, line, unit);
 
   return `${name} = ${expression}; __setcycle(${JSON.stringify(name)},${amount},${JSON.stringify(unit)},${timing.chance},${timing.drift},${timing.loose});`;
+}
+
+
+function compileClock(lineText: string, line: number): string {
+  const match = lineText.match(/^CLOCK\s+set\s+(.+?)\s+bpm(?:\s+with\s+(.+))?$/i);
+  if (!match) {
+    throw new LanguageError([{
+      line,
+      message: 'CLOCK expects: CLOCK set <expression> bpm [with cycle <n> <unit>, drift]',
+    }]);
+  }
+
+  const expression = match[1].trim();
+  if (!expression) {
+    throw new LanguageError([{ line, message: 'CLOCK set expects a BPM expression' }]);
+  }
+
+  let cycleAmount: number | null = null;
+  let cycleUnit: 'ms' | 'sec' | 'beat' | null = null;
+  let drift = false;
+
+  const modifiers = (match[2] ?? '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  for (const modifier of modifiers) {
+    const cycle = modifier.match(/^cycle\s+(\d+(?:\.\d+)?)\s+(ms|sec|secs|second|seconds|beat|beats)$/i);
+    if (cycle) {
+      if (cycleAmount !== null) {
+        throw new LanguageError([{ line, message: 'CLOCK accepts only one cycle modifier' }]);
+      }
+      cycleAmount = numberValue(cycle[1], line, 'CLOCK cycle');
+      if (cycleAmount <= 0) {
+        throw new LanguageError([{ line, message: 'CLOCK cycle must be greater than 0' }]);
+      }
+      cycleUnit = normalizeCycleUnit(cycle[2], line);
+      if (cycleUnit === 'beat' && !Number.isInteger(cycleAmount)) {
+        throw new LanguageError([{ line, message: 'CLOCK beat cycles currently require a whole number of beats' }]);
+      }
+      continue;
+    }
+
+    if (/^drift$/i.test(modifier)) {
+      drift = true;
+      continue;
+    }
+
+    throw new LanguageError([{ line, message: `CLOCK does not support modifier '${modifier}'` }]);
+  }
+
+  if (cycleAmount === null || cycleUnit === null) {
+    return `__masterclock(${JSON.stringify(expression)},0,"ms",${drift});`;
+  }
+
+  return `__masterclock(${JSON.stringify(expression)},${cycleAmount},${JSON.stringify(cycleUnit)},${drift});`;
 }
 
 function compilePlay(lineText: string, line: number): string {
@@ -458,6 +738,7 @@ export function compileLanguageSource(source: string): string {
   const voices = new Set<string>();
   const scalarNames = new Set<string>();
   const sourceKinds = new Map<string, SourceKind>();
+  const sourceDefinitions = new Map<string, SourceDefinition>();
   let currentVoice: VoiceState | null = null;
 
   for (let index = 0; index < lines.length; index += 1) {
@@ -478,7 +759,7 @@ export function compileLanguageSource(source: string): string {
       if (voiceMatch) {
         requireVoiceSound(currentVoice, diagnostics);
         const name = voiceMatch[1];
-        if (voices.has(name)) {
+        if (voices.has(name) || scalarNames.has(name)) {
           throw new LanguageError([{ line: lineNumber, message: `VOICE '${name}' is already defined` }]);
         }
         voices.add(name);
@@ -488,10 +769,17 @@ export function compileLanguageSource(source: string): string {
         continue;
       }
 
+      if (/^CLOCK\b/i.test(trimmed)) {
+        requireVoiceSound(currentVoice, diagnostics);
+        currentVoice = null;
+        output[index] = compileClock(trimmed, lineNumber);
+        continue;
+      }
+
       if (/^SET\b/i.test(trimmed)) {
         requireVoiceSound(currentVoice, diagnostics);
         currentVoice = null;
-        output[index] = compileSet(trimmed, lineNumber, sourceKinds, scalarNames, voices);
+        output[index] = compileSet(trimmed, lineNumber, sourceKinds, sourceDefinitions, scalarNames, voices);
         continue;
       }
 
@@ -511,7 +799,7 @@ export function compileLanguageSource(source: string): string {
         if (!propertyMatch) {
           throw new LanguageError([{ line: lineNumber, message: 'expected VOICE property and value' }]);
         }
-        output[index] = compileVoiceProperty(currentVoice, propertyMatch[1], propertyMatch[2], lineNumber, sourceKinds);
+        output[index] = compileVoiceProperty(currentVoice, propertyMatch[1], propertyMatch[2], lineNumber, sourceKinds, sourceDefinitions);
         if (propertyMatch[1].toLowerCase() === 'sound') currentVoice.hasSound = true;
         continue;
       }
@@ -522,7 +810,7 @@ export function compileLanguageSource(source: string): string {
 
       throw new LanguageError([{
         line: lineNumber,
-        message: 'each top-level statement must begin with VOICE, SET, or PLAY',
+        message: 'each top-level statement must begin with VOICE, SET, CLOCK, or PLAY',
       }]);
     } catch (error) {
       if (error instanceof LanguageError) diagnostics.push(...error.diagnostics);
