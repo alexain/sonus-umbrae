@@ -13,7 +13,7 @@ export class LanguageError extends Error {
   }
 }
 
-type SourceKind = 'voice' | 'note' | 'freq' | 'time' | 'clock' | 'trigger' | 'scalar' | 'scale';
+type SourceKind = 'voice' | 'note' | 'freq' | 'time' | 'clock' | 'trigger' | 'scalar' | 'scale' | 'seq';
 
 type SourceDefinition =
   | { kind: 'scalar' }
@@ -21,7 +21,8 @@ type SourceDefinition =
   | { kind: 'clock'; internalName: string; rateLabel: string; display: string }
   | { kind: 'freq'; values: number[]; display: string }
   | { kind: 'note'; values: number[]; display: string; favor: SequenceFavorEntry[] }
-  | { kind: 'scale'; values: number[]; display: string };
+  | { kind: 'scale'; values: number[]; display: string }
+  | { kind: 'seq'; values: number[]; display: string };
 
 type VoiceState = {
   name: string;
@@ -48,6 +49,17 @@ type FilterState = {
   indentation: number;
   ownerVoice: string | null;
   hasModel: boolean;
+};
+
+type SeqState = {
+  name: string;
+  line: number;
+  indentation: number;
+  modelId: 'turing' | null;
+  length: number;
+  change: number;
+  values: number[];
+  material: 'notes' | 'scale' | null;
 };
 
 
@@ -793,6 +805,14 @@ function compileVoiceProperty(
       throw new LanguageError([{ line, message: `unknown source '${sourceName}'` }]);
     }
 
+    if (definition.kind === 'seq') {
+      if (key !== 'note') throw new LanguageError([{ line, message: `SEQ source '${sourceName}' currently supports note from only` }]);
+      if (from[2]) throw new LanguageError([{ line, message: 'SEQ turing controls its own generation; note from SEQ does not use selection modifiers' }]);
+      const initial = definition.values[0] ?? 440;
+      const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
+      return `${voice.name}.freq(${initial}); __seqvoice(${JSON.stringify(voice.name)},${JSON.stringify(sourceName)});${every}`;
+    }
+
     const modifiers = (from[2] ?? '')
       .split(',')
       .map((item) => item.trim())
@@ -1074,6 +1094,71 @@ function parseEverySpec(
 function everyDirective(name: string, spec: EverySpec): string {
   const prefix = spec.clockPrelude ? `${spec.clockPrelude} ` : '';
   return `${prefix}__cycle(${JSON.stringify(name)},${spec.amount},${JSON.stringify(spec.unit)},${spec.chance},${spec.drift},${spec.loose},${JSON.stringify(spec.clockSource)});`;
+}
+
+function requireSeqReady(seq: SeqState | null, diagnostics: LanguageDiagnostic[]): void {
+  if (!seq) return;
+  if (!seq.modelId) diagnostics.push({ line: seq.line, message: `SEQ '${seq.name}' requires model turing` });
+  if (seq.values.length === 0) diagnostics.push({ line: seq.line, message: `SEQ '${seq.name}' requires notes or scale material` });
+}
+
+function compileSeqProperty(
+  seq: SeqState,
+  property: string,
+  rawValue: string,
+  line: number,
+  sourceDefinitions: Map<string, SourceDefinition>,
+): string {
+  const key = property.toLowerCase();
+  const value = rawValue.trim();
+
+  if (key === 'model') {
+    if (value.toLowerCase() !== 'turing') throw new LanguageError([{ line, message: `unknown SEQ model '${value}'` }]);
+    seq.modelId = 'turing';
+    return `__seqmodel(${JSON.stringify(seq.name)},"turing");`;
+  }
+  if (key === 'length') {
+    const length = numberValue(value, line, 'SEQ length');
+    if (!Number.isInteger(length) || length < 2 || length > 32) throw new LanguageError([{ line, message: 'SEQ turing length expects an integer from 2 to 32' }]);
+    seq.length = length;
+    return `__seqlength(${JSON.stringify(seq.name)},${length});`;
+  }
+  if (key === 'change') {
+    const change = numberValue(value, line, 'SEQ change');
+    if (change < 0 || change > 100) throw new LanguageError([{ line, message: 'SEQ turing change expects 0..100' }]);
+    seq.change = change;
+    return `__seqchange(${JSON.stringify(seq.name)},${change});`;
+  }
+  if (key === 'notes') {
+    const list = value.match(/^\[([^\]]+)\]$/);
+    if (!list) throw new LanguageError([{ line, message: 'SEQ notes expects a note list such as [C2 Eb2 G2]' }]);
+    const items = list[1].trim().split(/\s+/).filter(Boolean);
+    const parsed = items.map((item) => parseNoteSequenceToken(item, line));
+    if (parsed.length === 0 || parsed.some((item) => midiFromNote(item.note) === null)) throw new LanguageError([{ line, message: 'SEQ notes contains an invalid note' }]);
+    if (parsed.some((item) => item.favor !== null)) {
+      throw new LanguageError([{ line, message: 'SEQ turing notes do not support weights, repeats, or retrigs' }]);
+    }
+    seq.values = parsed.map((item) => midiToFrequency(midiFromNote(item.note)!));
+    seq.material = 'notes';
+    const definition = sourceDefinitions.get(seq.name);
+    if (definition?.kind === 'seq') definition.values = [...seq.values];
+    return `__seqvalues(${JSON.stringify(seq.name)},${JSON.stringify(seq.values.join('|'))});`;
+  }
+  if (key === 'scale') {
+    const scale = parseScaleSource(value, line);
+    if (!scale) throw new LanguageError([{ line, message: 'SEQ scale expects a scale and range, for example C minor with range C2 C4' }]);
+    seq.values = scale.values;
+    seq.material = 'scale';
+    const definition = sourceDefinitions.get(seq.name);
+    if (definition?.kind === 'seq') definition.values = [...seq.values];
+    return `__seqvalues(${JSON.stringify(seq.name)},${JSON.stringify(seq.values.join('|'))});`;
+  }
+  if (key === 'every') {
+    const timing = parseEverySpec(value, line, sourceDefinitions);
+    const prefix = timing.clockPrelude ? `${timing.clockPrelude}\n` : '';
+    return `${prefix}__objectevery(${JSON.stringify(seq.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
+  }
+  throw new LanguageError([{ line, message: `unknown SEQ property '${property}'` }]);
 }
 
 function compileSet(
@@ -1926,6 +2011,8 @@ export function compileLanguageSource(source: string): string {
   const sourceKinds = new Map<string, SourceKind>();
   const sourceDefinitions = new Map<string, SourceDefinition>();
   const modSources = new Map<string, ModSourceDefinition>();
+  const seqs = new Set<string>();
+  let currentSeq: SeqState | null = null;
   let currentVoice: VoiceState | null = null;
   let currentFx: FxState | null = null;
   let currentFilter: FilterState | null = null;
@@ -1946,9 +2033,36 @@ export function compileLanguageSource(source: string): string {
 
     try {
       if (currentMod && indentation <= currentMod.indentation) currentMod = null;
+      if (currentSeq && indentation <= currentSeq.indentation) { requireSeqReady(currentSeq, diagnostics); currentSeq = null; }
       if (currentFilter && indentation <= currentFilter.indentation) {
         requireFilterModel(currentFilter, diagnostics);
         currentFilter = null;
+      }
+
+      const seqMatch = trimmed.match(/^SEQ\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
+      if (seqMatch) {
+        if (indentation > 0) throw new LanguageError([{ line: lineNumber, message: 'SEQ declarations are top-level only' }]);
+        requireVoiceSound(currentVoice, diagnostics);
+        requireFxModel(currentFx, diagnostics);
+        currentVoice = null; currentFx = null; currentFilter = null; currentMod = null;
+        const name = seqMatch[1];
+        if (voices.has(name) || fxs.has(name) || filters.has(name) || scalarNames.has(name) || seqs.has(name) || seqs.has(name)) {
+          throw new LanguageError([{ line: lineNumber, message: `SEQ '${name}' conflicts with an existing object or variable` }]);
+        }
+        seqs.add(name);
+        sourceKinds.set(name, 'seq');
+        sourceDefinitions.set(name, { kind: 'seq', values: [], display: `SEQ ${name}` });
+        currentSeq = { name, line: lineNumber, indentation, modelId: null, length: 8, change: 10, values: [], material: null };
+        const viewDirective = seqMatch[2] ? `\n__seqview(${JSON.stringify(name)});` : '';
+        output[index] = `__seq(${JSON.stringify(name)});${viewDirective}`;
+        continue;
+      }
+
+      if (currentSeq && indentation > currentSeq.indentation) {
+        const propertyMatch = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s+(.+)$/);
+        if (!propertyMatch) throw new LanguageError([{ line: lineNumber, message: 'expected SEQ property and value' }]);
+        output[index] = compileSeqProperty(currentSeq, propertyMatch[1], propertyMatch[2], lineNumber, sourceDefinitions);
+        continue;
       }
 
       const modMatch = trimmed.match(/^MOD\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
@@ -1965,7 +2079,7 @@ export function compileLanguageSource(source: string): string {
           requireFxModel(currentFx, diagnostics);
           currentVoice = null;
           currentFx = null;
-          if (voices.has(name) || fxs.has(name) || filters.has(name) || scalarNames.has(name)) {
+          if (voices.has(name) || fxs.has(name) || filters.has(name) || scalarNames.has(name) || seqs.has(name)) {
             throw new LanguageError([{ line: lineNumber, message: `MOD '${name}' conflicts with an existing object or variable` }]);
           }
         }
@@ -2000,7 +2114,7 @@ export function compileLanguageSource(source: string): string {
           requireVoiceSound(currentVoice, diagnostics);
           requireFxModel(currentFx, diagnostics);
           currentVoice = null; currentFx = null; currentMod = null;
-          if (filters.has(name) || voices.has(name) || fxs.has(name) || scalarNames.has(name)) {
+          if (filters.has(name) || voices.has(name) || fxs.has(name) || scalarNames.has(name) || seqs.has(name)) {
             throw new LanguageError([{ line: lineNumber, message: `FILTER '${name}' is already defined` }]);
           }
           filters.add(name);
@@ -2020,7 +2134,7 @@ export function compileLanguageSource(source: string): string {
         currentVoice = null;
         currentMod = null;
         const name = fxMatch[1];
-        if (fxs.has(name) || voices.has(name) || filters.has(name) || scalarNames.has(name)) {
+        if (fxs.has(name) || voices.has(name) || filters.has(name) || scalarNames.has(name) || seqs.has(name)) {
           throw new LanguageError([{ line: lineNumber, message: `FX '${name}' is already defined` }]);
         }
         fxs.add(name);
@@ -2036,7 +2150,7 @@ export function compileLanguageSource(source: string): string {
         requireFxModel(currentFx, diagnostics);
         currentFx = null;
         const name = voiceMatch[1];
-        if (voices.has(name) || fxs.has(name) || scalarNames.has(name)) {
+        if (voices.has(name) || fxs.has(name) || scalarNames.has(name) || seqs.has(name)) {
           throw new LanguageError([{ line: lineNumber, message: `VOICE '${name}' is already defined` }]);
         }
         voices.add(name);
@@ -2120,12 +2234,12 @@ export function compileLanguageSource(source: string): string {
       }
 
       if (/^[A-Za-z_][A-Za-z0-9_]*\s*:/.test(trimmed)) {
-        throw new LanguageError([{ line: lineNumber, message: 'only VOICE, FX, FILTER and MOD blocks are supported' }]);
+        throw new LanguageError([{ line: lineNumber, message: 'only VOICE, FX, FILTER, MOD and SEQ blocks are supported' }]);
       }
 
       throw new LanguageError([{
         line: lineNumber,
-        message: 'each top-level statement must begin with VOICE, FX, FILTER, MOD, SET, CLOCK, MAIN, or PLAY',
+        message: 'each top-level statement must begin with VOICE, FX, FILTER, MOD, SEQ, SET, CLOCK, MAIN, or PLAY',
       }]);
     } catch (error) {
       if (error instanceof LanguageError) diagnostics.push(...error.diagnostics);
@@ -2136,6 +2250,7 @@ export function compileLanguageSource(source: string): string {
   requireVoiceSound(currentVoice, diagnostics);
   requireFxModel(currentFx, diagnostics);
   requireFilterModel(currentFilter, diagnostics);
+  requireSeqReady(currentSeq, diagnostics);
 
   if (diagnostics.length > 0) throw new LanguageError(diagnostics);
   return output.join('\n');

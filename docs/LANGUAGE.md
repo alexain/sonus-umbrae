@@ -1019,6 +1019,122 @@ The generator determines **how** the value changes. `every` determines **when**
 it changes. `with clock ...` determines which clock provides those beat steps.
 
 
+
+## SEQ and Turing Machine
+
+`SEQ` declares a reusable generative note source. Unlike a static `SET`, a
+sequencer owns runtime state and can evolve independently from the VOICE or FX
+that reads it.
+
+The first implemented model is `turing`, inspired by the shift-register
+behaviour of classic modular Turing Machine sequencers:
+
+```text
+SEQ melody:
+    model turing
+    length 8
+    change 12
+    scale C minor with range C2 C4
+    every 1 beat
+```
+
+The generated source is read with `from`:
+
+```text
+VOICE bass:
+    sound macro.analog
+    note from melody every 1 beat
+```
+
+The `SEQ` timing and the consumer timing are independent. For example:
+
+```text
+SEQ melody:
+    model turing
+    length 8
+    change 10
+    scale D dorian with range D2 D4
+    every 2 beats
+
+VOICE bass:
+    sound macro.analog
+    note from melody every 1 beat
+```
+
+Here the Turing register advances every two beats, while the voice reads its
+current note every beat. Multiple consumers can therefore read the same
+sequence source at different rates.
+
+### Turing parameters
+
+`length` sets the active shift-register length and accepts integers from 2 to
+32. Traditional hardware-inspired lengths such as 2, 3, 4, 5, 6, 8, 12 and 16
+are useful, but Sonus Umbrae does not restrict the sequencer to those values.
+
+`change` is a percentage from 0 to 100 controlling how likely the feedback bit
+is to mutate when the register advances:
+
+```text
+change 0
+```
+
+keeps the current loop locked, while higher values introduce progressively
+more variation.
+
+The musical material can be supplied as a scale:
+
+```text
+scale C minor with range C2 C4
+```
+
+or as an explicit note vocabulary:
+
+```text
+notes [C2 Eb2 G2 Bb2 C3]
+```
+
+Turing `notes` intentionally do not accept note weights, repeats or retrigs.
+Those modifiers belong to list traversal modes such as `random`, whereas the
+Turing register itself determines the generated selection.
+
+`every` uses the normal Sonus Umbrae timing grammar, including derived clocks
+and probability modifiers:
+
+```text
+every 1 beat with clock /4
+every 2 beats with coin
+```
+
+A SEQ source controls its own generation, so consumers do not add list
+selection modes on top of it. The canonical form is therefore:
+
+```text
+note from melody every 1 beat
+```
+
+rather than `note from melody with random ...`.
+
+### Turing view
+
+A Turing sequence can request a dedicated sidebar monitor:
+
+```text
+SEQ melody with view:
+    model turing
+    length 8
+    change 12
+    notes [C2 Eb2 G2 Bb2]
+    every 1 beat
+```
+
+The panel shows the current register as filled/empty cells, the active length,
+change amount and current note. The cells shift visually as the register
+advances, making it possible to distinguish a stable repeating loop from a
+stopped scheduler.
+
+`SEQ` objects also appear in the VARIABLES monitor with type `Seq`.
+
+
 ## Current implementation boundary
 
 The public 0.1.0 language intentionally hides the current upstream DSP module

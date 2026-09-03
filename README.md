@@ -27,6 +27,9 @@ runtime, DSP registry, and UI are still evolving.
 - Time values stored in typed `SET` variables.
 - Scale/note/frequency sequencing modes including order, random, walk, shuffle,
   and reverse.
+- `SEQ` generative sources, currently including a Turing Machine model with
+  mutable shift-register loops, scale/note material, independent timing, and
+  an optional live register view.
 - Local `MOD` declarations inside `VOICE` and `FX`.
 - Optional signal views and a read-only Scheme view.
 - Source diagnostics with per-line error highlighting.
@@ -68,6 +71,22 @@ MAIN level 80
 `RUN` starts the complete program transport. `RUN STOP` stops the clock,
 voices, schedulers, and modulators together. `Cmd+Backspace` is the current
 shortcut for `RUN STOP`.
+
+A generative Turing source can be shared by voices independently of their read
+rate:
+
+```text
+SEQ melody with view:
+    model turing
+    length 8
+    change 12
+    notes [C2 Eb2 G2 Bb2 C3]
+    every 1 beat
+
+VOICE bass:
+    sound macro.analog
+    note from melody every 1 beat
+```
 
 ## Routing
 

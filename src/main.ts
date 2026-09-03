@@ -1,6 +1,6 @@
 import './style.css';
 import { AudioEngine } from './audio/engine';
-import { SonusEvaluationError, SonusRuntime, type InlineViewState, type ParameterViewState, type SchemeConnection, type SchemeModel, type SchemeNode } from './language/runtime';
+import { SonusEvaluationError, SonusRuntime, type InlineViewState, type ParameterViewState, type TuringViewState, type SchemeConnection, type SchemeModel, type SchemeNode } from './language/runtime';
 import { compileLanguageSource, LanguageError } from './language/language';
 
 type Screen = 'live' | 'config' | 'help' | 'scheme';
@@ -390,7 +390,7 @@ function notify(text: string): void {
 function normalizeLanguageCommandCase(): void {
   const normalized = editor.value
     .replace(
-      /^(\s*)(voice|fx|filter|play|set|clock|main)(?=\s|$)/gim,
+      /^(\s*)(voice|fx|filter|seq|play|set|clock|main)(?=\s|$)/gim,
       (_match, indentation: string, commandName: string) => `${indentation}${commandName.toUpperCase()}`,
     )
     .replace(
@@ -760,11 +760,13 @@ function syncViews(): void {
   const moduleViews = new Set(runtime.getModuleViews());
   const parameterViews = new Map(runtime.getParameterViews().map((view) => [view.signal, view]));
   const variables = runtime.getVariableViews();
+  const turingViews = runtime.getTuringViews();
   const scheme = runtime.getSchemeModel();
   const nodes = new Map(scheme.nodes.map((node) => [node.id, node]));
   const panels: HTMLElement[] = [];
 
   panels.push(buildVariablesPanel(variables));
+  for (const view of turingViews) panels.push(buildTuringPanel(view));
 
   const audio = nodes.get('Audio');
   panels.push(buildModuleMonitorPanel({
@@ -877,6 +879,48 @@ function buildVariablesPanel(variables: Array<{ name: string; value: string }>):
   }
   body.append(readout);
   return card;
+}
+
+function buildTuringPanel(view: TuringViewState): HTMLElement {
+  const card = createMonitorCard(`SEQ:${view.name}`, `${view.name.toUpperCase()} : SEQ / TURING`, false);
+  card.classList.add('turing-monitor-card');
+  const body = card.querySelector<HTMLElement>('.monitor-body');
+  if (!body) return card;
+
+  const meta = document.createElement('div');
+  meta.className = 'turing-meta';
+  meta.innerHTML = `<span>LENGTH ${view.length}</span><span>CHANGE ${Number.isInteger(view.change) ? view.change : view.change.toFixed(1)}%</span>`;
+
+  const register = document.createElement('div');
+  register.className = 'turing-register';
+  register.dataset.turingName = view.name;
+  register.dataset.revision = String(view.revision);
+  register.style.setProperty('--turing-length', String(view.length));
+
+  for (const bit of view.bits) {
+    const cell = document.createElement('span');
+    cell.className = `turing-bit ${bit ? 'on' : 'off'}`;
+    register.append(cell);
+  }
+
+  const readout = document.createElement('div');
+  readout.className = 'turing-readout';
+  const label = document.createElement('span');
+  label.textContent = 'NOTE';
+  const value = document.createElement('span');
+  value.className = 'turing-note-value';
+  value.dataset.turingName = view.name;
+  value.textContent = formatFrequencyAsNote(view.currentFrequency);
+  readout.append(label, value);
+
+  body.append(meta, register, readout);
+  return card;
+}
+
+function formatFrequencyAsNote(frequency: number): string {
+  if (!Number.isFinite(frequency) || frequency <= 0) return '--';
+  const midi = Math.round(69 + 12 * Math.log2(frequency / 440));
+  return formatMidiNote(midi);
 }
 
 function buildModuleMonitorPanel(options: {
@@ -1111,13 +1155,41 @@ function updateVariableValues(): void {
   }
 }
 
+function updateTuringViews(): void {
+  const states = new Map(runtime.getTuringViews().map((view) => [view.name, view]));
+  for (const register of document.querySelectorAll<HTMLElement>('.turing-register[data-turing-name]')) {
+    const name = register.dataset.turingName;
+    if (!name) continue;
+    const state = states.get(name);
+    if (!state) continue;
+    const revision = Number(register.dataset.revision ?? '-1');
+    if (revision !== state.revision || register.children.length !== state.bits.length) {
+      register.dataset.revision = String(state.revision);
+      register.style.setProperty('--turing-length', String(state.length));
+      register.replaceChildren(...state.bits.map((bit) => {
+        const cell = document.createElement('span');
+        cell.className = `turing-bit ${bit ? 'on' : 'off'} turing-bit-shift`;
+        return cell;
+      }));
+    }
+  }
+  for (const value of document.querySelectorAll<HTMLElement>('.turing-note-value[data-turing-name]')) {
+    const name = value.dataset.turingName;
+    if (!name) continue;
+    const state = states.get(name);
+    if (state) value.textContent = formatFrequencyAsNote(state.currentFrequency);
+  }
+}
+
 function drawScopes(): void {
   scopeFrame = 0;
   updateVariableValues();
+  updateTuringViews();
   updateSchemeLiveValues();
   const canvases = [...document.querySelectorAll<HTMLCanvasElement>('canvas.scope-canvas')];
   const liveValues = document.querySelectorAll<HTMLElement>('.scheme-live-value');
-  if (canvases.length === 0 && liveValues.length === 0) return;
+  const turingRegisters = document.querySelectorAll<HTMLElement>('.turing-register');
+  if (canvases.length === 0 && liveValues.length === 0 && turingRegisters.length === 0) return;
 
   const phosphor = getComputedStyle(document.documentElement).getPropertyValue('--phosphor-hot').trim() || '#ffe783';
 

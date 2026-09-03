@@ -83,6 +83,15 @@ export interface VariableViewState {
   value: string;
 }
 
+export interface TuringViewState {
+  name: string;
+  length: number;
+  change: number;
+  bits: number[];
+  currentFrequency: number;
+  revision: number;
+}
+
 export interface InlinePianoViewState {
   id: string;
   kind: 'piano';
@@ -231,6 +240,15 @@ interface LanguageSequenceDefinition {
   mode: 'order' | 'random' | 'walk' | 'shuffle' | 'reverse' | 'pendulum';
   amount: number;
   favor: LanguageSequenceFavorEntry[];
+}
+
+interface LanguageTuringDefinition {
+  model: 'turing';
+  length: number;
+  change: number;
+  values: number[];
+  register: number;
+  current: number;
 }
 
 interface LanguageCycleDefinition {
@@ -530,6 +548,7 @@ export class SonusRuntime {
   private explicitSignalViews: Array<{ signal: string; kind: SignalKind }> = [];
   private moduleViews = new Set<string>();
   private inlineViews = new Map<string, InlineViewState>();
+  private turingViews = new Map<string, TuringViewState>();
 
   private scheme: SchemeModel = {
     nodes: [{ id: 'Audio', label: 'AUDIO OUT', kind: 'module', parameters: [] }],
@@ -570,6 +589,10 @@ export class SonusRuntime {
 
   getModuleViews(): string[] {
     return [...this.moduleViews];
+  }
+
+  getTuringViews(): TuringViewState[] {
+    return [...this.turingViews.values()].map((view) => ({ ...view, bits: [...view.bits] }));
   }
 
   getInlineViews(): InlineViewState[] {
@@ -628,6 +651,9 @@ export class SonusRuntime {
     const lines = parseStatements(parsedWhen.source);
 
     const languageSequences = new Map<string, LanguageSequenceDefinition>();
+    const languageTurings = new Map<string, LanguageTuringDefinition>();
+    const languageTuringViews = new Set<string>();
+    const languageTuringVoiceSources = new Map<string, string>();
     const languageCycles = new Map<string, LanguageCycleDefinition>();
     const languageSetCycles = new Map<string, LanguageSetCycleDefinition>();
     const languageParameterCycles: LanguageParameterCycleDefinition[] = [];
@@ -648,6 +674,29 @@ export class SonusRuntime {
     const languageModSets: LanguageModSetDirective[] = [];
     let languageMasterClock: LanguageMasterClockDefinition | null = null;
     for (const { source: line, line: lineNumber } of lines) {
+      const seqDeclaration = parseLanguageTuringDeclaration(line);
+      if (seqDeclaration) {
+        languageTurings.set(seqDeclaration, { model: 'turing', length: 8, change: 10, values: [], register: 1, current: 440 });
+        continue;
+      }
+      const seqView = parseLanguageTuringView(line);
+      if (seqView) { languageTuringViews.add(seqView); continue; }
+
+      const seqModel = parseLanguageTuringModel(line);
+      if (seqModel) {
+        const seq = languageTurings.get(seqModel.name);
+        if (seq) seq.model = seqModel.model;
+        continue;
+      }
+      const seqLength = parseLanguageTuringLength(line);
+      if (seqLength) { const seq = languageTurings.get(seqLength.name); if (seq) seq.length = seqLength.length; continue; }
+      const seqChange = parseLanguageTuringChange(line);
+      if (seqChange) { const seq = languageTurings.get(seqChange.name); if (seq) seq.change = seqChange.change; continue; }
+      const seqValues = parseLanguageTuringValues(line);
+      if (seqValues) { const seq = languageTurings.get(seqValues.name); if (seq) { seq.values = seqValues.values; seq.current = seqValues.values[0] ?? 440; } continue; }
+      const seqVoice = parseLanguageTuringVoice(line);
+      if (seqVoice) { languageTuringVoiceSources.set(seqVoice.voice, seqVoice.seq); continue; }
+
       const inlinePiano = parseLanguageInlinePianoDirective(line);
       if (inlinePiano) {
         languageInlinePianos.push(inlinePiano);
@@ -1170,7 +1219,7 @@ export class SonusRuntime {
     // source order. All module declarations already exist, so references between
     // modules are still independent from declaration order.
     for (const { source: line, line: lineNumber } of lines) {
-      if (parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageFxMetadata(line) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
+      if (parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageTuringModel(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageFxMetadata(line) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
 
       const oscillatorDeclaration = parseOscillatorDeclaration(line);
       if (oscillatorDeclaration) {
@@ -2031,6 +2080,7 @@ export class SonusRuntime {
     }
     for (const [name] of oscillators) variableViews.push({ name, value: 'Osc' });
     for (const [name] of gains) variableViews.push({ name, value: 'Gain' });
+    for (const [name] of languageTurings) variableViews.push({ name, value: 'Seq' });
     for (const [name, value] of variables) variableViews.push({ name, value: formatScalar(value) });
 
     // Parameter views are declarative like the rest of the source. Resolve their
@@ -2423,6 +2473,31 @@ export class SonusRuntime {
       }
     };
 
+    const turingViews = new Map<string, TuringViewState>();
+    const turingBits = (value: number, length: number): number[] =>
+      Array.from({ length }, (_, index) => (value >>> index) & 1);
+    for (const name of languageTuringViews) {
+      const seq = languageTurings.get(name);
+      if (!seq) continue;
+      const mask = seq.length >= 32 ? 0xffffffff : (2 ** seq.length - 1);
+      seq.register = (Math.floor(random() * Math.max(1, mask)) || 1) >>> 0;
+      if (seq.length < 32) seq.register &= mask;
+      if (seq.values.length > 0) {
+        const normalized = seq.register / Math.max(1, mask);
+        const index = Math.min(seq.values.length - 1, Math.floor(normalized * seq.values.length));
+        seq.current = seq.values[index];
+      }
+      turingViews.set(name, {
+        name,
+        length: seq.length,
+        change: seq.change,
+        bits: turingBits(seq.register, seq.length),
+        currentFrequency: seq.current,
+        revision: 0,
+      });
+    }
+
+    this.turingViews = turingViews;
     this.inlineViews = inlineViews;
     this.parameterViews = [...parameterViews.values()];
     this.variableViews = variableViews;
@@ -2884,6 +2959,34 @@ export class SonusRuntime {
       });
     }
 
+    for (const [name, seq] of languageTurings) {
+      const timing = languageObjectEvery.get(name);
+      if (!timing || seq.values.length === 0) continue;
+      const mask = seq.length >= 32 ? 0xffffffff : (2 ** seq.length - 1);
+      if (!turingViews.has(name)) seq.register = (Math.floor(random() * Math.max(1, mask)) || 1) >>> 0;
+      const advance = (): void => {
+        if (timing.chance < 100 && random() * 100 >= timing.chance) return;
+        const feedbackBit = seq.register & 1;
+        const nextBit = random() * 100 < seq.change ? (random() < 0.5 ? 0 : 1) : feedbackBit;
+        seq.register = ((seq.register >>> 1) | (nextBit << (seq.length - 1))) >>> 0;
+        if (seq.length < 32) seq.register &= mask;
+        const normalized = seq.register / Math.max(1, mask);
+        const index = Math.min(seq.values.length - 1, Math.floor(normalized * seq.values.length));
+        seq.current = seq.values[index];
+        const view = turingViews.get(name);
+        if (view) {
+          view.bits = turingBits(seq.register, seq.length);
+          view.currentFrequency = seq.current;
+          view.revision += 1;
+        }
+      };
+      if (timing.unit === 'beat') this.scheduler.addBeatJob(timing.amount, advance, timing.loose, timing.clockSource);
+      else {
+        const baseMs = timing.unit === 'sec' ? timing.amount * 1000 : timing.amount;
+        this.scheduler.addWallJob(baseMs, advance);
+      }
+    }
+
     for (const [name, cycle] of languageCycles) {
       const voice = voices.get(name);
       if (!voice) continue;
@@ -2909,6 +3012,8 @@ export class SonusRuntime {
       let repeatedValue = sequence?.values[0] ?? voice.frequency;
 
       const nextFrequency = (): number => {
+        const turingSource = languageTuringVoiceSources.get(name);
+        if (turingSource) return languageTurings.get(turingSource)?.current ?? voice.frequency;
         if (!sequence || sequence.values.length === 0) return voice.frequency;
         const values = sequence.values;
         if (values.length === 1) return values[0];
@@ -3225,6 +3330,34 @@ function matchesCycle(condition: CycleCondition | null, eventIndex: number): boo
   if (condition.first) return eventIndex === 1;
   if (condition.notFirst) return eventIndex > 1;
   return ((eventIndex - 1) % condition.length!) + 1 === condition.position;
+}
+
+function parseLanguageTuringDeclaration(line: string): string | null {
+  return line.match(/^__seq\("([A-Za-z_]\w*)"\)$/)?.[1] ?? null;
+}
+function parseLanguageTuringView(line: string): string | null {
+  return line.match(/^__seqview\("([A-Za-z_]\w*)"\)$/)?.[1] ?? null;
+}
+
+function parseLanguageTuringModel(line: string): { name: string; model: 'turing' } | null {
+  const match = line.match(/^__seqmodel\("([A-Za-z_]\w*)","(turing)"\)$/);
+  return match ? { name: match[1], model: 'turing' } : null;
+}
+function parseLanguageTuringLength(line: string): { name: string; length: number } | null {
+  const match = line.match(/^__seqlength\("([A-Za-z_]\w*)",(\d+)\)$/);
+  return match ? { name: match[1], length: Number(match[2]) } : null;
+}
+function parseLanguageTuringChange(line: string): { name: string; change: number } | null {
+  const match = line.match(/^__seqchange\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?)\)$/);
+  return match ? { name: match[1], change: Number(match[2]) } : null;
+}
+function parseLanguageTuringValues(line: string): { name: string; values: number[] } | null {
+  const match = line.match(/^__seqvalues\("([A-Za-z_]\w*)","([^"]*)"\)$/);
+  return match ? { name: match[1], values: match[2].split('|').filter(Boolean).map(Number) } : null;
+}
+function parseLanguageTuringVoice(line: string): { voice: string; seq: string } | null {
+  const match = line.match(/^__seqvoice\("([A-Za-z_]\w*)","([A-Za-z_]\w*)"\)$/);
+  return match ? { voice: match[1], seq: match[2] } : null;
 }
 
 function parseLanguageSequenceDirective(

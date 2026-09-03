@@ -30,6 +30,7 @@ The items below describe directions beyond this baseline.
 
 ### Language core
 
+- Stateful `SEQ` generative sources; the first implemented model is a Turing Machine shift-register sequencer.
 - Arithmetic, comparison, and logical expressions beyond the current scalar
   expression support.
 - Richer conditional execution.
