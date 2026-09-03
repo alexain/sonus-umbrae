@@ -1162,3 +1162,23 @@ The following remain future or incomplete areas:
 The core design principle remains unchanged: the text document is the source of
 truth, the runtime reconciles it live, and Scheme remains an observer rather
 than a graphical editor.
+
+
+### Vast reverb (Valley Plateau)
+
+`vast` uses the original GPLv3 Valley Plateau Dattorro DSP core. Sonus maps its compact FX vocabulary onto Plateau: `size`, `decay`, `damp`, `diffuse`, `predelay`, `motion`, `spread`, and `mix`.
+
+```text
+FX space:
+    model vast
+    size 72
+    decay 88
+    damp 38
+    diffuse 76
+    predelay 8
+    motion 24
+    spread 85
+    mix 42
+```
+
+The upstream Valley sources are fetched by `npm run dsp:setup` and remain under their GPLv3 license.

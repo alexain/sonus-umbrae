@@ -4,10 +4,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VENDOR="$ROOT/vendor/eurorack"
 SUPERPARASITES="$ROOT/vendor/superparasites"
+VALLEY="$ROOT/vendor/valley-rack-free"
 VOICE_OUTPUT="$ROOT/public/dsp/voice.wasm"
 SWELL_OUTPUT="$ROOT/public/dsp/swell.wasm"
 MIST_OUTPUT="$ROOT/public/dsp/mist.wasm"
 LIQUID_OUTPUT="$ROOT/public/dsp/liquid.wasm"
+VAST_OUTPUT="$ROOT/public/dsp/vast.wasm"
 
 if ! command -v em++ >/dev/null 2>&1; then
   echo "em++ not found. Install/activate Emscripten (emsdk) before building the DSP." >&2
@@ -95,8 +97,27 @@ em++ \
   -Wl,--no-entry \
   -o "$MIST_OUTPUT"
 
-echo "Built $MIST_OUTPUT (SuperParasites 8-mode backend)"
+echo "Built $MIST_OUTPUT (SuperParasites backend)"
 
+
+
+em++ \
+  -std=c++17 \
+  -O3 \
+  -DNDEBUG \
+  -I"$VALLEY/src" \
+  "$ROOT/dsp/vast_bridge.cc" \
+  "$VALLEY/src/Plateau/Dattorro.cpp" \
+  "$VALLEY/src/dsp/filters/OnePoleFilters.cpp" \
+  -s STANDALONE_WASM=1 \
+  -s ALLOW_MEMORY_GROWTH=0 \
+  -s INITIAL_MEMORY=33554432 \
+  -s FILESYSTEM=0 \
+  -s EXPORTED_FUNCTIONS='["_su_vast_create","_su_vast_destroy","_su_vast_set_sample_rate","_su_vast_set_size","_su_vast_set_decay","_su_vast_set_damp","_su_vast_set_diffuse","_su_vast_set_predelay","_su_vast_set_motion","_su_vast_set_spread","_su_vast_set_freeze","_su_vast_in_l","_su_vast_in_r","_su_vast_out_l","_su_vast_out_r","_su_vast_process"]' \
+  -Wl,--no-entry \
+  -o "$VAST_OUTPUT"
+
+echo "Built $VAST_OUTPUT (Valley Plateau Dattorro backend)"
 
 em++ \
   -std=c++17 \

@@ -56,6 +56,18 @@ export interface AudioProgram {
     reverse: boolean;
     mode: number;
   }>;
+  vasts: Array<{
+    name: string;
+    size: number;
+    decay: number;
+    damp: number;
+    diffuse: number;
+    predelay: number;
+    motion: number;
+    spread: number;
+    mix: number;
+    freeze: boolean;
+  }>;
   filters: Array<{
     name: string;
     model: 'liquid.mono';
@@ -152,6 +164,28 @@ interface MistVoice {
   mode: number;
 }
 
+interface VastVoice {
+  node: AudioWorkletNode;
+  monoInput: GainNode;
+  inputL: GainNode;
+  inputR: GainNode;
+  dryL: GainNode;
+  dryR: GainNode;
+  wetL: GainNode;
+  wetR: GainNode;
+  outputL: GainNode;
+  outputR: GainNode;
+  size: number;
+  decay: number;
+  damp: number;
+  diffuse: number;
+  predelay: number;
+  motion: number;
+  spread: number;
+  mix: number;
+  freeze: boolean;
+}
+
 interface LiquidFilterVoice {
   node: AudioWorkletNode;
   input: GainNode;
@@ -215,6 +249,7 @@ export class AudioEngine {
   private voices = new Map<string, MacroVoice>();
   private swells = new Map<string, SwellVoice>();
   private mists = new Map<string, MistVoice>();
+  private vasts = new Map<string, VastVoice>();
   private filters = new Map<string, LiquidFilterVoice>();
   private clocks = new Map<string, ClockSource>();
   private clockTriggerListeners = new Map<string, Set<() => void>>();
@@ -223,10 +258,12 @@ export class AudioEngine {
   private voiceWasmBytes: ArrayBuffer | null = null;
   private swellWasmBytes: ArrayBuffer | null = null;
   private mistWasmBytes: ArrayBuffer | null = null;
+  private vastWasmBytes: ArrayBuffer | null = null;
   private liquidWasmBytes: ArrayBuffer | null = null;
   private voiceWorkletLoaded = false;
   private swellWorkletLoaded = false;
   private mistWorkletLoaded = false;
+  private vastWorkletLoaded = false;
   private liquidWorkletLoaded = false;
   private clockWorkletLoaded = false;
   private pendingProgram: AudioProgram | null = null;
@@ -245,7 +282,7 @@ export class AudioEngine {
           : 'suspended',
       sampleRate: this.context?.sampleRate ?? null,
       testFrequency: this.testOscillator?.frequency.value ?? null,
-      objectCount: this.oscillators.size + this.gains.size + this.voices.size + this.swells.size + this.filters.size + this.clocks.size,
+      objectCount: this.oscillators.size + this.gains.size + this.voices.size + this.swells.size + this.mists.size + this.vasts.size + this.filters.size + this.clocks.size,
       routeCount: this.routes.size,
     };
   }
@@ -261,6 +298,7 @@ export class AudioEngine {
     await this.ensureVoiceRuntime();
     await this.ensureSwellRuntime();
     await this.ensureMistRuntime();
+    await this.ensureVastRuntime();
     await this.ensureLiquidRuntime();
     await this.ensureClockRuntime();
     if (context.state !== 'running') await context.resume();
@@ -283,6 +321,7 @@ export class AudioEngine {
     if ((program.voices.length > 0 && !this.voiceWorkletLoaded) ||
         (program.swells.length > 0 && !this.swellWorkletLoaded) ||
         (program.mists.length > 0 && !this.mistWorkletLoaded) ||
+        (program.vasts.length > 0 && !this.vastWorkletLoaded) ||
         (program.filters.length > 0 && !this.liquidWorkletLoaded)) {
       this.pendingProgram = program;
       return;
@@ -300,6 +339,7 @@ export class AudioEngine {
     const desiredVoices = new Map(program.voices.map((definition) => [definition.name, definition]));
     const desiredSwells = new Map(program.swells.map((definition) => [definition.name, definition]));
     const desiredMists = new Map(program.mists.map((definition) => [definition.name, definition]));
+    const desiredVasts = new Map(program.vasts.map((definition) => [definition.name, definition]));
     const desiredFilters = new Map(program.filters.map((definition) => [definition.name, definition]));
     const desiredGains = new Map(program.gains.map((definition) => [definition.name, definition]));
     const desiredRoutes = new Map(program.routes.map((route) => [`${route.source}->${route.destination}`, route]));
@@ -342,6 +382,10 @@ export class AudioEngine {
       if (!desiredMists.has(name)) this.removeMist(name);
     }
 
+    for (const [name] of this.vasts) {
+      if (!desiredVasts.has(name)) this.removeVast(name);
+    }
+
     for (const definition of program.clockSources) this.createOrUpdateClock(definition.name, definition.rate, definition.jitter, definition.drift);
     this.updateAllClocks();
 
@@ -370,6 +414,11 @@ export class AudioEngine {
     for (const definition of program.mists) {
       this.createMist(definition);
       this.updateMist(definition);
+    }
+
+    for (const definition of program.vasts) {
+      this.createVast(definition);
+      this.updateVast(definition);
     }
 
     for (const definition of program.gains) {
@@ -723,6 +772,46 @@ export class AudioEngine {
   }
 
 
+  private createVast(definition: AudioProgram['vasts'][number]): void {
+    if (this.vasts.has(definition.name)) return;
+    if (!this.vastWorkletLoaded || !this.vastWasmBytes) {
+      throw new Error('Vast DSP is not ready; run :start after building the DSP');
+    }
+    const context = this.ensureContext();
+    const node = new AudioWorkletNode(context, 'sonus-vast', {
+      numberOfInputs: 2,
+      numberOfOutputs: 2,
+      outputChannelCount: [1, 1],
+      processorOptions: { wasmBytes: this.vastWasmBytes.slice(0) },
+    });
+    node.addEventListener('processorerror', () => console.error('[Vast] AudioWorklet processor failed'));
+
+    const monoInput=context.createGain(), inputL=context.createGain(), inputR=context.createGain();
+    const dryL=context.createGain(), dryR=context.createGain(), wetL=context.createGain(), wetR=context.createGain();
+    const outputL=context.createGain(), outputR=context.createGain();
+    monoInput.connect(inputL); monoInput.connect(inputR);
+    inputL.connect(node,0,0); inputR.connect(node,0,1);
+    inputL.connect(dryL); inputR.connect(dryR); dryL.connect(outputL); dryR.connect(outputR);
+    node.connect(wetL,0,0); node.connect(wetR,1,0); wetL.connect(outputL); wetR.connect(outputR);
+
+    this.vasts.set(definition.name, { node, monoInput, inputL, inputR, dryL, dryR, wetL, wetR, outputL, outputR, ...definition });
+  }
+
+  private updateVast(definition: AudioProgram['vasts'][number]): void {
+    const vast=this.vasts.get(definition.name); if(!vast) return;
+    Object.assign(vast,definition);
+    const context=this.ensureContext();
+    const mix=Math.max(0,Math.min(1,definition.mix/100));
+    const dryGain=Math.cos(mix*Math.PI*0.5), wetGain=Math.sin(mix*Math.PI*0.5);
+    vast.dryL.gain.setTargetAtTime(dryGain,context.currentTime,0.008);
+    vast.dryR.gain.setTargetAtTime(dryGain,context.currentTime,0.008);
+    vast.wetL.gain.setTargetAtTime(wetGain,context.currentTime,0.008);
+    vast.wetR.gain.setTargetAtTime(wetGain,context.currentTime,0.008);
+    vast.node.port.postMessage({ type:'params', size:definition.size/100, decay:definition.decay/100,
+      damp:definition.damp/100, diffuse:definition.diffuse/100, predelay:definition.predelay/100,
+      motion:definition.motion/100, spread:definition.spread/100, freeze:definition.freeze });
+  }
+
   createGain(name: string): void {
     if (this.gains.has(name)) return;
     const context = this.ensureContext();
@@ -922,9 +1011,9 @@ export class AudioEngine {
 
     const mistOutput = signal.match(/^([A-Za-z_]\w*)\.(out_L|out_R)$/);
     if (mistOutput) {
-      const mist = this.mists.get(mistOutput[1]);
-      if (!mist) throw new Error(`unknown Mist object: ${mistOutput[1]}`);
-      return { node: mistOutput[2] === 'out_R' ? mist.outputR : mist.outputL, output: 0 };
+      const fx = this.mists.get(mistOutput[1]) ?? this.vasts.get(mistOutput[1]);
+      if (!fx) throw new Error(`unknown stereo FX object: ${mistOutput[1]}`);
+      return { node: mistOutput[2] === 'out_R' ? fx.outputR : fx.outputL, output: 0 };
     }
 
     const filterOutput = signal.match(/^([A-Za-z_]\w*)\.(lp12|bp12|lp24)$/);
@@ -970,10 +1059,10 @@ export class AudioEngine {
 
     const mistInput = port.match(/^([A-Za-z_]\w*)\.(in|inL|inR)$/);
     if (mistInput) {
-      const mist = this.mists.get(mistInput[1]);
-      if (!mist) throw new Error(`unknown Mist input: ${mistInput[1]}`);
-      if (mistInput[2] === 'in') return { node: mist.monoInput, input: 0 };
-      return { node: mistInput[2] === 'inR' ? mist.inputR : mist.inputL, input: 0 };
+      const fx = this.mists.get(mistInput[1]) ?? this.vasts.get(mistInput[1]);
+      if (!fx) throw new Error(`unknown stereo FX input: ${mistInput[1]}`);
+      if (mistInput[2] === 'in') return { node: fx.monoInput, input: 0 };
+      return { node: mistInput[2] === 'inR' ? fx.inputR : fx.inputL, input: 0 };
     }
 
     const trigger = port.match(/^([A-Za-z_]\w*)\.trig$/);
@@ -1088,6 +1177,23 @@ export class AudioEngine {
     parameter: 'position' | 'size' | 'pitch' | 'density' | 'texture' | 'mix' | 'spread' | 'feedback' | 'reverb',
     value: number,
   ): void {
+    const vast = this.vasts.get(name);
+    if (vast) {
+      if (!Number.isFinite(value) || value < 0 || value > 100) throw new RangeError(`Vast ${parameter} must be between 0 and 100`);
+      const map = { position:'predelay', size:'size', density:'diffuse', texture:'damp', mix:'mix', spread:'spread', feedback:'decay', reverb:'motion' } as const;
+      if (parameter === 'pitch') throw new RangeError('Vast does not expose pitch');
+      const mapped = map[parameter];
+      (vast as unknown as Record<string, unknown>)[mapped] = value;
+      if (mapped === 'mix') {
+        const context=this.ensureContext(), mix=Math.max(0,Math.min(1,value/100));
+        const dryGain=Math.cos(mix*Math.PI*0.5), wetGain=Math.sin(mix*Math.PI*0.5);
+        vast.dryL.gain.setTargetAtTime(dryGain,context.currentTime,0.008); vast.dryR.gain.setTargetAtTime(dryGain,context.currentTime,0.008);
+        vast.wetL.gain.setTargetAtTime(wetGain,context.currentTime,0.008); vast.wetR.gain.setTargetAtTime(wetGain,context.currentTime,0.008);
+      } else {
+        vast.node.port.postMessage({ type:'params', [mapped]: value/100 });
+      }
+      return;
+    }
     const mist = this.mists.get(name);
     if (!mist) throw new Error(`unknown Mist object: ${name}`);
 
@@ -1381,6 +1487,16 @@ export class AudioEngine {
     this.filters.delete(name);
   }
 
+  private removeVast(name: string): void {
+    const vast=this.vasts.get(name); if(!vast) return;
+    for(const node of [vast.monoInput,vast.inputL,vast.inputR,vast.dryL,vast.dryR,vast.wetL,vast.wetR,vast.outputL,vast.outputR]) {
+      try { node.disconnect(); } catch {}
+    }
+    try { vast.node.disconnect(); } catch {}
+    vast.node.port.close();
+    this.vasts.delete(name);
+  }
+
   private removeMist(name: string): void {
     const mist = this.mists.get(name);
     if (!mist) return;
@@ -1473,6 +1589,16 @@ export class AudioEngine {
     this.mistWasmBytes = await response.arrayBuffer();
     await context.audioWorklet.addModule('/worklets/mist-processor.js');
     this.mistWorkletLoaded = true;
+  }
+
+  private async ensureVastRuntime(): Promise<void> {
+    if (this.vastWorkletLoaded && this.vastWasmBytes) return;
+    const context=this.ensureContext();
+    const response=await fetch('/dsp/vast.wasm');
+    if (!response.ok) throw new Error('Vast DSP missing. Run npm run dsp:setup and npm run dsp:build.');
+    this.vastWasmBytes=await response.arrayBuffer();
+    await context.audioWorklet.addModule('/worklets/vast-processor.js');
+    this.vastWorkletLoaded=true;
   }
 
   private async ensureLiquidRuntime(): Promise<void> {

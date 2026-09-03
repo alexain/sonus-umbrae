@@ -186,6 +186,7 @@ const FX_MODEL_REGISTRY: Record<string, FxModelSchema> = {
   'mist.resonator': { lowLevelMode: 'resonestor',      parameters: MIST_PARAMETERS, musicalPitch: true },
   'mist.repeat':    { lowLevelMode: 'beat_repeat',     parameters: MIST_PARAMETERS, musicalPitch: true },
   'mist.smear':     { lowLevelMode: 'spectral_clouds', parameters: MIST_PARAMETERS, musicalPitch: true },
+  'vast':           { lowLevelMode: 'vast',            parameters: MIST_PARAMETERS, musicalPitch: false },
 };
 
 
@@ -1583,6 +1584,14 @@ function compileFxProperty(
     throw new LanguageError([{ line, message: `${property} requires FX model to be declared first` }]);
   }
   const schema = FX_MODEL_REGISTRY[fx.modelId];
+  const vastAliases: Record<string, FxParameter> = {
+    decay: 'feedback',
+    damp: 'texture',
+    diffuse: 'density',
+    predelay: 'position',
+    motion: 'reverb',
+  };
+  const effectiveKey = fx.modelId === 'vast' ? (vastAliases[key] ?? key) : key;
 
   if (key === 'freeze' || key === 'reverse') {
     if (!/^(on|off|true|false)$/i.test(value)) {
@@ -1708,11 +1717,11 @@ function compileFxProperty(
     return `${fx.name}.pitch(${pitchValues[0]});${sequence}${every}${piano}`;
   }
 
-  if (!schema.parameters.has(key as FxParameter)) {
+  if (!schema.parameters.has(effectiveKey as FxParameter)) {
     throw new LanguageError([{ line, message: `unknown FX property '${property}' for ${fx.modelId}` }]);
   }
 
-  const parameter = key as FxParameter;
+  const parameter = effectiveKey as FxParameter;
   const modulation = /^from\s+/i.test(value) ? compileFxModulation(fx, parameter, value, line, modSources) : null;
   if (modulation) return modulation;
 

@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VENDOR="$ROOT/vendor/eurorack"
 SUPERPARASITES="$ROOT/vendor/superparasites"
+VALLEY="$ROOT/vendor/valley-rack-free"
 
 if ! command -v git >/dev/null 2>&1; then
   echo "git is required" >&2
@@ -19,12 +20,20 @@ else
 fi
 
 
-if [[ ! -d "$SUPERPARASITES/.git" ]]; then
+if [[ ! -e "$SUPERPARASITES/.git" ]]; then
   mkdir -p "$ROOT/vendor"
   echo "Fetching SuperParasites DSP sources..."
   git clone --depth 1 --recurse-submodules --shallow-submodules     https://github.com/patrickdowling/superparasites.git "$SUPERPARASITES"
 else
   echo "SuperParasites DSP sources already present: $SUPERPARASITES"
+fi
+
+if ! git -C "$VALLEY" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  mkdir -p "$ROOT/vendor"
+  echo "Fetching ValleyRackFree DSP sources (Plateau)..."
+  git clone --depth 1 https://github.com/ValleyAudio/ValleyRackFree.git "$VALLEY"
+else
+  echo "ValleyRackFree DSP sources already present: $VALLEY"
 fi
 
 echo "Initialising required upstream submodules..."
@@ -49,6 +58,12 @@ fi
 
 if [[ ! -f "$SUPERPARASITES/supercell/dsp/granular_processor.cc" ]]; then
   echo "SuperParasites DSP sources are incomplete: $SUPERPARASITES/supercell is missing" >&2
+  exit 1
+fi
+
+if [[ ! -f "$VALLEY/src/Plateau/Dattorro.cpp" || \
+      ! -f "$VALLEY/src/dsp/filters/OnePoleFilters.cpp" ]]; then
+  echo "Valley Plateau DSP sources are incomplete" >&2
   exit 1
 fi
 

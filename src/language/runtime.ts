@@ -2427,21 +2427,37 @@ export class SonusRuntime {
         outputMode: definition.outputMode,
         range: definition.range,
       })),
-      mists: [...mists.entries()].map(([name, definition]) => ({
-        name,
-        position: definition.position,
-        size: definition.size,
-        pitch: definition.pitch,
-        density: definition.density,
-        texture: definition.texture,
-        mix: definition.mix,
-        spread: definition.spread,
-        feedback: definition.feedback,
-        reverb: definition.reverb,
-        freeze: definition.freeze,
-        reverse: definition.reverse,
-        mode: definition.mode,
-      })),
+      mists: [...mists.entries()]
+        .filter(([name]) => languageFxMeta.get(name)?.modelId !== 'vast')
+        .map(([name, definition]) => ({
+          name,
+          position: definition.position,
+          size: definition.size,
+          pitch: definition.pitch,
+          density: definition.density,
+          texture: definition.texture,
+          mix: definition.mix,
+          spread: definition.spread,
+          feedback: definition.feedback,
+          reverb: definition.reverb,
+          freeze: definition.freeze,
+          reverse: definition.reverse,
+          mode: definition.mode,
+        })),
+      vasts: [...mists.entries()]
+        .filter(([name]) => languageFxMeta.get(name)?.modelId === 'vast')
+        .map(([name, definition]) => ({
+          name,
+          size: definition.size,
+          decay: definition.feedback,
+          damp: definition.texture,
+          diffuse: definition.density,
+          predelay: definition.position,
+          motion: definition.reverb,
+          spread: definition.spread,
+          mix: definition.mix,
+          freeze: definition.freeze,
+        })),
       filters: [...filters.entries()].map(([name, definition]) => ({
         name,
         model: definition.model,
@@ -4193,11 +4209,12 @@ function applyMistCall(
         kammerl: { id: 6, label: 'BEAT REPEAT' },
         spectral_clouds: { id: 7, label: 'SPECTRAL CLOUDS' },
         spectral_cloud: { id: 7, label: 'SPECTRAL CLOUDS' },
+        vast: { id: 8, label: 'VAST / VALLEY PLATEAU' },
       };
 
       const mode = modes[normalized];
       if (!mode) {
-        return 'mode expects granular, stretch, looping_delay, spectral, oliverb, resonestor, beat_repeat, or spectral_clouds';
+        return 'mode expects granular, stretch, looping_delay, spectral, oliverb, resonestor, beat_repeat, spectral_clouds, or vast';
       }
 
       definition.mode = mode.id;
