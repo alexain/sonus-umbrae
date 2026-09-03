@@ -230,13 +230,87 @@ sound macro.fm
 
 Only parameters supported by the selected engine are accepted.
 
-Typical engine parameters include:
+Typical macro-engine parameters include:
 
 ```text
 harmo 50
 timbre 50
 morph 50
 ```
+
+### Matter physical-modeling voices
+
+`matter` is backed by the original Mutable Instruments Elements DSP, compiled as
+a separate WebAssembly module. It remains one physical-modeling instrument: a
+shared pitch/resonator, three exciters, and one stereo output.
+
+```text
+VOICE body:
+    sound matter
+    note C3
+    bow 35 with timbre 50
+    blow 20 with timbre 65
+    strike 70 with timbre 40
+    geometry 45
+    brightness 65
+    damping 55
+    position 35
+    space 25
+```
+
+`BOW`, `BLOW`, and `STRIKE` are independent exciter levels in `0..100`. If an
+exciter is omitted its level defaults to `0`; its local `TIMBRE` defaults to
+`50`. Resonator parameters use their normal object defaults when omitted.
+
+#### Envelope values
+
+Envelope shapes are typed values. Structured envelope lists use commas because
+time values consist of a number plus a unit:
+
+```text
+AD      [250 ms, 1.2 sec]
+ADR     [4 sec, 300 ms, 1.2 sec]
+ASR     [800 ms, 75, 2 sec]
+ADSR    [20 ms, 300 ms, 70, 1.5 sec]
+DAHDSR  [100 ms, 400 ms, 250 ms, 800 ms, 65, 2 sec]
+```
+
+The arity and value types are strict. Time stages require `ms` or `sec`; sustain
+values use `0..100`. For example an ADSR always requires exactly four values and
+its third value must be the sustain level.
+
+Envelopes can be stored in `SET` and consumed only by compatible parameters:
+
+```text
+SET env1: ADR [4 sec, 300 ms, 1.2 sec]
+
+VOICE body:
+    sound matter
+    strike 70
+    drive from env1
+```
+
+`DRIVE` controls the common Elements excitation/performance signal. Without an
+explicit `EVERY`, it is retriggered by the VOICE note event (including each new
+note produced by a note/scale/SEQ source). Retriggering starts from the current
+envelope level rather than forcing a discontinuity to zero.
+
+`DRIVE` may instead use the normal global timing grammar:
+
+```text
+DRIVE AD [1 sec, 1 sec] EVERY 2 beat
+DRIVE FROM env1 EVERY 4 beat WITH CHANCE 70
+DRIVE FROM env1 EVERY 2 beat WITH CLOCK pulse, LOOSE
+```
+
+This does not create a local scheduler. The trigger is registered as another job
+on the single runtime scheduler used by all `EVERY` events. When `DRIVE` has its
+own `EVERY`, note changes update pitch but do not also retrigger DRIVE.
+
+The envelope itself runs inside the Matter AudioWorklet at DSP rate. Its current
+level drives Elements performance strength continuously; the gate stays active
+while the envelope has non-zero energy, allowing bow/blow excitation to evolve
+through the envelope while strike responds to the gate edge.
 
 ### LPG
 

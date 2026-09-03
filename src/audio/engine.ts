@@ -30,6 +30,26 @@ export interface AudioProgram {
     timbre: number;
     morph: number;
   }>;
+  matters: Array<{
+    name: string;
+    note: number;
+    level: number;
+    drive: { kind: string; values: number[] } | null;
+    bowLevel: number;
+    bowTimbre: number;
+    blowLevel: number;
+    blowMeta: number;
+    blowTimbre: number;
+    strikeLevel: number;
+    strikeMeta: number;
+    strikeTimbre: number;
+    signature: number;
+    geometry: number;
+    brightness: number;
+    damping: number;
+    position: number;
+    space: number;
+  }>;
   swells: Array<{
     name: string;
     frequency: number;
@@ -123,6 +143,14 @@ interface MacroVoice {
   harmo: number;
   timbre: number;
   morph: number;
+}
+
+interface MatterVoice {
+  node: AudioWorkletNode;
+  mainGain: GainNode;
+  auxGain: GainNode;
+  note: number;
+  level: number;
 }
 
 interface SwellVoice {
@@ -247,6 +275,7 @@ export class AudioEngine {
   private oscillators = new Map<string, OscillatorVoice>();
   private gains = new Map<string, GainVoice>();
   private voices = new Map<string, MacroVoice>();
+  private matters = new Map<string, MatterVoice>();
   private swells = new Map<string, SwellVoice>();
   private mists = new Map<string, MistVoice>();
   private vasts = new Map<string, VastVoice>();
@@ -256,11 +285,13 @@ export class AudioEngine {
   private masterClockBpm = 0;
   private clockTransportRunning = true;
   private voiceWasmBytes: ArrayBuffer | null = null;
+  private matterWasmBytes: ArrayBuffer | null = null;
   private swellWasmBytes: ArrayBuffer | null = null;
   private mistWasmBytes: ArrayBuffer | null = null;
   private vastWasmBytes: ArrayBuffer | null = null;
   private liquidWasmBytes: ArrayBuffer | null = null;
   private voiceWorkletLoaded = false;
+  private matterWorkletLoaded = false;
   private swellWorkletLoaded = false;
   private mistWorkletLoaded = false;
   private vastWorkletLoaded = false;
@@ -282,7 +313,7 @@ export class AudioEngine {
           : 'suspended',
       sampleRate: this.context?.sampleRate ?? null,
       testFrequency: this.testOscillator?.frequency.value ?? null,
-      objectCount: this.oscillators.size + this.gains.size + this.voices.size + this.swells.size + this.mists.size + this.vasts.size + this.filters.size + this.clocks.size,
+      objectCount: this.oscillators.size + this.gains.size + this.voices.size + this.matters.size + this.swells.size + this.mists.size + this.vasts.size + this.filters.size + this.clocks.size,
       routeCount: this.routes.size,
     };
   }
@@ -296,6 +327,7 @@ export class AudioEngine {
   async start(): Promise<void> {
     const context = this.ensureContext();
     await this.ensureVoiceRuntime();
+    await this.ensureMatterRuntime();
     await this.ensureSwellRuntime();
     await this.ensureMistRuntime();
     await this.ensureVastRuntime();
@@ -319,6 +351,7 @@ export class AudioEngine {
 
   applyProgram(program: AudioProgram): void {
     if ((program.voices.length > 0 && !this.voiceWorkletLoaded) ||
+        (program.matters.length > 0 && !this.matterWorkletLoaded) ||
         (program.swells.length > 0 && !this.swellWorkletLoaded) ||
         (program.mists.length > 0 && !this.mistWorkletLoaded) ||
         (program.vasts.length > 0 && !this.vastWorkletLoaded) ||
@@ -337,6 +370,7 @@ export class AudioEngine {
     const desiredClockSources = new Map(program.clockSources.map((definition) => [definition.name, definition]));
     const desiredOscillators = new Map(program.oscillators.map((definition) => [definition.name, definition]));
     const desiredVoices = new Map(program.voices.map((definition) => [definition.name, definition]));
+    const desiredMatters = new Map(program.matters.map((definition) => [definition.name, definition]));
     const desiredSwells = new Map(program.swells.map((definition) => [definition.name, definition]));
     const desiredMists = new Map(program.mists.map((definition) => [definition.name, definition]));
     const desiredVasts = new Map(program.vasts.map((definition) => [definition.name, definition]));
@@ -373,6 +407,10 @@ export class AudioEngine {
       if (!desiredVoices.has(name)) this.removeVoice(name);
     }
 
+    for (const [name] of this.matters) {
+      if (!desiredMatters.has(name)) this.removeMatter(name);
+    }
+
     for (const [name] of this.swells) {
       if (!desiredSwells.has(name)) this.removeSwell(name);
     }
@@ -397,6 +435,11 @@ export class AudioEngine {
     for (const definition of program.voices) {
       this.createVoice(definition);
       this.updateVoice(definition);
+    }
+
+    for (const definition of program.matters) {
+      this.createMatter(definition);
+      this.updateMatter(definition);
     }
 
     for (const definition of program.filters) {
@@ -530,6 +573,71 @@ export class AudioEngine {
     });
   }
 
+  private createMatter(definition: AudioProgram['matters'][number]): void {
+    if (this.matters.has(definition.name)) return;
+    if (!this.matterWorkletLoaded || !this.matterWasmBytes) {
+      throw new Error('Matter DSP is not ready; run :start after building the DSP');
+    }
+
+    const context = this.ensureContext();
+    const node = new AudioWorkletNode(context, 'sonus-matter', {
+      numberOfInputs: 0,
+      numberOfOutputs: 2,
+      outputChannelCount: [1, 1],
+      processorOptions: { wasmBytes: this.matterWasmBytes.slice(0), hostSampleRate: context.sampleRate },
+    });
+    const mainGain = context.createGain();
+    const auxGain = context.createGain();
+    const level = Math.max(0, Math.min(1, definition.level / 100));
+    mainGain.gain.value = level;
+    auxGain.gain.value = level;
+    node.connect(mainGain, 0, 0);
+    node.connect(auxGain, 1, 0);
+    this.matters.set(definition.name, {
+      node,
+      mainGain,
+      auxGain,
+      note: definition.note,
+      level: definition.level,
+    });
+  }
+
+  private updateMatter(definition: AudioProgram['matters'][number]): void {
+    const matter = this.matters.get(definition.name);
+    if (!matter) return;
+    matter.note = definition.note;
+    matter.level = definition.level;
+    const level = Math.max(0, Math.min(1, definition.level / 100));
+    const context = this.ensureContext();
+    matter.mainGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
+    matter.auxGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
+    matter.node.port.postMessage({
+      type: 'params',
+      note: definition.note,
+      drive: definition.drive,
+      bowLevel: definition.bowLevel / 100,
+      bowTimbre: definition.bowTimbre / 100,
+      blowLevel: definition.blowLevel / 100,
+      blowMeta: definition.blowMeta / 100,
+      blowTimbre: definition.blowTimbre / 100,
+      strikeLevel: definition.strikeLevel / 100,
+      strikeMeta: definition.strikeMeta / 100,
+      strikeTimbre: definition.strikeTimbre / 100,
+      signature: definition.signature / 100,
+      geometry: definition.geometry / 100,
+      brightness: definition.brightness / 100,
+      damping: definition.damping / 100,
+      position: definition.position / 100,
+      space: definition.space / 100,
+    });
+  }
+
+  triggerMatter(name: string): void {
+    const matter = this.matters.get(name);
+    if (!matter) throw new Error(`unknown Matter object: ${name}`);
+    matter.node.port.postMessage({ type: 'trigger' });
+  }
+
   private createFilter(definition: AudioProgram['filters'][number]): void {
     if (this.filters.has(definition.name)) return;
     if (!this.liquidWorkletLoaded || !this.liquidWasmBytes) {
@@ -561,9 +669,15 @@ export class AudioEngine {
 
     if (definition.ownerVoice) {
       const voice = this.voices.get(definition.ownerVoice);
-      if (!voice) throw new Error(`embedded FILTER '${definition.displayName}' references unknown VOICE '${definition.ownerVoice}'`);
-      voice.outGain.connect(input);
-      voice.auxGain.connect(input);
+      const matter = this.matters.get(definition.ownerVoice);
+      if (!voice && !matter) throw new Error(`embedded FILTER '${definition.displayName}' references unknown VOICE '${definition.ownerVoice}'`);
+      if (voice) {
+        voice.outGain.connect(input);
+        voice.auxGain.connect(input);
+      } else if (matter) {
+        matter.mainGain.connect(input);
+        matter.auxGain.connect(input);
+      }
     }
   }
 
@@ -1032,6 +1146,8 @@ export class AudioEngine {
 
     const voice = this.voices.get(name);
     if (voice) return { node: port === 'aux' ? voice.auxGain : voice.outGain, output: 0 };
+    const matter = this.matters.get(name);
+    if (matter) return { node: port === 'aux' ? matter.auxGain : matter.mainGain, output: 0 };
 
     if (port === 'aux') throw new Error(`aux output is not available on ${name}`);
     const oscillator = this.oscillators.get(name);
@@ -1150,12 +1266,41 @@ export class AudioEngine {
   }
 
   triggerVoice(name: string): void {
+    const matter = this.matters.get(name);
+    if (matter) {
+      matter.node.port.postMessage({ type: 'trigger' });
+      return;
+    }
     const voice = this.voices.get(name);
     if (!voice || !voice.lpg) return;
     voice.node.port.postMessage({ type: 'trigger' });
   }
 
-  setVoiceParameter(name: string, parameter: 'freq' | 'model' | 'harmo' | 'timbre' | 'morph', value: number): void {
+  setVoiceParameter(
+    name: string,
+    parameter: 'freq' | 'model' | 'harmo' | 'timbre' | 'morph' | 'geometry' | 'brightness' | 'damping' | 'position' | 'space' | 'bow' | 'bowTimbre' | 'blow' | 'blowTimbre' | 'strike' | 'strikeTimbre',
+    value: number,
+  ): void {
+    const matter = this.matters.get(name);
+    if (matter) {
+      if (parameter === 'freq') {
+        const note = 69 + 12 * Math.log2(value / 440);
+        matter.note = note;
+        matter.node.port.postMessage({ type: 'params', note });
+        return;
+      }
+      if (parameter === 'model' || parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph') return;
+      const map = {
+        geometry: 'geometry', brightness: 'brightness', damping: 'damping', position: 'position', space: 'space',
+        bow: 'bowLevel', bowTimbre: 'bowTimbre', blow: 'blowLevel', blowTimbre: 'blowTimbre',
+        strike: 'strikeLevel', strikeTimbre: 'strikeTimbre',
+      } as const;
+      const target = map[parameter as keyof typeof map];
+      if (!target) return;
+      matter.node.port.postMessage({ type: 'params', [target]: value / 100 });
+      return;
+    }
+
     const voice = this.voices.get(name);
     if (!voice) throw new Error(`unknown Voice object: ${name}`);
     if (parameter === 'freq') {
@@ -1168,6 +1313,7 @@ export class AudioEngine {
       voice.node.port.postMessage({ type: 'params', model: value });
       return;
     }
+    if (parameter !== 'harmo' && parameter !== 'timbre' && parameter !== 'morph') return;
     voice[parameter] = value;
     voice.node.port.postMessage({ type: 'params', [parameter]: value / 100 });
   }
@@ -1404,6 +1550,7 @@ export class AudioEngine {
     const musicalSources = new Set([
       ...this.oscillators.keys(),
       ...this.voices.keys(),
+      ...this.matters.keys(),
       ...this.swells.keys(),
     ]);
     for (const [key, route] of [...this.routes.entries()]) {
@@ -1488,9 +1635,14 @@ export class AudioEngine {
     if (!filter) return;
     if (filter.ownerVoice) {
       const voice = this.voices.get(filter.ownerVoice);
+      const matter = this.matters.get(filter.ownerVoice);
       if (voice) {
         try { voice.outGain.disconnect(filter.input); } catch {}
         try { voice.auxGain.disconnect(filter.input); } catch {}
+      }
+      if (matter) {
+        try { matter.mainGain.disconnect(filter.input); } catch {}
+        try { matter.auxGain.disconnect(filter.input); } catch {}
       }
     }
     for (const node of [filter.input,filter.lp12Out,filter.bp12Out,filter.lp24Out]) {
@@ -1535,6 +1687,18 @@ export class AudioEngine {
     for (const signal of [...this.views.keys()]) {
       if (signal.startsWith(`${name}.`)) this.removeView(signal);
     }
+  }
+
+  private removeMatter(name: string): void {
+    const matter = this.matters.get(name);
+    if (!matter) return;
+    this.removeView(`${name}.out`);
+    this.removeView(`${name}.aux`);
+    matter.mainGain.disconnect();
+    matter.auxGain.disconnect();
+    matter.node.disconnect();
+    matter.node.port.close();
+    this.matters.delete(name);
   }
 
   private removeVoice(name: string): void {
@@ -1630,6 +1794,18 @@ export class AudioEngine {
     const context = this.ensureContext();
     await context.audioWorklet.addModule('/worklets/clock-processor.js');
     this.clockWorkletLoaded = true;
+  }
+
+  private async ensureMatterRuntime(): Promise<void> {
+    if (this.matterWorkletLoaded && this.matterWasmBytes) return;
+    const context = this.ensureContext();
+    const response = await fetch('/dsp/matter.wasm');
+    if (!response.ok) {
+      throw new Error('Matter DSP missing. Run npm run dsp:setup and npm run dsp:build.');
+    }
+    this.matterWasmBytes = await response.arrayBuffer();
+    await context.audioWorklet.addModule('/worklets/matter-processor.js');
+    this.matterWorkletLoaded = true;
   }
 
   private async ensureVoiceRuntime(): Promise<void> {

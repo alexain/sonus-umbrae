@@ -10,6 +10,7 @@ SWELL_OUTPUT="$ROOT/public/dsp/swell.wasm"
 MIST_OUTPUT="$ROOT/public/dsp/mist.wasm"
 LIQUID_OUTPUT="$ROOT/public/dsp/liquid.wasm"
 VAST_OUTPUT="$ROOT/public/dsp/vast.wasm"
+MATTER_OUTPUT="$ROOT/public/dsp/matter.wasm"
 
 if ! command -v em++ >/dev/null 2>&1; then
   echo "em++ not found. Install/activate Emscripten (emsdk) before building the DSP." >&2
@@ -47,6 +48,34 @@ em++ \
   -o "$VOICE_OUTPUT"
 
 echo "Built $VOICE_OUTPUT"
+
+
+echo "Building Matter (Mutable Instruments Elements backend)..."
+ELEMENTS_DSP=()
+while IFS= read -r source; do
+  ELEMENTS_DSP+=("$source")
+done < <(find "$VENDOR/elements/dsp" -name '*.cc' -type f | sort)
+
+em++ \
+  -std=c++17 \
+  -O3 \
+  -DTEST \
+  -I"$VENDOR" \
+  "$ROOT/dsp/matter_bridge.cc" \
+  "$VENDOR/stmlib/utils/random.cc" \
+  "$VENDOR/stmlib/dsp/atan.cc" \
+  "$VENDOR/stmlib/dsp/units.cc" \
+  "${ELEMENTS_DSP[@]}" \
+  "$VENDOR/elements/resources.cc" \
+  -s STANDALONE_WASM=1 \
+  -s ALLOW_MEMORY_GROWTH=0 \
+  -s INITIAL_MEMORY=33554432 \
+  -s FILESYSTEM=0 \
+  -s EXPORTED_FUNCTIONS='["_su_matter_create","_su_matter_destroy","_su_matter_set_note","_su_matter_set_modulation","_su_matter_set_gate","_su_matter_set_strength","_su_matter_set_envelope","_su_matter_set_bow_level","_su_matter_set_bow_timbre","_su_matter_set_blow_level","_su_matter_set_blow_meta","_su_matter_set_blow_timbre","_su_matter_set_strike_level","_su_matter_set_strike_meta","_su_matter_set_strike_timbre","_su_matter_set_signature","_su_matter_set_geometry","_su_matter_set_brightness","_su_matter_set_damping","_su_matter_set_position","_su_matter_set_space","_su_matter_blow_in","_su_matter_strike_in","_su_matter_main","_su_matter_aux","_su_matter_block_size","_su_matter_sample_rate","_su_matter_process"]' \
+  -Wl,--no-entry \
+  -o "$MATTER_OUTPUT"
+
+echo "Built $MATTER_OUTPUT (Elements backend, native 32 kHz / 16-frame blocks)"
 
 em++ \
   -std=c++17 \

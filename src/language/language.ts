@@ -13,7 +13,7 @@ export class LanguageError extends Error {
   }
 }
 
-type SourceKind = 'voice' | 'note' | 'freq' | 'time' | 'clock' | 'trigger' | 'scalar' | 'scale' | 'seq';
+type SourceKind = 'voice' | 'note' | 'freq' | 'time' | 'clock' | 'trigger' | 'scalar' | 'scale' | 'seq' | 'envelope';
 
 type SourceDefinition =
   | { kind: 'scalar' }
@@ -22,7 +22,24 @@ type SourceDefinition =
   | { kind: 'freq'; values: number[]; display: string }
   | { kind: 'note'; values: number[]; display: string; favor: SequenceFavorEntry[] }
   | { kind: 'scale'; values: number[]; display: string }
-  | { kind: 'seq'; values: number[]; display: string };
+  | { kind: 'seq'; values: number[]; display: string }
+  | { kind: 'envelope'; spec: EnvelopeSpec; display: string };
+
+
+type EnvelopeKind = 'AD' | 'ADR' | 'ASR' | 'ADSR' | 'DAHDSR';
+type EnvelopeSpec = {
+  kind: EnvelopeKind;
+  values: number[]; // times are stored in seconds; sustain is normalized 0..1
+  display: string;
+};
+
+const ENVELOPE_LAYOUTS: Record<EnvelopeKind, readonly ('time' | 'level')[]> = {
+  AD: ['time', 'time'],
+  ADR: ['time', 'time', 'time'],
+  ASR: ['time', 'level', 'time'],
+  ADSR: ['time', 'time', 'level', 'time'],
+  DAHDSR: ['time', 'time', 'time', 'time', 'level', 'time'],
+};
 
 type VoiceState = {
   name: string;
@@ -153,6 +170,14 @@ const MACRO_PARAMETERS: Record<string, SoundParameterSchema> = {
   morph: { min: 0, max: 100, modulatable: true },
 };
 
+const MATTER_PARAMETERS: Record<string, SoundParameterSchema> = {
+  geometry: { min: 0, max: 100, modulatable: false },
+  brightness: { min: 0, max: 100, modulatable: false },
+  damping: { min: 0, max: 100, modulatable: false },
+  position: { min: 0, max: 100, modulatable: false },
+  space: { min: 0, max: 100, modulatable: false },
+};
+
 const SOUND_ENGINE_REGISTRY: Record<string, SoundEngineSchema> = {
   'macro.analog': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
   'macro.waves': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
@@ -171,7 +196,12 @@ const SOUND_ENGINE_REGISTRY: Record<string, SoundEngineSchema> = {
   'macro.terrain': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
   'macro.strings': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
   'macro.chiptune': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
+  'matter': { parameters: MATTER_PARAMETERS, options: new Set() },
 };
+
+const SOUND_PARAMETER_NAMES = new Set(
+  Object.values(SOUND_ENGINE_REGISTRY).flatMap((engine) => Object.keys(engine.parameters)),
+);
 
 const MIST_PARAMETERS = new Set<FxParameter>([
   'position', 'size', 'pitch', 'density', 'texture', 'mix', 'spread', 'feedback', 'reverb',
@@ -772,22 +802,19 @@ function compileVoiceProperty(
   modSources: Map<string, ModSourceDefinition>,
 ): string {
   const key = property.toLowerCase();
-  if (['harmo', 'timbre', 'morph'].includes(key)) {
+  const value = rawValue.trim();
+  const soundParameter = voice.soundId ? SOUND_ENGINE_REGISTRY[voice.soundId]?.parameters[key] : undefined;
+  if (SOUND_PARAMETER_NAMES.has(key)) {
     if (!voice.soundId) {
       throw new LanguageError([{ line, message: `${key} requires sound to be declared first` }]);
     }
-    const parameter = SOUND_ENGINE_REGISTRY[voice.soundId]?.parameters[key];
-    if (!parameter) {
+    if (!soundParameter) {
       throw new LanguageError([{ line, message: `${key} is not available for ${voice.soundId}` }]);
     }
   }
-  const value = rawValue.trim();
 
-
-
-  if (['harmo', 'timbre', 'morph'].includes(key) && /^from\s+/i.test(value)) {
-    const parameter = voice.soundId ? SOUND_ENGINE_REGISTRY[voice.soundId]?.parameters[key] : undefined;
-    if (!parameter?.modulatable) {
+  if (soundParameter && /^from\s+/i.test(value)) {
+    if (!soundParameter.modulatable) {
       throw new LanguageError([{ line, message: `${key} is not modulatable for ${voice.soundId ?? 'this sound'}` }]);
     }
     const route = compileModulationRoute(voice, key, value, line, modSources);
@@ -873,12 +900,44 @@ function compileVoiceProperty(
     return `${voice.name}.freq(${values[0]});${sequence}${every}${piano}`;
   }
 
-  if (['harmo', 'timbre', 'morph'].includes(key)) {
-    const schema = voice.soundId ? SOUND_ENGINE_REGISTRY[voice.soundId]?.parameters[key] : undefined;
-    if (!schema) {
-      throw new LanguageError([{ line, message: `${key} is not available for ${voice.soundId ?? 'this sound'}` }]);
+  if (key === 'drive') {
+    if (voice.soundId !== 'matter') throw new LanguageError([{ line, message: 'drive is available only for sound matter' }]);
+    const split = splitEveryClause(value);
+    let spec: EnvelopeSpec | null = null;
+    const from = split.base.match(/^from\s+([A-Za-z_][A-Za-z0-9_]*)$/i);
+    if (from) {
+      const definition = sourceDefinitions.get(from[1]);
+      if (!definition) throw new LanguageError([{ line, message: `unknown source '${from[1]}'` }]);
+      if (definition.kind !== 'envelope') throw new LanguageError([{ line, message: `source '${from[1]}' is ${definition.kind}, expected envelope source for drive` }]);
+      spec = definition.spec;
+    } else {
+      spec = parseEnvelopeSpec(split.base, line);
+      if (!spec) throw new LanguageError([{ line, message: 'drive expects AD/ADR/ASR/ADSR/DAHDSR [...] or FROM an envelope SET' }]);
     }
+    const base = `${voice.name}.drive(${envelopeLiteral(spec)});`;
+    if (!split.every) return base;
+    const timing = parseEverySpec(split.every, line, sourceDefinitions);
+    const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+    return `${base} ${prefix}__driveevery(${JSON.stringify(voice.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
+  }
 
+  if (key === 'bow' || key === 'blow' || key === 'strike') {
+    if (voice.soundId !== 'matter') throw new LanguageError([{ line, message: `${key} is available only for sound matter` }]);
+    const withMatch = value.match(/^(.*?)(?:\s+with\s+(.+))?$/i)!;
+    const level = numberValue(withMatch[1].trim(), line, key);
+    if (level < 0 || level > 100) throw new LanguageError([{ line, message: `${key} expects 0..100` }]);
+    let timbre = 50;
+    const modifiers = (withMatch[2] ?? '').split(',').map((item) => item.trim()).filter(Boolean);
+    for (const modifier of modifiers) {
+      const timbreMatch = modifier.match(/^timbre\s+(.+)$/i);
+      if (!timbreMatch) throw new LanguageError([{ line, message: `${key} supports only WITH TIMBRE <0..100>` }]);
+      timbre = numberValue(timbreMatch[1], line, `${key} timbre`);
+      if (timbre < 0 || timbre > 100) throw new LanguageError([{ line, message: `${key} timbre expects 0..100` }]);
+    }
+    return `${voice.name}.${key}(${level}); ${voice.name}.${key}Timbre(${timbre});`;
+  }
+
+  if (soundParameter) {
     const split = splitEveryClause(value);
     const generative = parseGenerativeValue(split.base, line);
     const expression = generative.base;
@@ -914,9 +973,9 @@ function compileVoiceProperty(
     }
 
     case 'sound': {
-      const match = value.match(/^([a-z][a-z0-9_-]*\.[a-z][a-z0-9_-]*)(?:\s+with\s+(.+))?$/i);
+      const match = value.match(/^([a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)?)(?:\s+with\s+(.+))?$/i);
       if (!match) {
-        throw new LanguageError([{ line, message: 'sound expects engine.algorithm [with option, ...]' }]);
+        throw new LanguageError([{ line, message: 'sound expects an engine or engine.algorithm [with option, ...]' }]);
       }
       const soundId = match[1].toLowerCase();
       const schema = SOUND_ENGINE_REGISTRY[soundId];
@@ -932,7 +991,8 @@ function compileVoiceProperty(
         }
       }
       voice.soundId = soundId;
-      return `${voice.name}.model(${JSON.stringify(soundId)});\n${voice.name}.lpg(${seen.has('lpg')});`;
+      const lpg = soundId === 'matter' ? '' : `\n${voice.name}.lpg(${seen.has('lpg')});`;
+      return `${voice.name}.model(${JSON.stringify(soundId)});${lpg}`;
     }
 
     case 'note': {
@@ -1173,6 +1233,34 @@ function compileSeqProperty(
   throw new LanguageError([{ line, message: `unknown SEQ property '${property}'` }]);
 }
 
+function parseEnvelopeSpec(value: string, line: number): EnvelopeSpec | null {
+  const match = value.trim().match(/^(AD|ADR|ASR|ADSR|DAHDSR)\s*\[([^\]]*)\]$/i);
+  if (!match) return null;
+  const kind = match[1].toUpperCase() as EnvelopeKind;
+  const layout = ENVELOPE_LAYOUTS[kind];
+  const parts = match[2].split(',').map((item) => item.trim()).filter(Boolean);
+  if (parts.length !== layout.length) {
+    throw new LanguageError([{ line, message: `${kind} expects exactly ${layout.length} values, got ${parts.length}` }]);
+  }
+  const values = parts.map((part, index) => {
+    if (layout[index] === 'level') {
+      const level = numberValue(part, line, `${kind} sustain`);
+      if (level < 0 || level > 100) throw new LanguageError([{ line, message: `${kind} sustain expects 0..100` }]);
+      return level / 100;
+    }
+    const time = part.match(/^(\d+(?:\.\d+)?)\s*(ms|sec|secs|second|seconds)$/i);
+    if (!time) throw new LanguageError([{ line, message: `${kind} stage ${index + 1} expects a time with ms or sec` }]);
+    const amount = numberValue(time[1], line, `${kind} time`);
+    if (amount < 0) throw new LanguageError([{ line, message: `${kind} times cannot be negative` }]);
+    return /^ms$/i.test(time[2]) ? amount / 1000 : amount;
+  });
+  return { kind, values, display: `${kind} [${parts.join(', ')}]` };
+}
+
+function envelopeLiteral(spec: EnvelopeSpec): string {
+  return JSON.stringify(JSON.stringify({ kind: spec.kind, values: spec.values }));
+}
+
 function compileSet(
   lineText: string,
   line: number,
@@ -1192,6 +1280,14 @@ function compileSet(
   }
 
   const body = match[2].trim();
+
+  const envelope = parseEnvelopeSpec(body, line);
+  if (envelope) {
+    scalarNames.add(name);
+    sourceKinds.set(name, 'envelope');
+    sourceDefinitions.set(name, { kind: 'envelope', spec: envelope, display: envelope.display });
+    return `${name} = ${JSON.stringify(envelope.display)};`;
+  }
 
   const clockAlias = body.match(/^clock\s+([/*])\s*(\d+(?:\.\d+)?)(?:\s+with\s+(view))?$/i);
   if (clockAlias) {

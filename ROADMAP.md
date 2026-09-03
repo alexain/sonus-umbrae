@@ -365,3 +365,13 @@ Sonus Umbrae should continue to follow these principles:
 - Visual interfaces should remain compact, phosphor-inspired, keyboard-first, and deliberately non-IDE-like.
 - The runtime should reconcile changes rather than destructively restart the whole audio system.
 - The language should remain usable for ambient, generative, experimental, and modular composition without becoming pattern-centric.
+
+
+## Matter physical modeling
+
+- [x] Compile Mutable Instruments Elements DSP into a dedicated `matter.wasm`.
+- [x] Run Elements in an AudioWorklet with host-rate resampling while preserving the original 32 kHz DSP contract.
+- [x] Expose Elements as one high-level `matter` VOICE engine with mixed BOW/BLOW/STRIKE exciters and stereo output.
+- [x] Integrate Matter voices with note/scale sequencing, routing, levels, hot reload, Scheme, and musical transport stop.
+- [x] Add typed AD/ADR/ASR/ADSR/DAHDSR envelope values, SET/FROM compatibility, and Matter DRIVE triggering through the global scheduler.
+- [ ] Evaluate future audio-rate modulation inputs for selected Matter parameters without exposing the original Eurorack panel semantics.

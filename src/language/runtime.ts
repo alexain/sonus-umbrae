@@ -166,7 +166,12 @@ interface GainDefinition {
   parameters: Map<string, string>;
 }
 
+type VoiceEngineKind = 'macro' | 'matter';
+type VoiceParameterName = 'harmo' | 'timbre' | 'morph' | 'geometry' | 'brightness' | 'damping' | 'position' | 'space' | 'bow' | 'bowTimbre' | 'blow' | 'blowTimbre' | 'strike' | 'strikeTimbre';
+
 interface VoiceDefinition {
+  engine: VoiceEngineKind;
+  soundId: string;
   model: number;
   lpg: boolean;
   level: number;
@@ -174,6 +179,18 @@ interface VoiceDefinition {
   harmo: number;
   timbre: number;
   morph: number;
+  geometry: number;
+  brightness: number;
+  damping: number;
+  position: number;
+  space: number;
+  bow: number;
+  bowTimbre: number;
+  blow: number;
+  blowTimbre: number;
+  strike: number;
+  strikeTimbre: number;
+  drive: { kind: string; values: number[] } | null;
   parameters: Map<string, string>;
 }
 
@@ -276,7 +293,7 @@ interface LanguageSetCycleDefinition {
 
 interface LanguageParameterCycleDefinition {
   voice: string;
-  parameter: 'harmo' | 'timbre' | 'morph';
+  parameter: VoiceParameterName;
   expression: string;
   amount: number;
   unit: 'ms' | 'sec' | 'beat';
@@ -289,7 +306,7 @@ interface LanguageParameterCycleDefinition {
 
 interface LanguageParameterDefaultDefinition {
   voice: string;
-  parameter: 'harmo' | 'timbre' | 'morph';
+  parameter: VoiceParameterName;
   expression: string;
   line: number;
 }
@@ -755,6 +772,7 @@ export class SonusRuntime {
     const languageInlineScalars: LanguageInlineScalarDefinition[] = [];
     const languageFilterSequences: LanguageFilterSequenceDefinition[] = [];
     const languageObjectEvery = new Map<string, LanguageObjectEveryDefinition>();
+    const languageDriveEvery = new Map<string, LanguageObjectEveryDefinition>();
     const languageFxMeta = new Map<string, LanguageFxMetadata>();
     const languageFxParameterCycles: LanguageFxParameterCycleDefinition[] = [];
     const languageFxParameterDefaults: LanguageFxParameterDefaultDefinition[] = [];
@@ -943,6 +961,19 @@ export class SonusRuntime {
         continue;
       }
 
+      const driveEvery = parseLanguageDriveEvery(line);
+      if (driveEvery) {
+        languageDriveEvery.set(driveEvery.name, {
+          amount: driveEvery.amount,
+          unit: driveEvery.unit,
+          chance: driveEvery.chance,
+          drift: driveEvery.drift,
+          loose: driveEvery.loose,
+          clockSource: driveEvery.clockSource,
+        });
+        continue;
+      }
+
       const setCycle = parseLanguageSetCycleDirective(line);
       if (setCycle) {
         languageSetCycles.set(setCycle.name, {
@@ -1080,6 +1111,8 @@ export class SonusRuntime {
         if (swells.has(name) || reservedOrDuplicate(name, oscillators, gains, voices, diagnostics, lineNumber)) { if (swells.has(name)) diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue; }
 
         const definition: VoiceDefinition = {
+          engine: 'macro',
+          soundId: 'macro.analog',
           model: 1,
           lpg: false,
           level: 100,
@@ -1087,6 +1120,18 @@ export class SonusRuntime {
           harmo: 50,
           timbre: 50,
           morph: 50,
+          geometry: 45,
+          brightness: 65,
+          damping: 55,
+          position: 35,
+          space: 25,
+          bow: 0,
+          bowTimbre: 50,
+          blow: 0,
+          blowTimbre: 50,
+          strike: 0,
+          strikeTimbre: 50,
+          drive: null,
           parameters: new Map(),
         };
         voices.set(name, definition);
@@ -1340,7 +1385,7 @@ export class SonusRuntime {
     // source order. All module declarations already exist, so references between
     // modules are still independent from declaration order.
     for (const { source: line, line: lineNumber } of lines) {
-      if (parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageTuringModel(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageFxMetadata(line) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
+      if (parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageTuringModel(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageFxMetadata(line) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
 
       const oscillatorDeclaration = parseOscillatorDeclaration(line);
       if (oscillatorDeclaration) {
@@ -1478,15 +1523,13 @@ export class SonusRuntime {
           }
           const modelValue = evalValue(rawValue, lineNumber);
           if (modelValue === undefined) continue;
-          const model = parseVoiceModelValue(modelValue);
-          if (model === null) {
-            diagnostics.push({ line: lineNumber, message: 'model expects 1..24 or a known model name' });
+          const modelError = applyVoiceModelValue(voice, modelValue);
+          if (modelError) {
+            diagnostics.push({ line: lineNumber, message: modelError });
             continue;
           }
-          voice.model = model;
-          voice.parameters.set('MODEL', formatVoiceModel(model));
-          assignedValue = model;
-        } else if (parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph') {
+          assignedValue = voice.engine === 'macro' ? voice.model : voice.soundId;
+        } else if (['harmo','timbre','morph','strength','contour','body','brightness','damping','position','space'].includes(parameter)) {
           const voice = voices.get(objectName);
           if (!voice) {
             diagnostics.push({ line: lineNumber, message: `unknown Voice object: ${objectName}` });
@@ -1496,7 +1539,8 @@ export class SonusRuntime {
           if (value === undefined) continue;
           const error = percentError(value, parameter);
           if (error) { diagnostics.push({ line: lineNumber, message: error }); continue; }
-          voice[parameter] = value;
+          const voiceParameter = parameter as VoiceParameterName;
+          voice[voiceParameter] = value;
           voice.parameters.set(parameter.toUpperCase(), `${formatNumber(value)}%`);
           assignedValue = value;
         } else {
@@ -1687,18 +1731,49 @@ export class SonusRuntime {
         }
         const modelValue = evalValue(rawModel, lineNumber);
         if (modelValue === undefined) continue;
-        const model = parseVoiceModelValue(modelValue);
-        if (model === null) {
-          diagnostics.push({ line: lineNumber, message: 'model expects 1..24 or a known model name' });
+        const modelError = applyVoiceModelValue(voice, modelValue);
+        if (modelError) {
+          diagnostics.push({ line: lineNumber, message: modelError });
           continue;
         }
-        voice.model = model;
-        voice.parameters.set('MODEL', formatVoiceModel(model));
-        results.push({ message: `${name}.model ${formatVoiceModel(model)}` });
+        results.push({ message: `${name}.model ${voice.parameters.get('MODEL') ?? voice.soundId}` });
         continue;
       }
 
-      match = line.match(/^([A-Za-z_]\w*)\.(harmo|timbre|morph)\(\s*(.+)\s*\)\s*$/);
+      match = line.match(/^([A-Za-z_]\w*)\.drive\(\s*(.+)\s*\)\s*$/);
+      if (match) {
+        const [, name, rawValue] = match;
+        const voice = voices.get(name);
+        if (!voice) {
+          diagnostics.push({ line: lineNumber, message: `unknown Voice object: ${name}` });
+          continue;
+        }
+        if (voice.engine !== 'matter') {
+          diagnostics.push({ line: lineNumber, message: 'drive is available only for sound matter' });
+          continue;
+        }
+        const value = evalValue(rawValue, lineNumber);
+        if (value === undefined) continue;
+        if (typeof value !== 'string') {
+          diagnostics.push({ line: lineNumber, message: 'drive expects an envelope descriptor' });
+          continue;
+        }
+        try {
+          const parsed = JSON.parse(value);
+          if (!parsed || typeof parsed.kind !== 'string' || !Array.isArray(parsed.values)) {
+            diagnostics.push({ line: lineNumber, message: 'invalid drive envelope' });
+            continue;
+          }
+          voice.drive = { kind: parsed.kind, values: parsed.values.map(Number) };
+          voice.parameters.set('DRIVE', parsed.kind);
+          results.push({ message: `${name}.drive ${parsed.kind}` });
+        } catch {
+          diagnostics.push({ line: lineNumber, message: 'invalid drive envelope' });
+        }
+        continue;
+      }
+
+      match = line.match(/^([A-Za-z_]\w*)\.(harmo|timbre|morph|geometry|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)\(\s*(.+)\s*\)\s*$/);
       if (match) {
         const [, name, parameter, rawValue] = match;
         const voice = voices.get(name);
@@ -1713,7 +1788,8 @@ export class SonusRuntime {
           diagnostics.push({ line: lineNumber, message: error });
           continue;
         }
-        voice[parameter as 'harmo' | 'timbre' | 'morph'] = value;
+        const voiceParameter = parameter as VoiceParameterName;
+        voice[voiceParameter] = value;
         voice.parameters.set(parameter.toUpperCase(), `${formatNumber(value)}%`);
         results.push({ message: `${name}.${parameter} ${formatNumber(value)}%` });
         continue;
@@ -2480,16 +2556,40 @@ export class SonusRuntime {
         name,
         frequency: definition.frequency,
       })),
-      voices: [...voices.entries()].map(([name, definition]) => ({
-        name,
-        model: definition.model,
-        lpg: definition.lpg,
-        level: definition.level,
-        frequency: definition.frequency,
-        harmo: definition.harmo,
-        timbre: definition.timbre,
-        morph: definition.morph,
-      })),
+      matters: [...voices.entries()]
+        .filter(([, definition]) => definition.engine === 'matter')
+        .map(([name, definition]) => ({
+          name,
+          note: 69 + 12 * Math.log2(definition.frequency / 440),
+          level: definition.level,
+          drive: definition.drive,
+          bowLevel: definition.bow,
+          bowTimbre: definition.bowTimbre,
+          blowLevel: definition.blow,
+          blowMeta: 50,
+          blowTimbre: definition.blowTimbre,
+          strikeLevel: definition.strike,
+          strikeMeta: 50,
+          strikeTimbre: definition.strikeTimbre,
+          signature: 0,
+          geometry: definition.geometry,
+          brightness: definition.brightness,
+          damping: definition.damping,
+          position: definition.position,
+          space: definition.space,
+        })),
+      voices: [...voices.entries()]
+        .filter(([, definition]) => definition.engine === 'macro')
+        .map(([name, definition]) => ({
+          name,
+          model: definition.model,
+          lpg: definition.lpg,
+          level: definition.level,
+          frequency: definition.frequency,
+          harmo: definition.harmo,
+          timbre: definition.timbre,
+          morph: definition.morph,
+        })),
       swells: [...swells.entries()].map(([name, definition]) => ({
         name,
         frequency: definition.frequency,
@@ -2710,7 +2810,7 @@ export class SonusRuntime {
       this.audio.applyProgram(program);
     if (!hotReload) {
       for (const [name, voice] of voices) {
-        if (voice.lpg) this.audio.triggerVoice(name);
+        if (voice.lpg || (voice.engine === 'matter' && !languageDriveEvery.has(name))) this.audio.triggerVoice(name);
       }
     }
 
@@ -2756,8 +2856,8 @@ export class SonusRuntime {
 
         if (cycle.ownerKind === 'voice') {
           const voice = voices.get(cycle.owner);
-          if (!voice || !['harmo', 'timbre', 'morph'].includes(cycle.parameter)) return;
-          const parameter = cycle.parameter as 'harmo' | 'timbre' | 'morph';
+          if (!voice) return;
+          const parameter = cycle.parameter as VoiceParameterName;
           voice[parameter] = value;
           this.audio.setVoiceParameter(cycle.owner, parameter, value);
           updateInlineScalar('voice', cycle.owner, parameter, value);
@@ -3279,13 +3379,13 @@ export class SonusRuntime {
         voice.frequency = frequency;
         this.audio.setVoiceParameter(name, 'freq', frequency);
         updateInlinePiano('voice', name, frequency);
-        if (voice.lpg) this.audio.triggerVoice(name);
+        if (voice.lpg || (voice.engine === 'matter' && !languageDriveEvery.has(name))) this.audio.triggerVoice(name);
 
         const retrig = sequence
           ? sequenceFavorForValue(frequency, sequence.favor, 'frequency')
               .find((entry) => entry.operator === 'retrig')
           : undefined;
-        if (voice.lpg && retrig && retrig.amount > 1) {
+        if ((voice.lpg || (voice.engine === 'matter' && !languageDriveEvery.has(name))) && retrig && retrig.amount > 1) {
           const count = Math.round(retrig.amount);
           const stepMs = cycle.unit === 'beat'
             ? Math.max(1, 60000 / Math.max(1, this.audio.getClockStatus().bpm) * cycle.amount)
@@ -3314,6 +3414,24 @@ export class SonusRuntime {
       });
     }
 
+    for (const [name, timing] of languageDriveEvery) {
+      const voice = voices.get(name);
+      if (!voice || voice.engine !== 'matter') continue;
+      const fireDrive = (): void => {
+        if (timing.chance < 100 && random() * 100 >= timing.chance) return;
+        this.audio.triggerVoice(name);
+      };
+      if (timing.unit === 'beat') {
+        this.scheduler.addBeatJob(`drive:${name}`, timing.amount, fireDrive, timing.loose, timing.clockSource);
+      } else {
+        const baseMs = timing.unit === 'sec' ? timing.amount * 1000 : timing.amount;
+        this.scheduler.addWallJob(`drive:${name}`, baseMs, fireDrive, () => {
+          const looseRatio = timing.loose ? 0.94 + random() * 0.12 : 1;
+          return baseMs * looseRatio;
+        });
+      }
+    }
+
     this.scheduler.start();
 
       for (const handler of whenHandlers) {
@@ -3329,7 +3447,7 @@ export class SonusRuntime {
             const lineNumber = handler.line + statement.line - 1;
             const line = statement.source;
 
-            let match = line.match(/^([A-Za-z_]\w*)\.(freq|model|harmo|timbre|morph)\(\s*(.+)\s*\)$/);
+            let match = line.match(/^([A-Za-z_]\w*)\.(freq|model|harmo|timbre|morph|geometry|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)\(\s*(.+)\s*\)$/);
             if (match) {
               const [, name, parameter, rawValue] = match;
               const voice = voices.get(name);
@@ -3347,10 +3465,10 @@ export class SonusRuntime {
                 continue;
               } else {
                 if (percentError(value, parameter)) continue;
-                const modulationParameter = parameter as 'harmo' | 'timbre' | 'morph';
+                const modulationParameter = parameter as VoiceParameterName;
                 voice[modulationParameter] = value;
               }
-              this.audio.setVoiceParameter(name, parameter as 'freq' | 'harmo' | 'timbre' | 'morph', value);
+              this.audio.setVoiceParameter(name, parameter as 'freq' | VoiceParameterName, value);
               continue;
             }
 
@@ -3873,7 +3991,7 @@ function parseLanguageParameterCycleDirective(
   lineNumber: number,
 ): LanguageParameterCycleDefinition | null {
   const match = line.match(
-    /^__paramcycle\("([A-Za-z_]\w*)","(harmo|timbre|morph)","((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/,
+    /^__paramcycle\("([A-Za-z_]\w*)","(harmo|timbre|morph|geometry|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)","((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/,
   );
   if (!match) return null;
 
@@ -3903,7 +4021,7 @@ function parseLanguageParameterDefaultDirective(
   lineNumber: number,
 ): LanguageParameterDefaultDefinition | null {
   const match = line.match(
-    /^__paramdefault\("([A-Za-z_]\w*)","(harmo|timbre|morph)","((?:[^"\\]|\\.)*)"\)$/,
+    /^__paramdefault\("([A-Za-z_]\w*)","(harmo|timbre|morph|geometry|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)","((?:[^"\\]|\\.)*)"\)$/,
   );
   if (!match) return null;
 
@@ -3939,6 +4057,21 @@ function parseLanguageObjectEveryDirective(
     clockSource: match[7],
   };
 }
+
+function parseLanguageDriveEvery(line: string): ({ name: string } & LanguageObjectEveryDefinition) | null {
+  const match = line.match(/^__driveevery\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/);
+  if (!match) return null;
+  return {
+    name: match[1],
+    amount: Number(match[2]),
+    unit: match[3] as 'ms' | 'sec' | 'beat',
+    chance: Number(match[4]),
+    drift: match[5] === 'true',
+    loose: match[6] === 'true',
+    clockSource: match[7],
+  };
+}
+
 
 function parseLanguageSetCycleDirective(line: string): ({ name: string; amount: number; unit: LanguageSetCycleDefinition['unit']; chance: number; drift: boolean; loose: boolean }) | null {
   const match = line.match(/^__setcycle\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false)\)$/);
@@ -4529,11 +4662,7 @@ function applyVoiceCall(
     case 'model': {
       const value = evaluate(call.argument);
       if (value === undefined) return null;
-      const model = parseVoiceModelValue(value);
-      if (model === null) return 'model expects 1..24 or a known model name';
-      voice.model = model;
-      voice.parameters.set('MODEL', formatVoiceModel(model));
-      return null;
+      return applyVoiceModelValue(voice, value);
     }
     case 'freq': {
       const value = evaluate(call.argument);
@@ -4547,15 +4676,37 @@ function applyVoiceCall(
     }
     case 'harmo':
     case 'timbre':
-    case 'morph': {
+    case 'morph':
+    case 'geometry':
+    case 'brightness':
+    case 'damping':
+    case 'position':
+    case 'space':
+    case 'bow':
+    case 'bowTimbre':
+    case 'blow':
+    case 'blowTimbre':
+    case 'strike':
+    case 'strikeTimbre': {
       const value = evaluate(call.argument);
       if (value === undefined) return null;
       if (typeof value !== 'number') return `${call.name} expects one numeric expression`;
       const error = percentError(value, call.name);
       if (error) return error;
-      voice[call.name] = value;
+      const parameter = call.name as VoiceParameterName;
+      voice[parameter] = value;
       voice.parameters.set(call.name.toUpperCase(), `${formatNumber(value)}%`);
       return null;
+    }
+    case 'drive': {
+      if (typeof call.argument !== 'string') return 'drive expects an envelope descriptor';
+      try {
+        const parsed = JSON.parse(call.argument);
+        if (!parsed || typeof parsed.kind !== 'string' || !Array.isArray(parsed.values)) return 'invalid drive envelope';
+        voice.drive = { kind: parsed.kind, values: parsed.values.map(Number) };
+        voice.parameters.set('DRIVE', parsed.kind);
+        return null;
+      } catch { return 'invalid drive envelope'; }
     }
     case 'view':
       if (call.argument.length > 0) return 'view does not accept parameters yet';
@@ -4564,6 +4715,31 @@ function applyVoiceCall(
     default:
       return `unknown Voice method: ${call.name}`;
   }
+}
+
+function applyVoiceModelValue(voice: VoiceDefinition, value: ScalarValue): string | null {
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'matter') {
+      voice.engine = 'matter';
+      voice.soundId = normalized;
+      voice.lpg = false;
+      voice.parameters.set('MODEL', normalized.toUpperCase());
+      return null;
+    }
+  }
+  const model = parseVoiceModelValue(value);
+  if (model === null) return 'model expects a macro.* or matter sound';
+  voice.engine = 'macro';
+  voice.model = model;
+  voice.soundId = formatVoiceModelId(model);
+  voice.parameters.set('MODEL', formatVoiceModel(model));
+  return null;
+}
+
+function formatVoiceModelId(model: number): string {
+  for (const [algorithm, id] of MACRO_MODEL_IDS) if (id === model) return `macro.${algorithm}`;
+  return `internal.${model}`;
 }
 
 function parseVoiceModelValue(value: ScalarValue): number | null {

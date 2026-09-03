@@ -10,7 +10,7 @@ For the web application:
 - Node.js 24 LTS
 - npm
 
-For building the current WebAssembly DSP engines (`VOICE`, `MOD`, and `FX`):
+For building the current WebAssembly DSP engines (`VOICE`, `MOD`, `FX`, and the experimental `Matter` backend):
 
 - Emscripten SDK (`emsdk`)
 - a C/C++ toolchain suitable for Emscripten
@@ -100,11 +100,12 @@ The generated WASM artifacts are written to:
 public/dsp/voice.wasm
 public/dsp/swell.wasm
 public/dsp/mist.wasm
+public/dsp/matter.wasm
 ```
 
 `voice.wasm` provides the current macro-oscillator `VOICE` backend, `swell.wasm`
 provides the four-output modulation backend used by `MOD`, and `mist.wasm`
-provides the current stereo `FX` backend.
+provides the current stereo `FX` backend. `matter.wasm` is the physical-modeling backend built from the original Mutable Instruments Elements DSP and exposed publicly through the `matter.*` VOICE family.
 
 Generated WASM files are ignored by Git and should be rebuilt locally.
 
@@ -236,3 +237,16 @@ The SuperParasites Emscripten build therefore includes that directory directly.
 Do not compile the legacy ARM CMSIS-DSP sources for the WebAssembly backend. They contain Cortex-M inline assembly and register constraints that cannot target `wasm32`.
 
 SuperParasites' phase vocoder already uses `stmlib/fft/shy_fft.h`, a portable C++ real FFT implementation. The Mist WASM build therefore compiles the SuperParasites DSP and required `stmlib` C++ sources only, without CMSIS `CommonTables` or `TransformFunctions`.
+
+## Matter / Elements WebAssembly backend
+
+`matter.wasm` compiles the original Mutable Instruments Elements DSP into a separate WebAssembly module. Elements retains its native 32 kHz, 16-frame processing contract; `public/worklets/matter-processor.js` performs host-rate linear resampling inside the AudioWorklet so the upstream DSP itself remains unchanged.
+
+The normal DSP build is sufficient:
+
+```bash
+npm run dsp:setup
+npm run dsp:build
+```
+
+The runtime loads the module automatically when a program declares `SOUND matter`. Matter DRIVE envelopes run in the AudioWorklet while all explicit `EVERY` trigger events remain registered on the runtime's single global scheduler. No separate Matter test page is part of the application.

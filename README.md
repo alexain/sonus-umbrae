@@ -18,6 +18,7 @@ runtime, DSP registry, and UI are still evolving.
 - Web Audio engine with AudioWorklet processing.
 - WebAssembly DSP compiled from C/C++ with Emscripten.
 - `VOICE` macro-oscillator family backed by Mutable Instruments Plaits DSP.
+- `VOICE` `matter.*` physical-modeling family backed by Mutable Instruments Elements DSP.
 - `MOD` four-output modulation source backed by Mutable Instruments Tides 2018 DSP.
 - `FX` stereo effects backed by the current Mist / SuperParasites integration.
 - Per-object and per-route level control.
@@ -69,6 +70,33 @@ MAIN level 80
 ```
 
 `RUN` starts the program when stopped and performs a next-beat hot reload when it is already live. `RUN STOP` / `Cmd+Backspace` (`Ctrl+Backspace` on Windows/Linux) stops clocks, schedulers, voices and modulators while leaving downstream effect tails alive. `PANIC` remains the immediate full cut.
+
+Physical-modeling voices use the same `VOICE` and `PLAY` grammar as macro voices.
+Matter wraps the original Elements architecture as one stereo physical-modeling
+engine with three exciters mixed into a shared resonator:
+
+```text
+SET breath: ASR [800 ms, 75, 2 sec]
+
+VOICE wood:
+    sound matter
+    note [C3 Eb3 G3 Bb3] with walk every 1 beat
+    bow 25 with timbre 55
+    blow 15 with timbre 60
+    strike 70 with timbre 45
+    drive from breath
+    geometry 64
+    damping 72
+    space 35
+
+PLAY wood through MAIN
+```
+
+Envelope values are typed language values (`AD`, `ADR`, `ASR`, `ADSR`,
+`DAHDSR`). `DRIVE` uses the VOICE note events as its trigger by default; adding
+`EVERY ... WITH ...` gives DRIVE an explicit trigger schedule on the global
+runtime scheduler. Elements remains at its native 32 kHz internally and the
+AudioWorklet resamples to the browser audio-context rate.
 
 A generative Turing source can be shared by voices independently of their read
 rate:

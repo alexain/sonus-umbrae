@@ -51,6 +51,11 @@ if [[ ! -f "$VENDOR/tides2/poly_slope_generator.h" ]]; then
 fi
 
 
+if [[ ! -f "$VENDOR/elements/dsp/part.cc" || ! -f "$VENDOR/elements/resources.cc" ]]; then
+  echo "Elements DSP sources are incomplete: $VENDOR/elements is missing" >&2
+  exit 1
+fi
+
 if [[ ! -f "$VENDOR/clouds/dsp/granular_processor.cc" ]]; then
   echo "Clouds DSP sources are incomplete: $VENDOR/clouds is missing" >&2
   exit 1
