@@ -1,635 +1,870 @@
 # Sonus Umbrae language notes
 
-> **Status:** pre-alpha. This is a working reference for the language as currently implemented, not a stability guarantee.
+> **Status:** 0.1.0 development reference. The language is still experimental and may evolve.
 
-Sonus Umbrae treats the source document as the desired state of a live modular audio system. The runtime evaluates the document and reconciles the running graph with that state.
+Sonus Umbrae treats the source document as the desired state of a live modular
+audio system. The runtime compiles the high-level language, reconciles the
+running graph, and keeps the audio system live while the source changes.
 
-Editing a declaration, parameter, route or view therefore adds, updates or removes the corresponding runtime object instead of permanently executing a sequence of commands.
+The source code is the patch: sound generators, modulators, effects, timing,
+routing, and views are all declared textually.
 
-## Evaluation
+## Evaluation and transport
 
-In the live editor:
+`Cmd+Enter` / `Ctrl+Enter` recompiles and starts the current live program.
+
+`RUN` starts the complete program transport.
+
+`RUN STOP` stops the complete live program, including:
+
+- voice scheduling;
+- master-clock transport;
+- parameter reevaluation jobs;
+- beat-based jobs;
+- local and global `MOD` objects.
+
+The current shortcut for `RUN STOP` on macOS is:
 
 ```text
-Enter
+Cmd+Backspace
 ```
 
-inserts a new line and evaluates the current source.
+The master clock does not start implicitly. A program that depends on beat
+timing must declare a clock explicitly.
 
 ```text
-Shift+Enter
+CLOCK set 120 bpm
 ```
 
-inserts a line without evaluation.
+When the source contains errors, the invalid desired state is not applied and
+the previous valid graph remains active.
+
+Comments use:
 
 ```text
-Cmd+Enter
+// comment
 ```
 
-forces evaluation of the current source without inserting a line.
+## Top-level statements
 
-When the document contains errors, the invalid desired state is not applied and the previous valid audio graph continues to run.
-
-Comments currently begin with `#`.
-
-## Built-in objects
-
-### Audio
-
-`Audio` is a built-in singleton representing the system audio interface / master audio endpoint.
-
-Send audio to the master input with:
+The current high-level language uses these main statement families:
 
 ```text
-a.out -> Audio.out
+SET
+CLOCK
+VOICE
+MOD
+FX
+PLAY
+MAIN
 ```
 
-`Audio` cannot be reassigned.
+`VOICE`, `MOD`, and `FX` declarations use colon-delimited blocks.
 
-The master output can be observed with:
+Example:
 
 ```text
-Audio.view()
+CLOCK set 120 bpm
+
+VOICE lead:
+    sound macro.fm
+    note C4
+
+PLAY lead through MAIN
 ```
 
-which is currently equivalent to viewing the main output signal.
+## SET
 
-Future versions are expected to expose multiple physical inputs and outputs through the same object model.
+`SET` creates reusable typed values.
 
-### Clock
-
-`Clock` is the built-in master timing source.
-
-Set the master tempo:
+Scalar:
 
 ```text
-Clock.bpm(120)
+SET amount: 50
 ```
 
-A BPM of zero stops the declared master clock:
+Time:
 
 ```text
-Clock.bpm(0)
+SET slow: 4 sec
+SET pulse: 2 beats
 ```
 
-The master trigger output is:
+Frequency:
 
 ```text
-Clock.out
+SET tuning: 220 hz
 ```
 
-Observe it with:
+Note:
 
 ```text
-Clock.view()
+SET root: C3
 ```
 
-Derived clock sources are created with `rate()`:
+Note list:
 
 ```text
-half = Clock.rate("/2")
-fast = Clock.rate("*2")
+SET notes: [C3 Eb3 G3 Bb3]
 ```
 
-These are synchronized trigger sources rather than independent master clocks.
-
-The command layer also provides temporary transport overrides:
+Scale:
 
 ```text
-:clock stop
-:clock start
+SET harmony: C minor
 ```
 
-## Voice
-
-`Voice()` is currently the first full synthesis engine. Its DSP implementation is based on the MIT-licensed Mutable Instruments Plaits firmware, compiled to WebAssembly.
-
-Create a voice:
+A typed time variable can be reused by `every`:
 
 ```text
-a = Voice()
+SET movement: 2 beats
+
+VOICE lead:
+    every movement
+    sound macro.fm
+    morph rnd(20,80)
 ```
 
-Model 1 is the default. Select a model numerically:
+## CLOCK
+
+The master clock is explicit:
 
 ```text
-a.model(2)
+CLOCK set 120 bpm
 ```
 
-or, for supported aliases, by name:
+A program using beat-based `every` statements remains stopped with respect to
+beat timing until a master clock is declared and the program transport is
+running.
+
+The clock value can also be dynamic:
 
 ```text
-a.model("analog")
+CLOCK set rnd(110,120) bpm
 ```
 
-Current primary parameters:
+The timing system is shared by all objects. Wall-clock timing and beat timing
+are handled by the same runtime scheduler.
+
+## VOICE
+
+A voice is declared with:
 
 ```text
-a.freq(220)
-a.harmo(40)
-a.timbre(70)
-a.morph(25)
+VOICE lead:
+    sound macro.fm
 ```
 
-Calls can be chained on creation:
+`VOICE` uses a public engine registry. Current macro-oscillator models are
+exposed under `macro.*` names rather than upstream hardware names.
+
+Examples include:
 
 ```text
-a = Voice().model(2).freq(220).harmo(40).timbre(70).morph(25)
+sound macro.analog
+sound macro.waves
+sound macro.fm
 ```
 
-This is intended to be equivalent to writing the calls separately.
+Only parameters supported by the selected engine are accepted.
 
-### Voice outputs
-
-The current voice exposes two named signal outputs:
+Typical engine parameters include:
 
 ```text
-a.out
-a.aux
+harmo 50
+timbre 50
+morph 50
 ```
 
-For example:
+### LPG
+
+Compatible macro engines can enable the integrated low-pass gate:
 
 ```text
-a.out(70) -> Audio.out
-a.aux(20) -> Audio.out
+VOICE lead:
+    sound macro.fm with lpg
 ```
 
-### Trigger input
+When LPG is active, note events and sequence advances trigger the integrated
+envelope/gate behavior.
 
-A trigger source can be routed to the voice trigger input:
+### Voice level
+
+The intrinsic output level of a voice is:
 
 ```text
-Clock.out -> a.trig
+VOICE lead:
+    sound macro.fm
+    level 80
 ```
 
-## Routing
+`level` belongs to the voice itself and affects all routes sourced from that
+voice.
 
-Routing uses `->`:
+## Notes, frequency, and scales
+
+A voice can use a fixed note:
 
 ```text
-source.port -> destination.port
+note C4
+```
+
+A fixed frequency:
+
+```text
+freq 220
+```
+
+A list:
+
+```text
+note [C3 G3 Bb3]
+```
+
+Selection modifiers:
+
+```text
+note [C3 G3 Bb3] with random
+note [C3 G3 Bb3] with walk
+note [C3 G3 Bb3] with shuffle
+note [C3 G3 Bb3] with reverse
+```
+
+Scales are written as:
+
+```text
+scale C minor
+```
+
+The root note is normalized automatically to uppercase.
+
+A range and sequencing mode can be combined:
+
+```text
+scale C minor with range C2 C5, walk
+```
+
+## every
+
+`every` is the public temporal reevaluation syntax.
+
+Per-property timing:
+
+```text
+morph rnd(30,70) every 1 sec
+```
+
+```text
+scale C minor with walk every 2 beats
+```
+
+Timing modifiers belong to the `every` clause:
+
+```text
+morph rnd(20,80) every 3 sec with drift
+```
+
+```text
+scale C minor with random every 2 beats with loose, chance 80
+```
+
+The canonical order is:
+
+```text
+property value [with property modifiers] every time [with timing modifiers]
+```
+
+`every` stays at the end of the property expression.
+
+### Object-level every
+
+A `VOICE` or `FX` can declare a fallback cadence:
+
+```text
+VOICE lead:
+    every 2 sec
+    sound macro.fm
+    morph rnd(20,80)
+    timbre rnd(30,70)
+```
+
+All dynamic properties without their own `every` inherit the object-level
+cadence.
+
+An explicit property cadence overrides the object cadence:
+
+```text
+VOICE lead:
+    every 4 sec
+    sound macro.fm
+    morph rnd(20,80)
+    timbre rnd(30,70) every 1 sec
+```
+
+Precedence:
+
+```text
+property every
+    >
+object every
+    >
+no periodic reevaluation
+```
+
+`every` can also use a typed `SET` time variable:
+
+```text
+SET movement: 3 sec
+
+VOICE lead:
+    every movement
+    sound macro.fm
+    morph rnd(20,80)
+```
+
+All jobs remain synchronized to the shared runtime scheduler.
+
+## MOD
+
+`MOD` is the current four-output modulation object.
+
+Top-level declaration:
+
+```text
+MOD motion:
+    rate 4 sec
+    shape sine
+```
+
+A module view can be requested directly:
+
+```text
+MOD motion with view:
+    rate 4 sec
+```
+
+The four outputs are named:
+
+```text
+motion.a
+motion.b
+motion.c
+motion.d
+```
+
+Current parameters include:
+
+```text
+rate 4 sec
+slope 50
+shape sine
+smooth 50
+shift 50
+relation phase
+range control
+```
+
+For phase-related output relationships:
+
+```text
+relation phase with shift 100
+```
+
+The four outputs remain synchronized and share the same underlying modulation
+object.
+
+### Local MOD inside VOICE
+
+A `MOD` can be local to a voice:
+
+```text
+VOICE lead:
+    sound macro.fm
+
+    MOD motion:
+        rate 4 sec
+        shape sine
+
+    morph from motion.a with depth 40
+```
+
+The local name is scoped to the containing object. Internally the runtime uses
+a generated identifier, but that identifier is not part of the public language.
+
+Multiple voice parameters can reuse different outputs from the same local
+modulator:
+
+```text
+VOICE lead:
+    sound macro.fm
+
+    MOD motion:
+        rate 4 sec
+        relation phase with shift 100
+
+    morph from motion.a with depth 30
+    timbre from motion.b with depth 20
+    harmo from motion.c with depth 15
+```
+
+`depth` is expressed in the logical -100..100 modulation range.
+
+## FX
+
+Effects are declared only at top level:
+
+```text
+FX grain:
+    model mist.grain
+```
+
+`FX` is not currently allowed inside a `VOICE`.
+
+A module view is requested with:
+
+```text
+FX grain with view:
+    model mist.grain
+```
+
+Current Mist-family models:
+
+```text
+mist.grain
+mist.stretch
+mist.delay
+mist.spectral
+mist.reverb
+mist.resonator
+mist.repeat
+mist.smear
+```
+
+These are Sonus Umbrae public model names mapped onto the current Mist /
+SuperParasites backend.
+
+Typical parameters include:
+
+```text
+position 50
+size 50
+pitch 0
+density 50
+texture 50
+mix 100
+spread 50
+feedback 0
+reverb 0
+freeze off
+reverse off
+```
+
+### Mix
+
+`mix` is the effect dry/wet control:
+
+```text
+mix 0
+```
+
+fully dry.
+
+```text
+mix 100
+```
+
+fully wet.
+
+Intermediate values use the host-side equal-power crossfade.
+
+### Dynamic FX parameters
+
+FX parameters support `rnd()` and `every`:
+
+```text
+FX grain:
+    model mist.grain
+    position rnd(20,80) every 4 sec
+    density rnd(30,70) every 2 beats
+```
+
+An object-level fallback is also supported:
+
+```text
+FX grain:
+    model mist.grain
+    every 4 sec
+    position rnd(20,80)
+    density rnd(30,70)
+```
+
+### Musical pitch on Mist models
+
+Compatible Mist models accept musical pitch syntax.
+
+Fixed transposition by note:
+
+```text
+note C4
+```
+
+C4 is the current zero-semitone reference.
+
+Examples:
+
+```text
+note C3
+```
+
+maps to approximately -12 semitones.
+
+```text
+note C5
+```
+
+maps to approximately +12 semitones.
+
+Sequenced pitch:
+
+```text
+note [C3 G3 Bb3] with random every 1 beat
+```
+
+Scale sequencing:
+
+```text
+scale C minor with range C3 C5, walk every 2 beats
+```
+
+Frequency syntax is also accepted where musical pitch is supported:
+
+```text
+freq [130.81 196 261.63] with shuffle every 1 sec
+```
+
+### Local MOD inside FX
+
+`MOD` can also be scoped to an effect:
+
+```text
+FX grain:
+    model mist.grain
+
+    MOD motion:
+        rate 4 sec
+        shape sine
+
+    position from motion.a with depth 30
+    density from motion.b with depth 20
+```
+
+The current Mist integration receives this modulation at control rate rather
+than through dedicated audio-rate CV inputs.
+
+## PLAY
+
+Audio routing uses `PLAY`.
+
+Basic route:
+
+```text
+PLAY lead through MAIN
+```
+
+The source output defaults to the primary output of the object.
+
+For a voice, explicit outputs are:
+
+```text
+lead.out
+lead.aux
 ```
 
 Example:
 
 ```text
-a.out -> Audio.out
+PLAY lead.out through MAIN
 ```
 
-### Connection attenuation / inversion
+### Route level
 
-An optional amount on the source endpoint belongs to that specific connection:
+`at` sets the gain of the route leaving the object immediately before it:
 
 ```text
-a.out(50) -> Audio.out
+PLAY lead at 70 through MAIN
 ```
 
-This applies a gain of 50% to that connection.
+This does not change `VOICE level`.
 
-Negative values invert the signal:
+A chain can contain independent edge levels:
 
 ```text
-source.out(-50) -> destination.parameter
+PLAY lead at 70 through grain at 50 then MAIN
 ```
 
-This acts like an attenuverter at 50% with inverted polarity.
-
-The current intended connection range is `-100..100`.
-
-## Signal semantics
-
-Sonus Umbrae intentionally does not expose separate routing syntax for audio and CV. They are both signal streams and can be patched freely, including at audio rate.
-
-Internally, ports carry semantic metadata used by diagnostics, inspection and visualization. Current categories include:
-
-- `SIGNAL`
-- `GATE`
-- `TRIGGER`
-
-This metadata does not normally change the syntax used by the performer.
-
-Future modules with numbered hardware outputs should still receive stable textual port names rather than special indexing syntax. For example, a four-output module may expose:
+Semantics:
 
 ```text
-b.out1
-b.out2
-b.out3
-b.out4
+lead  -> grain   70%
+grain -> MAIN    50%
 ```
 
-This preserves the general `object.port` grammar throughout the language.
+### then
+
+`then` creates serial routing:
+
+```text
+PLAY lead through grain then MAIN
+```
+
+Longer chains are valid:
+
+```text
+PLAY lead through grain then delay then reverb then MAIN
+```
+
+### Multiline PLAY
+
+Long routing chains can be written on multiple physical lines:
+
+```text
+PLAY lead at 70
+    through grain at 50
+    then reverb at 80
+    then MAIN
+```
+
+Indented `through` / `then` lines are continuations of the original `PLAY`
+statement.
+
+## Stereo routing
+
+Stereo effects use `.L` and `.R` channel selectors.
+
+The suffix describes the channel; whether it is an input or output is inferred
+from its position in the `PLAY` route.
+
+Input selection:
+
+```text
+PLAY lead through grain.L
+```
+
+Output selection:
+
+```text
+PLAY grain.L through MAIN.L
+```
+
+Lowercase `.l` and `.r` are normalized to `.L` and `.R`.
+
+### Mono to stereo normalization
+
+A mono source sent to a stereo FX without a channel suffix is duplicated to
+both FX input channels:
+
+```text
+PLAY lead through grain
+```
+
+Conceptually:
+
+```text
+lead.out -> grain.L
+lead.out -> grain.R
+```
+
+### Stereo FX to MAIN
+
+A stereo effect sent to `MAIN` without channel suffixes preserves stereo:
+
+```text
+PLAY grain through MAIN
+```
+
+Conceptually:
+
+```text
+grain.L -> MAIN.L
+grain.R -> MAIN.R
+```
+
+Explicit routing is still available:
+
+```text
+PLAY lead.out through grain.L
+PLAY lead.aux through grain.R
+
+PLAY grain.L through MAIN.L
+PLAY grain.R through MAIN.R
+```
+
+## MAIN
+
+The final main-bus level is a separate top-level command:
+
+```text
+MAIN level 70
+```
+
+This is distinct from both:
+
+```text
+VOICE lead:
+    level 80
+```
+
+and:
+
+```text
+PLAY lead at 50 through MAIN
+```
+
+The three gain stages are therefore:
+
+```text
+VOICE level
+    ->
+PLAY route at
+    ->
+MAIN level
+```
 
 ## Views
 
-`view()` creates a live visual observer without changing the underlying signal.
+`with view` requests an object-level visualization.
 
-The default visualization is selected from the semantic type of the observed value.
-
-### Signal view
+Examples:
 
 ```text
-a.out.view()
+VOICE lead with view:
+    sound macro.fm
 ```
-
-Signal outputs use an oscilloscope-style waveform view by default.
-
-For objects with a primary output, this shorthand is also supported where applicable:
 
 ```text
-a.view()
+MOD motion with view:
+    rate 4 sec
 ```
-
-### Trigger view
 
 ```text
-Clock.view()
+FX grain with view:
+    model mist.grain
 ```
 
-Trigger outputs use an event-particle timeline rather than a conventional oscilloscope. Each emitted trigger creates an independent phosphor-like particle moving across the timeline.
+VOICE views show the source object's output at the voice's own level.
 
-At a stable clock rate, the default time window is designed to contain roughly four events. If the clock rate changes, particles already emitted keep the velocity determined when they were created while new particles use the new timing.
+MOD views use the four-output modulation visualization.
 
-### Parameter view
+FX/Mist views are stereo.
 
-Parameters can also be monitored:
+The automatic main audio-out scope represents the signal after routing and
+`MAIN level`.
 
-```text
-a.timbre.view()
-```
+## Scheme
 
-The live panel shows the parameter value and its base value. This distinction will become more important as continuous modulation routing is expanded.
-
-## Scheme view
-
-Press `Tab` or enter command mode and run:
+Press `Tab` or use command mode:
 
 ```text
 :scheme
 ```
 
-Scheme is a read-only topological visualization of the current runtime graph. It is not a graphical patch editor.
+Scheme is a read-only topological view of the current runtime. It is not a
+graphical patch editor.
 
-The graph flows primarily from left to right and shows objects, explicit parameter values and routing connections. Signal views belonging to a module are embedded inside that module's Scheme box rather than rendered as separate graph nodes.
-
-Parameter views do not create additional Scheme elements because parameters are already represented directly in the module box.
-
-Press `Esc` or `Tab` to return to live coding.
+Declared parameter values are shown inside the owning module. Optional views
+can also appear in the Scheme representation.
 
 ## Command mode
 
-Press `Esc` from the live editor to open the command line at the bottom of the screen.
+Press `Esc` from the editor to enter command mode.
 
-Current commands include:
+Current useful commands include:
 
 ```text
+:scheme
 :config
 :help
-:scheme
 :save
 :load
 :new
 :clear
+:run
+:run stop
 :start
 :stop
 :test 440
 :test stop
-:clock start
-:clock stop
 :panic
 ```
 
-### Save and load
+`:start` controls the Web Audio engine lifecycle.
 
-`:save` stores the current source as a plain-text `.sum` file using the browser/system file workflow.
+`:run` compiles and starts the current live program.
 
-`:load` loads a source file into the editor. Session files are intentionally plain text and suitable for source control.
+`:run stop` stops the program transport without shutting down the Web Audio
+engine itself.
 
-## Planned language concepts
+## Save and load
 
-The following concepts are being explored but should not yet be treated as implemented syntax:
+`:save` writes the current source to a plain-text `.sum` file.
 
-- conditional statements such as `if`;
-- reactive conditions such as `when`;
-- loops and reusable environments;
-- additional parameter modulation semantics;
-- more synthesis and processing engines;
-- additional signal views such as spectra;
-- multi-channel `Audio` I/O;
-- richer clock generation, probability, division and multiplication.
+`:load` loads a `.sum` file into the editor.
 
-The goal is to keep these features compatible with the same declarative, live-reconciled object and routing model.
+Session files remain text-based and suitable for version control.
 
+## Expression and generative helpers
 
-## Generative functions
+The language already uses small expression helpers in dynamic parameter
+contexts.
 
-Sonus Umbrae includes small numerical/generative helpers that can be used anywhere an expression is accepted.
+Examples:
 
 ```text
-x = rnd(10, 50);
-y = choose(20, 40, 60, 80);
-gate = coin(35);
-
-wrapped = wrap(x, 0, 100);
-stepped = quantize(x, 5);
+rnd(10,50)
 ```
 
-Stateful functions retain state for their specific call-site until the document is evaluated again:
+and dynamic parameters such as:
 
 ```text
-when (Clock.out) {
-    a.timbre(walk(20, 80, 5));
-    a.morph(chaos("logistic", 10, 90));
-}
+morph rnd(30,70) every 1 sec
 ```
 
-Available chaos engines currently include `logistic`, `cubic`, and `henon`.
+The broader generative/event language is still evolving. Syntax documented in
+older prototypes such as low-level object construction, direct `->` patching,
+or `when (...) { ... }` should not be treated as part of the current 0.1.0
+high-level language unless it is reintroduced explicitly.
 
-`slew(value, amount)` smooths changes at a call-site. `amount` is 0..100, where larger values respond more slowly.
+## Current implementation boundary
 
-`seed(n);` sets the deterministic random seed used by `rnd`, `choose`, `coin`, `prob`, `walk`, and chaos initialization. Reusing the same seed makes generative behavior reproducible after evaluation.
-
-
-## Swell
-
-`Swell()` is Sonus Umbrae's modulation/function-generator module based on the MIT-licensed DSP from Mutable Instruments Tides 2018.
+The public 0.1.0 language intentionally hides the current upstream DSP module
+names behind Sonus Umbrae engine families:
 
 ```text
-mod = Swell()
-    .freq(0.25)
-    .slope(50)
-    .shape(50)
-    .smooth(50)
-    .shift(50);
+VOICE -> macro.*
+MOD   -> current four-output modulation backend
+FX    -> mist.*
 ```
 
-The initial implementation runs in looping mode and exposes four related signal outputs:
-
-```text
-mod.out1
-mod.out2
-mod.out3
-mod.out4
-```
-
-`mod.view()` is an alias for `mod.out1.view()`. Other outputs are viewed explicitly:
-
-```text
-mod.out2.view();
-```
-
-Swell can modulate Voice parameters directly. Route gain acts as an attenuverter:
-
-```text
-voice = Voice()
-    .timbre(40)
-    .morph(50);
-
-mod = Swell().freq(0.2);
-
-mod.out1(30) -> voice.timbre;
-mod.out2(-20) -> voice.morph;
-```
-
-Audio and CV remain the same `SIGNAL` concept in the language; these connections therefore use the normal routing syntax.
-
-
-### Swell modes and inputs
-
-`Swell()` exposes the main operating modes of the Tides 2018 DSP:
-
-```text
-motion = Swell()
-    .freq(0.25)
-    .mode("loop")
-    .output("phase")
-    .range("control")
-    .slope(50)
-    .shape(50)
-    .smooth(50)
-    .shift(50);
-```
-
-Ramp modes are `"ad"`, `"loop"`, and `"ar"`. Output relationships are `"different"`, `"amplitude"`, `"phase"`, and `"frequency"`. `range("control")` selects the control-rate behavior; `range("audio")` selects the audio-rate behavior. `low`/`medium` are accepted aliases for control and `high` for audio.
-
-Swell has three inputs in addition to its four outputs:
-
-```text
-Clock.out -> motion.trig;
-Clock.out -> motion.clock;
-pitch.out -> motion.v_oct;
-```
-
-`trig` follows the Tides ramp-mode semantics: AD trigger, looping reset, or AR gate. `clock` locks the generator 1:1 to an incoming clock using the original Tides ramp extractor. `v_oct` transposes free-running frequency at 1V/oct.
-
-Low-frequency Swell views automatically use a longer oscilloscope history so LFO and envelope motion remains visible.
-
-
-### Audio I/O
-
-`Audio` is the built-in singleton representing the physical/system audio interface.
-
-The default output route is written from the point of view of the physical destination:
-
-```text
-plaits.out(70) -> Audio.out;
-```
-
-`Audio.out` currently refers to the configured/default system output. The syntax is intentionally designed so future multi-channel interfaces can expose `Audio.out(n)` and physical inputs as `Audio.in(n)` without changing the routing model.
-
-`Audio.out` has an automatic master scope.
-
-### Module views and port views
-
-A `.view()` on a module asks for the module-specific visualizer. A `.view()` on a port asks for the generic visualizer for that individual signal.
-
-For Swell:
-
-```text
-motion.view();
-```
-
-opens one four-channel scope containing `out1`, `out2`, `out3`, and `out4`.
-
-```text
-motion.out1.view();
-```
-
-opens the normal single-signal scope for `out1`.
-
-Both can be active at the same time. The same distinction is intended for future modules such as Pattern, where the object-level view can use a purpose-built visualization while individual ports keep generic signal/gate/trigger views.
-
-
-For `Voice`, the object-level view compares both Plaits outputs in one scope:
-
-```text
-plaits.view();
-```
-
-This overlays `OUT` and `AUX` with separate traces. Individual port views remain available:
-
-```text
-plaits.out.view();
-plaits.aux.view();
-```
-
-
-
-## Mist (phase 1 shell)
-
-`Mist()` is introduced first as a stereo pass-through module. This phase validates the language API, routing and module view independently from the Clouds WASM backend.
-
-```text
-fx = Mist()
-    .mode("granular")
-    .position(50)
-    .size(50)
-    .pitch(0)
-    .density(50)
-    .texture(50)
-    .mix(0)
-    .spread(50)
-    .feedback(0)
-    .reverb(0)
-    .view();
-```
-
-All effect parameters are parsed and retained, but audio is intentionally unity pass-through in phase 1.
-
-```text
-source.out -> fx.in;   // mono, duplicated to L/R
-left.out -> fx.inL;
-right.out -> fx.inR;
-
-fx.outL -> Audio.out;
-fx.outR -> Audio.out;
-```
-
-`fx.view()` shows `OUT L / R` as a two-trace module view. `fx.outL.view()` and `fx.outR.view()` remain generic single-port scopes.
-
-The Clouds backend will be attached only after an isolated WASM harness passes outside the realtime AudioWorklet path.
-
-
-The phase-1 `Mist()` shell deliberately has no Clouds backend. The upstream processor is validated separately at `/mist-harness.html`; only a backend that passes both the WASM bypass and granular-output tests should be connected to the realtime module.
-
-
-### Mist Clouds backend
-
-After the isolated harness passes, `Mist()` uses the same static-storage Clouds bridge in its AudioWorklet. The runtime WASM is intentionally built with a 4 MB initial memory instead of the earlier 32 MB experimental allocation.
-
-`mix()` is an equal-power host-side crossfade: the Clouds processor always produces a fully wet stream while WebAudio mixes the dry input and wet output.
-
-The `trig` input is available for explicit grain triggering:
-
-```text
-Clock.bpm(90);
-Clock.out -> fx.trig;
-```
-
-It is optional; with density away from the center region, Clouds can generate grains without an external trigger.
-
-
-### Mist: eight SuperParasites modes
-
-`Mist()` now uses the SuperParasites processor and exposes all eight modes:
-
-```text
-fx.mode("granular");
-fx.mode("stretch");
-fx.mode("looping_delay");
-fx.mode("spectral");
-fx.mode("oliverb");
-fx.mode("resonestor");
-fx.mode("beat_repeat");
-fx.mode("spectral_clouds");
-```
-
-The same primary controls remain available in every mode:
-
-```text
-.position()
-.size()
-.pitch()
-.density()
-.texture()
-.mix()
-.spread()
-.feedback()
-.reverb()
-.freeze()
-```
-
-Their musical meaning follows the selected SuperParasites engine. For example, Oliverb interprets the controls as reverb size/decay/filter/modulation parameters, while Resonestor uses pitch, size, density and texture as resonator controls.
-
-`reverse(true)` is also available for the Parasites modes that support reverse playback:
-
-```text
-fx.reverse(true);
-```
-
-Beat Repeat uses the existing Mist controls to recreate the SuperParasites/Kammerl control mapping: `mix` controls repeat probability, `spread` clock division, `feedback` pitch mode, `reverb` distortion, `position` slice selection, `texture` slice modulation and `density` size modulation. Sonus Umbrae still applies its own external equal-power dry/wet crossfade.
-
-Changing mode causes the DSP to run SuperParasites' normal `Prepare()` mode-transition path, so modes with different workspaces such as spectral, Oliverb and Resonestor can reset their internal state correctly.
-
-
-## Stereo output naming and routing
-
-Stereo modules use a consistent output convention:
-
-```text
-fx.out       // stereo shorthand
-fx.out_L     // left channel only
-fx.out_R     // right channel only
-```
-
-The main audio bus follows the same convention:
-
-```text
-Audio.out
-Audio.out_L
-Audio.out_R
-```
-
-A mono source connected to `Audio.out` is duplicated automatically:
-
-```text
-plaits.out -> Audio.out;
-```
-
-A stereo source connected to `Audio.out` preserves L/R:
-
-```text
-fx.out -> Audio.out;
-```
-
-This expands internally to:
-
-```text
-fx.out_L -> Audio.out_L;
-fx.out_R -> Audio.out_R;
-```
-
-Channels can be selected, attenuated and crossed explicitly:
-
-```text
-fx.out_L(50) -> Audio.out_R;
-fx.out_R(75) -> Audio.out_L;
-```
-
-Selecting one channel of a stereo source makes that route mono, so this:
-
-```text
-fx.out_L -> Audio.out;
-```
-
-duplicates the left signal to both sides of the main output.
-
-Parentheses are deliberately not used for logical L/R selection. They remain available for route attenuation today and for future hardware-output addressing. A future syntax such as:
-
-```text
-Audio.out(5)
-```
-
-can therefore mean physical hardware output 5 without conflicting with stereo channel selection.
-
-`Audio.out` is always monitored as stereo using one overlaid two-trace oscilloscope. The L/R legend uses the same trace colors as other multi-output module views.
+This keeps the language independent from any one upstream hardware product and
+allows future DSP families to coexist behind the same object model.
+
+## Planned language directions
+
+The following remain future or incomplete areas:
+
+- richer event-driven syntax;
+- conditional execution;
+- additional reusable generative/stateful functions;
+- more synthesis engine families;
+- more FX families;
+- hardware and multi-channel audio I/O;
+- MIDI and OSC integration;
+- multi-script sessions;
+- richer clock transformations and event generation;
+- additional visualizers such as spectrum and level views;
+- audiovisual objects and routing;
+- native and dedicated-hardware runtimes.
+
+The core design principle remains unchanged: the text document is the source of
+truth, the runtime reconciles it live, and Scheme remains an observer rather
+than a graphical editor.

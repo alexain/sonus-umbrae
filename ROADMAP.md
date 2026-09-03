@@ -4,20 +4,43 @@ Sonus Umbrae is currently developed as a browser-based modular live-coding envir
 
 This roadmap is directional rather than a release commitment. Features may move, change shape, or be dropped as the language evolves.
 
+## 0.1.0 baseline
+
+The first tagged development release establishes the current high-level
+language and DSP architecture:
+
+- `VOICE` objects with model-specific sound engines, per-object level, note /
+  frequency / scale sequencing, LPG option, and parameter modulation.
+- `MOD` objects with four related outputs, local declaration inside `VOICE` and
+  `FX`, shared transport semantics, and optional scope views.
+- `FX` objects with the current `mist.*` model family, stereo routing, dynamic
+  parameters, musical pitch sequencing where supported, and local modulation.
+- Explicit `CLOCK set ... bpm` master-clock transport.
+- `every` as the public temporal reevaluation syntax, including object-level
+  fallback timing and typed `SET` time variables.
+- `PLAY ... through ... then ...` audio routing with per-edge `at` levels,
+  stereo channel selectors, mono-to-stereo normalization, and multiline chains.
+- `MAIN level` as a distinct final-bus control.
+- Shared runtime scheduler for wall-clock and beat-based jobs.
+- Read-only Scheme and optional scope views.
+
+The items below describe directions beyond this baseline.
+
 ## Near term
 
 ### Language core
 
-- Scalar variables with dynamic typing.
-- Arithmetic, comparison, and logical expressions.
-- Core functions such as `rnd()`, `choose()`, `coin()`, `clamp()`, and `map()`.
-- Variable monitoring through `.view()`.
-- Event-driven blocks such as `When (...) { ... }`.
-- Conditional execution with `if`.
-- Looping and iteration primitives.
+- Arithmetic, comparison, and logical expressions beyond the current scalar
+  expression support.
+- Richer conditional execution.
+- Event-driven blocks integrated cleanly with the high-level syntax.
+- Looping and iteration primitives where they remain useful for musical code.
 - Persistent runtime state for event-driven code.
 - Clear distinction between snapshot values and continuously evaluated signals.
-- Stateful generative helpers including `walk()`, `chaos()`, `slew()`, reproducible `seed()`, numeric `wrap()`, and `quantize()`.
+- Stateful generative helpers including `walk()`, `chaos()`, `slew()`,
+  reproducible `seed()`, numeric `wrap()`, and `quantize()`.
+- Reusable timing/group constructs beyond per-property and object-level `every`.
+
 
 ### Signal routing
 
@@ -56,8 +79,10 @@ The initial DSP integration is based on permissively licensed open-source module
 
 Current direction:
 
-- `Voice()` based on the Mutable Instruments Plaits DSP.
-- Additional Mutable Instruments DSP where licensing permits.
+- `VOICE` macro engines backed initially by Mutable Instruments Plaits DSP.
+- `MOD` modulation backed initially by Mutable Instruments Tides 2018 DSP.
+- `FX` processors backed initially by the Mist / SuperParasites integration.
+- Additional permissively licensed DSP where appropriate.
 - Original Sonus Umbrae DSP modules.
 - Inspiration from other modular systems and open algorithms without necessarily reproducing their original user interfaces.
 - A stable module metadata format describing parameters, ports, signal semantics, and visual behavior.

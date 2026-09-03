@@ -6,7 +6,7 @@ This file is informational and does not replace the authoritative license files 
 
 ## Mutable Instruments Eurorack DSP
 
-Current use: DSP implementation behind Sonus Umbrae `Voice()`.
+Current use: DSP implementation behind the Sonus Umbrae `VOICE` macro-engine family.
 
 Upstream project:
 
@@ -24,7 +24,7 @@ Sonus Umbrae currently builds the Plaits DSP from the STM32F portion of that rep
 
 The original Plaits source files carry the MIT license notice. The original copyright and license terms remain applicable to that code and to substantial portions derived from it.
 
-Mutable Instruments is a registered trademark. Sonus Umbrae is an independent project and is not affiliated with or endorsed by Mutable Instruments. The Sonus Umbrae language intentionally exposes the engine under its own `Voice()` API rather than using Mutable Instruments product names as product branding.
+Mutable Instruments is a registered trademark. Sonus Umbrae is an independent project and is not affiliated with or endorsed by Mutable Instruments. The Sonus Umbrae language intentionally exposes this DSP through its own `VOICE` engine names rather than using Mutable Instruments product names as product branding.
 
 Upstream references:
 
@@ -55,9 +55,9 @@ If Sonus Umbrae later bundles fonts or additional DSP engines, their license not
 
 ## Mutable Instruments Tides 2018 DSP
 
-`Swell()` uses DSP source code from the `tides2` directory of the Mutable Instruments Eurorack repository.
+The current `MOD` backend, internally named Swell, uses DSP source code from the `tides2` directory of the Mutable Instruments Eurorack repository.
 
-The Tides 2018 firmware source is released under the MIT License. Sonus Umbrae uses the name **Swell** for its integration and does not use Mutable Instruments or Tides as product branding.
+The Tides 2018 firmware source is released under the MIT License. The public language exposes this functionality as `MOD`; the internal Swell name is an implementation detail. Sonus Umbrae does not use Mutable Instruments or Tides as product branding.
 
 The upstream source is downloaded by the DSP setup process and is not authored by the Sonus Umbrae project.
 
@@ -65,8 +65,8 @@ The upstream source is downloaded by the DSP setup process and is not authored b
 
 ## SuperParasites
 
-The eight-mode `Mist()` backend uses DSP code from Patrick Dowling's SuperParasites project, itself based on Mutable Instruments Clouds, Parasites, and Beat Repeat.
+The current eight-mode Mist backend used by Sonus Umbrae `FX` objects uses DSP code from Patrick Dowling's SuperParasites project, itself based on Mutable Instruments Clouds, Parasites, and Beat Repeat.
 
-SuperParasites' STM32F code is distributed under the MIT License. Sonus Umbrae uses its own module name (`Mist`) and scripting API rather than upstream product branding.
+SuperParasites' STM32F code is distributed under the MIT License. The public language exposes these processors through Sonus Umbrae `mist.*` model names inside `FX` objects rather than upstream product branding.
 
 The upstream source is fetched into `vendor/superparasites` by `npm run dsp:setup` and is not vendored into this repository.

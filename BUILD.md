@@ -10,7 +10,7 @@ For the web application:
 - Node.js 24 LTS
 - npm
 
-For building the current `Voice()` DSP engine:
+For building the current WebAssembly DSP engines (`VOICE`, `MOD`, and `FX`):
 
 - Emscripten SDK (`emsdk`)
 - a C/C++ toolchain suitable for Emscripten
@@ -94,12 +94,17 @@ Make sure the Emscripten environment is active, then run:
 npm run dsp:build
 ```
 
-The generated WASM artifact is written to:
+The generated WASM artifacts are written to:
 
 ```text
 public/dsp/voice.wasm
 public/dsp/swell.wasm
+public/dsp/mist.wasm
 ```
+
+`voice.wasm` provides the current macro-oscillator `VOICE` backend, `swell.wasm`
+provides the four-output modulation backend used by `MOD`, and `mist.wasm`
+provides the current stereo `FX` backend.
 
 Generated WASM files are ignored by Git and should be rebuilt locally.
 
@@ -165,7 +170,8 @@ Preview the production build locally:
 npm run preview
 ```
 
-Remember that the DSP WASM must already have been generated with `npm run dsp:build` before packaging or serving a complete build.
+Remember that the DSP WASM files must already have been generated with
+`npm run dsp:build` before packaging or serving a complete build.
 
 ## Clean setup summary
 
@@ -183,7 +189,8 @@ npm run dev
 
 ## Mist / Clouds isolated harness
 
-Before connecting the Clouds DSP to the realtime `Mist()` module, build and test it independently:
+The Mist/Clouds backend also has an isolated harness that can be used when
+changing or debugging the DSP independently of the realtime `FX` integration:
 
 ```bash
 npm run dsp:setup
@@ -202,7 +209,7 @@ The harness runs two tests on the main browser thread, with no `AudioWorklet` an
 1. Clouds' own `bypass` path must copy a 32-frame stereo block exactly.
 2. The granular engine receives four seconds of a 220 Hz test signal at Clouds' native 32 kHz sample rate. The test passes only if the wet output becomes non-zero.
 
-Do not integrate the Clouds WASM into `Mist()` until both tests pass.
+Both tests should pass before changing or publishing a rebuilt Mist backend.
 
 
 ### SuperParasites and modern Clang
