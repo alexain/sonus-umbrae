@@ -1037,3 +1037,58 @@ button, input, textarea { font: inherit; }
 
 .about-link { color: inherit; text-decoration: underline; text-underline-offset: 3px; }
 .about-link:hover, .about-link:focus { color: var(--phosphor-hot); }
+
+/* Conway Life SEQ monitor. The SEQ view intentionally shows only the pool
+   state: active/inactive cells. Consumer playheads belong to optional inline
+   NOTE views, not to this shared sidebar view. */
+.life-monitor-card .monitor-body {
+  display: grid;
+  gap: 9px;
+}
+
+.life-grid {
+  --life-size: 8;
+  display: grid;
+  grid-template-columns: repeat(var(--life-size), minmax(0, 1fr));
+  gap: 3px;
+  width: min(100%, 246px);
+  aspect-ratio: 1;
+  padding: 8px;
+  border-left: 1px solid rgba(215, 169, 46, 0.18);
+  border-bottom: 1px solid rgba(215, 169, 46, 0.10);
+  background: rgba(5, 6, 5, 0.48);
+}
+
+.life-cell {
+  display: block;
+  min-width: 0;
+  min-height: 0;
+  aspect-ratio: 1;
+  border: 1px solid rgba(215, 169, 46, 0.22);
+  background: rgba(215, 169, 46, 0.018);
+  transition: background-color 120ms linear, border-color 120ms linear, box-shadow 120ms linear, opacity 120ms linear;
+}
+
+.life-cell.on {
+  border-color: rgba(255, 231, 131, 0.92);
+  background: rgba(255, 231, 131, 0.78);
+  box-shadow: 0 0 5px rgba(215, 169, 46, 0.34), inset 0 0 2px rgba(255, 255, 255, 0.20);
+}
+
+.life-cell.off {
+  opacity: 0.48;
+}
+
+.life-cell-change {
+  animation: life-cell-change 140ms ease-out;
+}
+
+@keyframes life-cell-change {
+  from { opacity: 0.35; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .life-cell { transition: none; }
+  .life-cell-change { animation: none; }
+}

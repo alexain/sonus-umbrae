@@ -1,6 +1,6 @@
 import './style.css';
 import { AudioEngine, type AudioLatencyMode } from './audio/engine';
-import { SonusEvaluationError, SonusRuntime, type InlineViewState, type ParameterViewState, type TuringViewState, type SchemeConnection, type SchemeModel, type SchemeNode } from './language/runtime';
+import { SonusEvaluationError, SonusRuntime, type InlineViewState, type LifeViewState, type ParameterViewState, type TuringViewState, type SchemeConnection, type SchemeModel, type SchemeNode } from './language/runtime';
 import { compileLanguageSource, LanguageError, parseProgramCapabilities, type ProgramCapability } from './language/language';
 
 type Screen = 'live' | 'config' | 'help' | 'about' | 'scheme';
@@ -913,7 +913,7 @@ function normalizeLanguageCommandCase(): void {
         .replace(/\.([lr])\b/gi, (_match, channel: string) => `.${channel.toUpperCase()}`),
     )
     .replace(
-      /^(\s*scale\s+)([a-g])([#b]?)(?=\s|$)/gim,
+      /^(\s*(?:pitch\s+)?scale\s+)([a-g])([#b]?)(?=\s|$)/gim,
       (_match, prefix: string, note: string, accidental: string) =>
         `${prefix}${note.toUpperCase()}${accidental}`,
     );
@@ -1325,6 +1325,7 @@ function syncViews(): void {
   const parameterViews = new Map(runtime.getParameterViews().map((view) => [view.signal, view]));
   const variables = runtime.getVariableViews();
   const turingViews = runtime.getTuringViews();
+  const lifeViews = runtime.getLifeViews();
   const scheme = runtime.getSchemeModel();
   const nodes = new Map(scheme.nodes.map((node) => [node.id, node]));
   const panels: HTMLElement[] = [];
@@ -1332,6 +1333,7 @@ function syncViews(): void {
   if (appConfig.showVariables) panels.push(buildVariablesPanel(variables));
   if (appConfig.showMetrics) panels.push(buildMetricsPanel(scheme, variables.length));
   for (const view of turingViews) panels.push(buildTuringPanel(view));
+  for (const view of lifeViews) panels.push(buildLifePanel(view));
 
   const audio = nodes.get('Audio');
   panels.push(buildModuleMonitorPanel({
@@ -1510,6 +1512,30 @@ function buildTuringPanel(view: TuringViewState): HTMLElement {
   readout.append(label, value);
 
   body.append(meta, register, readout);
+  return card;
+}
+
+function buildLifePanel(view: LifeViewState): HTMLElement {
+  const card = createMonitorCard(`SEQ:${view.name}`, `${view.name.toUpperCase()} : SEQ / LIFE`, false);
+  card.classList.add('life-monitor-card');
+  const body = card.querySelector<HTMLElement>('.monitor-body');
+  if (!body) return card;
+
+  const grid = document.createElement('div');
+  grid.className = 'life-grid';
+  grid.dataset.lifeName = view.name;
+  grid.dataset.revision = String(view.revision);
+  grid.style.setProperty('--life-size', String(view.size));
+  grid.setAttribute('role', 'img');
+  grid.setAttribute('aria-label', `${view.name} Life grid`);
+
+  for (const alive of view.cells) {
+    const cell = document.createElement('span');
+    cell.className = `life-cell ${alive ? 'on' : 'off'}`;
+    grid.append(cell);
+  }
+
+  body.append(grid);
   return card;
 }
 
@@ -1777,15 +1803,37 @@ function updateTuringViews(): void {
   }
 }
 
+function updateLifeViews(): void {
+  const states = new Map(runtime.getLifeViews().map((view) => [view.name, view]));
+  for (const grid of document.querySelectorAll<HTMLElement>('.life-grid[data-life-name]')) {
+    const name = grid.dataset.lifeName;
+    if (!name) continue;
+    const state = states.get(name);
+    if (!state) continue;
+    const revision = Number(grid.dataset.revision ?? '-1');
+    if (revision === state.revision && grid.children.length === state.cells.length) continue;
+
+    grid.dataset.revision = String(state.revision);
+    grid.style.setProperty('--life-size', String(state.size));
+    grid.replaceChildren(...state.cells.map((alive) => {
+      const cell = document.createElement('span');
+      cell.className = `life-cell ${alive ? 'on' : 'off'} life-cell-change`;
+      return cell;
+    }));
+  }
+}
+
 function drawScopes(): void {
   scopeFrame = 0;
   updateVariableValues();
   updateTuringViews();
+  updateLifeViews();
   updateSchemeLiveValues();
   const canvases = [...document.querySelectorAll<HTMLCanvasElement>('canvas.scope-canvas')];
   const liveValues = document.querySelectorAll<HTMLElement>('.scheme-live-value');
   const turingRegisters = document.querySelectorAll<HTMLElement>('.turing-register');
-  if (canvases.length === 0 && liveValues.length === 0 && turingRegisters.length === 0) return;
+  const lifeGrids = document.querySelectorAll<HTMLElement>('.life-grid');
+  if (canvases.length === 0 && liveValues.length === 0 && turingRegisters.length === 0 && lifeGrids.length === 0) return;
 
   const phosphor = getComputedStyle(document.documentElement).getPropertyValue('--phosphor-hot').trim() || '#ffe783';
 
@@ -3030,6 +3078,21 @@ async function runCommand(raw: string): Promise<void> {
       else if (action === 'stop') { audioEngine.setClockTransport(false); notify('clock stopped'); }
       else notify('usage: :clock start | :clock stop');
       leaveCommandMode();
+      return;
+    }
+    case 'life': {
+      const action = args[0]?.toLowerCase();
+      if (action !== 'reset' || args.length > 2) {
+        notify('usage: :life reset [name]');
+        leaveCommandMode();
+        return;
+      }
+      const target = args[1];
+      const reset = runtime.resetLife(target);
+      syncViews();
+      leaveCommandMode();
+      if (reset.length === 0) notify(target ? `unknown SEQ life: ${target}` : 'no active SEQ life');
+      else notify(target ? `life ${target} reset` : `reset ${reset.length} life sequence${reset.length === 1 ? '' : 's'}`);
       return;
     }
     case 'panic':

@@ -76,7 +76,7 @@ type SourceDefinition =
   | { kind: 'freq'; values: number[]; display: string; internalName?: string }
   | { kind: 'note'; values: number[]; display: string; favor: SequenceFavorEntry[]; internalName?: string }
   | { kind: 'scale'; values: number[]; display: string; internalName?: string }
-  | { kind: 'seq'; values: number[]; display: string; internalName?: string }
+  | { kind: 'seq'; model: 'turing' | 'life' | null; values: number[]; display: string; internalName?: string }
   | { kind: 'envelope'; spec: EnvelopeSpec; display: string; internalName?: string };
 
 
@@ -129,11 +129,15 @@ type SeqState = {
   name: string;
   line: number;
   indentation: number;
-  modelId: 'turing' | null;
+  modelId: 'turing' | 'life' | null;
+  lifeVariant: 'conway' | 'highlife' | 'seeds' | 'day-night' | 'morley';
   length: number;
   change: number;
+  size: 8 | 16;
+  density: number;
+  maxDensity: number | null;
   values: number[];
-  material: 'notes' | 'scale' | null;
+  material: 'notes' | 'scale' | 'freqs' | null;
 };
 
 type ClockState = {
@@ -303,6 +307,8 @@ const MODE_INTERVALS: Record<string, number[]> = {
   lydian: [0, 2, 4, 6, 7, 9, 11],
   mixolydian: [0, 2, 4, 5, 7, 9, 10],
   locrian: [0, 1, 3, 5, 6, 8, 10],
+  'major-pentatonic': [0, 2, 4, 7, 9],
+  'minor-pentatonic': [0, 3, 5, 7, 10],
 };
 
 function stripComment(line: string): string {
@@ -414,7 +420,7 @@ function parseScaleSpec(
   line: number,
   allowSelection: boolean,
 ): { values: number[]; display: string; mode: SelectionMode; amount: number; favor: SequenceFavorEntry[]; view: boolean } | null {
-  const head = value.match(/^([A-Ga-g][#b]?)\s+([A-Za-z]+)(?:\s+with\s+(.+))?$/i);
+  const head = value.match(/^([A-Ga-g][#b]?)\s+([A-Za-z][A-Za-z-]*)(?:\s+with\s+(.+))?$/i);
   if (!head) return null;
   if (!MODE_INTERVALS[head[2].toLowerCase()]) return null;
 
@@ -859,7 +865,7 @@ function claimPitchProperty(
   if (owner.pitchProperty && owner.pitchProperty !== property) {
     throw new LanguageError([{
       line,
-      message: `${label} '${owner.name}' already uses ${owner.pitchProperty}; only one of note, scale, or freq can define pitch`,
+      message: `${label} '${owner.name}' already uses ${owner.pitchProperty}; PITCH can be declared only once per object`,
     }]);
   }
   owner.pitchProperty = property;
@@ -890,16 +896,27 @@ function compileVoiceProperty(
   modSources: Map<string, ModSourceDefinition>,
   live = false,
 ): string {
-  const key = property.toLowerCase();
+  let key = property.toLowerCase();
   let value = rawValue.trim();
-  if (key === 'note' || key === 'freq' || key === 'scale' || key === 'cycle') {
-    const direct = splitEveryClause(value);
-    const definition = IDENTIFIER.test(direct.base) ? sourceDefinitions.get(direct.base) : undefined;
-    const compatible = key === 'note' ? definition?.kind === 'note' || definition?.kind === 'scale' || definition?.kind === 'seq'
-      : key === 'freq' ? definition?.kind === 'freq'
-      : key === 'scale' ? definition?.kind === 'scale'
-      : definition?.kind === 'time';
-    if (compatible) value = `from ${direct.base}${direct.every ? ` every ${direct.every}` : ''}`;
+  if (/^from\b/i.test(value)) {
+    throw new LanguageError([{ line, message: "FROM is no longer supported; use the source name directly" }]);
+  }
+  if (key === 'pitch') {
+    const explicit = value.match(/^(notes|freqs|scale)\s+(.+)$/i);
+    if (explicit) {
+      key = explicit[1].toLowerCase() === 'notes' ? 'note' : explicit[1].toLowerCase() === 'freqs' ? 'freq' : 'scale';
+      value = explicit[2].trim();
+    } else {
+      const split = splitEveryClause(value);
+      const direct = splitWith(split.base);
+      const definition = IDENTIFIER.test(direct.base) ? sourceDefinitions.get(direct.base) : undefined;
+      if (!definition || !['note', 'freq', 'scale', 'seq'].includes(definition.kind)) {
+        throw new LanguageError([{ line, message: 'PITCH expects SCALE ..., NOTES [...], FREQS [...], or a compatible typed source' }]);
+      }
+      key = definition.kind === 'freq' ? 'freq' : definition.kind === 'scale' ? 'scale' : 'note';
+    }
+  } else if (key === 'note' || key === 'freq' || key === 'scale') {
+    throw new LanguageError([{ line, message: `\${property.toUpperCase()} is no longer a VOICE property; use PITCH SCALE ..., PITCH NOTES ..., or PITCH FREQS ...` }]);
   }
   const soundParameter = voice.soundId ? SOUND_ENGINE_REGISTRY[voice.soundId]?.parameters[key] : undefined;
   if (SOUND_PARAMETER_NAMES.has(key)) {
@@ -912,6 +929,14 @@ function compileVoiceProperty(
   }
 
   if (soundParameter) {
+    const modulation = compileModulationRoute(voice, key, value, line, modSources);
+    if (modulation) {
+      if (!soundParameter.modulatable) {
+        throw new LanguageError([{ line, message: `${key} is not modulatable for ${voice.soundId ?? 'this sound'}` }]);
+      }
+      return modulation;
+    }
+
     const envelopeSplit = splitEveryClause(value);
     const envelope = envelopeFromValue(envelopeSplit.base, line, sourceDefinitions);
     if (envelope) {
@@ -920,97 +945,100 @@ function compileVoiceProperty(
     }
   }
 
-  if (soundParameter && /^from\s+/i.test(value)) {
-    if (!soundParameter.modulatable) {
-      throw new LanguageError([{ line, message: `${key} is not modulatable for ${voice.soundId ?? 'this sound'}` }]);
-    }
-    const route = compileModulationRoute(voice, key, value, line, modSources);
-    if (route) return route;
-    throw new LanguageError([{ line, message: `${key} from expects MOD.output [with depth <value>]` }]);
-  }
-
-
-  if ((key === 'note' || key === 'freq' || key === 'scale' || key === 'cycle') && /^from\s+/i.test(value)) {
-    if (key === 'cycle') {
-      const sourceName = value.replace(/^from\s+/i, '').trim();
-      return compileFrom(voice, key, sourceName, line, sourceKinds, sourceDefinitions);
-    }
-
-    claimPitchProperty(voice, key, line, 'VOICE');
-
+  if (key === 'note' || key === 'freq' || key === 'scale' || key === 'cycle') {
     const split = splitEveryClause(value);
-    const from = split.base.match(/^from\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(.+))?$/i);
-    if (!from) {
-      throw new LanguageError([{ line, message: `${key} from expects a source name and optional sequencing modifier` }]);
-    }
+    const direct = splitWith(split.base);
+    const sourceName = direct.base;
+    const definition = IDENTIFIER.test(sourceName) ? sourceDefinitions.get(sourceName) : undefined;
 
-    const sourceName = from[1];
-    const actual = sourceKinds.get(sourceName);
-    const definition = sourceDefinitions.get(sourceName);
-    if (!actual || !definition) {
-      throw new LanguageError([{ line, message: `unknown source '${sourceName}'` }]);
-    }
-
-    if (definition.kind === 'seq') {
-      if (key !== 'note') throw new LanguageError([{ line, message: `SEQ source '${sourceName}' currently supports note from only` }]);
-      if (from[2]) throw new LanguageError([{ line, message: 'SEQ turing controls its own generation; note from SEQ does not use selection modifiers' }]);
-      const initial = definition.values[0] ?? 440;
-      const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
-      return `${voice.name}.freq(${initial}); __seqvoice(${JSON.stringify(voice.name)},${JSON.stringify(sourceName)});${every}`;
-    }
-
-    const modifiers = (from[2] ?? '')
-      .split(',')
-      .map((item) => item.trim())
-      .filter(Boolean);
-    const view = modifiers.some((modifier) => /^view$/i.test(modifier));
-    const selection = parseSelectionMode(modifiers.filter((modifier) => !/^view$/i.test(modifier)), line, key);
-
-    let values: number[];
-    let storedFavor: SequenceFavorEntry[] = [];
-
-    if (key === 'scale') {
-      if (definition.kind !== 'scale') {
-        throw new LanguageError([{ line, message: `source '${sourceName}' is ${actual}, expected scale source for scale` }]);
+    if (definition) {
+      if (key === 'cycle') {
+        if (direct.modifiers.length > 0) {
+          throw new LanguageError([{ line, message: 'cycle source does not accept value modifiers' }]);
+        }
+        return compileFrom(voice, key, sourceName, line, sourceKinds, sourceDefinitions);
       }
-      values = definition.values;
-    } else if (key === 'note') {
-      if (definition.kind !== 'note' && definition.kind !== 'scale') {
-        throw new LanguageError([{ line, message: `source '${sourceName}' is ${actual}, expected note or scale source for note` }]);
+
+      claimPitchProperty(voice, key, line, 'VOICE');
+
+      if (definition.kind === 'seq') {
+        if (key !== 'note') {
+          throw new LanguageError([{ line, message: `SEQ source '${sourceName}' is consumed through PITCH` }]);
+        }
+        const initial = definition.values[0] ?? 440;
+        if (definition.model === 'life') {
+          const lifeModifiers = direct.modifiers.filter((modifier) => !/^view$/i.test(modifier));
+          const view = direct.modifiers.some((modifier) => /^view$/i.test(modifier));
+          if (lifeModifiers.length !== 1) {
+            throw new LanguageError([{ line, message: `SEQ life pool '${sourceName}' requires exactly one reader mode: ORDER, RANDOM, WALK, REVERSE, PENDULUM, FIRST, or LAST` }]);
+          }
+          const modeMatch = lifeModifiers[0].match(/^(order|random|reverse|pendulum|first|last|walk(?:\s+\d+(?:\.\d+)?)?)$/i);
+          if (!modeMatch) throw new LanguageError([{ line, message: `unsupported SEQ life reader mode '${lifeModifiers[0]}'` }]);
+          const walk = lifeModifiers[0].match(/^walk(?:\s+(\d+(?:\.\d+)?))?$/i);
+          const mode = walk ? 'walk' : lifeModifiers[0].toLowerCase();
+          const amount = walk ? (walk[1] === undefined ? 1 : numberValue(walk[1], line, 'walk')) : 0;
+          if (amount < 0) throw new LanguageError([{ line, message: 'walk amount must be greater than 0' }]);
+          const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
+          return `${voice.name}.freq(${initial}); __lifereader(${JSON.stringify(voice.name)},${JSON.stringify(sourceName)},${JSON.stringify(mode)},${amount},${view ? 'true' : 'false'});${every}`;
+        }
+        if (direct.modifiers.length > 0) {
+          throw new LanguageError([{ line, message: 'SEQ turing controls its own generation; PITCH using a Turing SEQ does not accept selection modifiers' }]);
+        }
+        const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
+        return `${voice.name}.freq(${initial}); __seqvoice(${JSON.stringify(voice.name)},${JSON.stringify(sourceName)});${every}`;
       }
-      values = definition.values;
-      if (definition.kind === 'note') storedFavor = definition.favor;
-    } else {
-      if (definition.kind !== 'freq') {
-        throw new LanguageError([{ line, message: `source '${sourceName}' is ${actual}, expected frequency source for freq` }]);
+
+      const view = direct.modifiers.some((modifier) => /^view$/i.test(modifier));
+      const selection = parseSelectionMode(
+        direct.modifiers.filter((modifier) => !/^view$/i.test(modifier)),
+        line,
+        key,
+      );
+
+      let values: number[];
+      let storedFavor: SequenceFavorEntry[] = [];
+
+      if (key === 'scale') {
+        if (definition.kind !== 'scale') {
+          throw new LanguageError([{ line, message: `source '${sourceName}' is ${definition.kind}, expected scale source for scale` }]);
+        }
+        values = definition.values;
+      } else if (key === 'note') {
+        if (definition.kind !== 'note' && definition.kind !== 'scale') {
+          throw new LanguageError([{ line, message: `source '${sourceName}' is ${definition.kind}, expected note or scale source for note` }]);
+        }
+        values = definition.values;
+        if (definition.kind === 'note') storedFavor = definition.favor;
+      } else {
+        if (definition.kind !== 'freq') {
+          throw new LanguageError([{ line, message: `source '${sourceName}' is ${definition.kind}, expected frequency source for freq` }]);
+        }
+        values = definition.values;
       }
-      values = definition.values;
+
+      const favor = mergeFavor(storedFavor, selection.favor);
+      validateFavorForMode(favor, selection.mode, line, key);
+      if (values.length === 1 && direct.modifiers.length > 0) {
+        throw new LanguageError([{ line, message: `${key} selection modifiers require a list source` }]);
+      }
+
+      const sequence = values.length > 1
+        ? ` ${sequenceDirective(voice.name, values, selection.mode, selection.amount, favor)}`
+        : '';
+      const every = split.every
+        ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}`
+        : '';
+      const piano = view && (key === 'note' || key === 'scale')
+        ? ` ${inlinePianoDirective('voice', voice.name, key, line, values)}`
+        : '';
+      return `${voice.name}.freq(${values[0]});${sequence}${every}${piano}`;
     }
-
-    const favor = mergeFavor(storedFavor, selection.favor);
-    validateFavorForMode(favor, selection.mode, line, key);
-
-    if (values.length === 1 && modifiers.length > 0) {
-      throw new LanguageError([{ line, message: `${key} selection modifiers require a list source` }]);
-    }
-
-    const sequence = values.length > 1
-      ? ` ${sequenceDirective(voice.name, values, selection.mode, selection.amount, favor)}`
-      : '';
-    const every = split.every
-      ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}`
-      : '';
-    const piano = view && (key === 'note' || key === 'scale')
-      ? ` ${inlinePianoDirective('voice', voice.name, key, line, values)}`
-      : '';
-
-    return `${voice.name}.freq(${values[0]});${sequence}${every}${piano}`;
   }
 
   if (key === 'drive') {
     if (voice.soundId !== 'matter') throw new LanguageError([{ line, message: 'drive is available only for sound matter' }]);
     const split = splitEveryClause(value);
-    let spec: EnvelopeSpec | null = envelopeFromValue(split.base.replace(/^from\s+/i, ''), line, sourceDefinitions);
+    let spec: EnvelopeSpec | null = envelopeFromValue(split.base, line, sourceDefinitions);
     if (!spec) throw new LanguageError([{ line, message: 'drive expects ENVELOPE [...] or an ENVELOPE SET value' }]);
     const base = `${voice.name}.drive(${envelopeLegacyLiteral(spec, line)});`;
     if (!split.every) return base;
@@ -1335,8 +1363,8 @@ function everyDirective(name: string, spec: EverySpec): string {
 
 function requireSeqReady(seq: SeqState | null, diagnostics: LanguageDiagnostic[]): void {
   if (!seq) return;
-  if (!seq.modelId) diagnostics.push({ line: seq.line, message: `SEQ '${seq.name}' requires model turing` });
-  if (seq.values.length === 0) diagnostics.push({ line: seq.line, message: `SEQ '${seq.name}' requires notes or scale material` });
+  if (!seq.modelId) diagnostics.push({ line: seq.line, message: `SEQ '${seq.name}' requires a model` });
+  if (seq.values.length === 0) diagnostics.push({ line: seq.line, message: `SEQ '${seq.name}' requires PITCH SCALE, PITCH NOTES, or PITCH FREQS material` });
 }
 
 function compileSeqProperty(
@@ -1347,26 +1375,63 @@ function compileSeqProperty(
   sourceDefinitions: Map<string, SourceDefinition>,
 ): string {
   const key = property.toLowerCase();
-  const value = rawValue.trim();
-
-  if (key === 'model') {
-    if (value.toLowerCase() !== 'turing') throw new LanguageError([{ line, message: `unknown SEQ model '${value}'` }]);
-    seq.modelId = 'turing';
-    return `__seqmodel(${JSON.stringify(seq.name)},"turing");`;
+  let value = rawValue.trim();
+  let effectiveKey = key;
+  if (key === 'pitch') {
+    const pitch = value.match(/^(notes|freqs|scale)\s+(.+)$/i);
+    if (!pitch) throw new LanguageError([{ line, message: 'SEQ PITCH expects SCALE ..., NOTES [...], or FREQS [...]' }]);
+    effectiveKey = pitch[1].toLowerCase();
+    value = pitch[2].trim();
+  } else if (key === 'notes' || key === 'scale' || key === 'freqs') {
+    throw new LanguageError([{ line, message: `${property.toUpperCase()} is no longer a SEQ property; use PITCH ${property.toUpperCase()} ...` }]);
   }
-  if (key === 'length') {
+
+  if (effectiveKey === 'model') {
+    const model = value.toLowerCase();
+    const lifeModel = model.match(/^life(?:\.(highlife|seeds|day-night|morley))?$/);
+    if (model !== 'turing' && !lifeModel) throw new LanguageError([{ line, message: `unknown SEQ model '${value}'` }]);
+    seq.modelId = model === 'turing' ? 'turing' : 'life';
+    seq.lifeVariant = model === 'turing' ? 'conway' : ((lifeModel?.[1] ?? 'conway') as SeqState['lifeVariant']);
+    const definition = sourceDefinitions.get(seq.name);
+    if (definition?.kind === 'seq') definition.model = seq.modelId;
+    return `__seqmodel(${JSON.stringify(seq.name)},${JSON.stringify(seq.modelId)},${JSON.stringify(seq.lifeVariant)});`;
+  }
+  if (effectiveKey === 'size') {
+    if (seq.modelId !== 'life') throw new LanguageError([{ line, message: 'SEQ SIZE is available only for MODEL life' }]);
+    const size = numberValue(value, line, 'SEQ life size');
+    if (size !== 8 && size !== 16) throw new LanguageError([{ line, message: 'SEQ life size expects 8 or 16' }]);
+    seq.size = size as 8 | 16;
+    return `__seqsize(${JSON.stringify(seq.name)},${size});`;
+  }
+  if (effectiveKey === 'density') {
+    if (seq.modelId !== 'life') throw new LanguageError([{ line, message: 'SEQ DENSITY is available only for MODEL life' }]);
+    const match = value.match(/^(\d+(?:\.\d+)?)(?:\s+with\s+(?:(?:max\s+(\d+(?:\.\d+)?)(?:\s*,\s*respawn)?|respawn)))?$/i);
+    if (!match) throw new LanguageError([{ line, message: 'SEQ life DENSITY expects <0..100> [WITH MAX <0..100>[, RESPAWN] | WITH RESPAWN]' }]);
+    const density = numberValue(match[1], line, 'SEQ life density');
+    const maxDensity = match[2] === undefined ? null : numberValue(match[2], line, 'SEQ life max density');
+    const respawn = /(?:^|[,\s])respawn$/i.test(value.trim());
+    if (density < 0 || density > 100) throw new LanguageError([{ line, message: 'SEQ life DENSITY expects 0..100' }]);
+    if (maxDensity !== null && (maxDensity < 0 || maxDensity > 100)) throw new LanguageError([{ line, message: 'SEQ life DENSITY MAX expects 0..100' }]);
+    if (maxDensity !== null && maxDensity < density) throw new LanguageError([{ line, message: 'SEQ life DENSITY MAX cannot be lower than the initial density' }]);
+    seq.density = density;
+    seq.maxDensity = maxDensity;
+    return `__lifedensity(${JSON.stringify(seq.name)},${density},${maxDensity ?? -1},${respawn ? 'true' : 'false'});`;
+  }
+  if (effectiveKey === 'length') {
+    if (seq.modelId === 'life') throw new LanguageError([{ line, message: 'SEQ life does not use LENGTH; use SIZE 8 or SIZE 16' }]);
     const length = numberValue(value, line, 'SEQ length');
     if (!Number.isInteger(length) || length < 2 || length > 32) throw new LanguageError([{ line, message: 'SEQ turing length expects an integer from 2 to 32' }]);
     seq.length = length;
     return `__seqlength(${JSON.stringify(seq.name)},${length});`;
   }
-  if (key === 'change') {
+  if (effectiveKey === 'change') {
+    if (seq.modelId === 'life') throw new LanguageError([{ line, message: 'SEQ life does not use CHANGE' }]);
     const change = numberValue(value, line, 'SEQ change');
     if (change < 0 || change > 100) throw new LanguageError([{ line, message: 'SEQ turing change expects 0..100' }]);
     seq.change = change;
     return `__seqchange(${JSON.stringify(seq.name)},${change});`;
   }
-  if (key === 'notes') {
+  if (effectiveKey === 'notes') {
     const list = value.match(/^\[([^\]]+)\]$/);
     if (!list) throw new LanguageError([{ line, message: 'SEQ notes expects a note list such as [C2 Eb2 G2]' }]);
     const items = list[1].trim().split(/\s+/).filter(Boolean);
@@ -1381,7 +1446,20 @@ function compileSeqProperty(
     if (definition?.kind === 'seq') definition.values = [...seq.values];
     return `__seqvalues(${JSON.stringify(seq.name)},${JSON.stringify(seq.values.join('|'))});`;
   }
-  if (key === 'scale') {
+  if (effectiveKey === 'freqs') {
+    const parsed = splitWith(value);
+    const values = parseList(parsed.base, line, 'SEQ pitch freqs').map((item) => numberValue(item, line, 'SEQ pitch freqs'));
+    if (values.length === 0 || values.some((frequency) => frequency <= 0)) {
+      throw new LanguageError([{ line, message: 'SEQ PITCH FREQS expects positive frequency values' }]);
+    }
+    if (parsed.modifiers.length > 0) throw new LanguageError([{ line, message: 'SEQ PITCH FREQS material does not accept selection modifiers; readers choose the material' }]);
+    seq.values = values;
+    seq.material = 'freqs';
+    const definition = sourceDefinitions.get(seq.name);
+    if (definition?.kind === 'seq') definition.values = [...seq.values];
+    return `__seqvalues(${JSON.stringify(seq.name)},${JSON.stringify(seq.values.join('|'))});`;
+  }
+  if (effectiveKey === 'scale') {
     const scale = parseScaleSource(value, line);
     if (!scale) throw new LanguageError([{ line, message: 'SEQ scale expects a scale and range, for example C minor with range C2 C4' }]);
     seq.values = scale.values;
@@ -1390,7 +1468,16 @@ function compileSeqProperty(
     if (definition?.kind === 'seq') definition.values = [...seq.values];
     return `__seqvalues(${JSON.stringify(seq.name)},${JSON.stringify(seq.values.join('|'))});`;
   }
-  if (key === 'every') {
+  if (effectiveKey === 'evolve') {
+    if (seq.modelId !== 'life') throw new LanguageError([{ line, message: 'EVOLVE is available only for MODEL life' }]);
+    const evolve = value.match(/^every\s+(.+)$/i);
+    if (!evolve) throw new LanguageError([{ line, message: 'EVOLVE expects EVERY <time> [ON ...]' }]);
+    const timing = parseEverySpec(evolve[1], line, sourceDefinitions);
+    const prefix = timing.clockPrelude ? `${timing.clockPrelude}\n` : '';
+    return `${prefix}__lifeevolve(${JSON.stringify(seq.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
+  }
+  if (effectiveKey === 'every') {
+    if (seq.modelId === 'life') throw new LanguageError([{ line, message: 'SEQ life has no playhead EVERY; use EVOLVE EVERY ... and schedule each consumer PITCH separately' }]);
     const timing = parseEverySpec(value, line, sourceDefinitions);
     const prefix = timing.clockPrelude ? `${timing.clockPrelude}\n` : '';
     return `${prefix}__objectevery(${JSON.stringify(seq.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
@@ -1690,26 +1777,6 @@ function compileClockProperty(
 ): string {
   const key = property.toLowerCase();
   const value = rawValue.trim();
-  if (key === 'from') {
-    const match = value.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\s+([/*])\s*(\d+(?:\.\d+)?))?$/i);
-    if (!match) throw new LanguageError([{ line, message: 'CLOCK from expects MASTER or a clock name, optionally followed by /n or *n' }]);
-    const rawParent = match[1];
-    const parent = /^master$/i.test(rawParent) ? 'Clock' : rawParent;
-    if (parent !== 'Clock') {
-      const definition = sourceDefinitions.get(parent);
-      if (!definition || definition.kind !== 'clock') throw new LanguageError([{ line, message: `unknown parent clock '${rawParent}'` }]);
-      if (parent === clock.name) throw new LanguageError([{ line, message: 'CLOCK cannot derive from itself' }]);
-    }
-    const op = match[2] ?? '*';
-    const amount = match[3] ? numberValue(match[3], line, 'CLOCK rate') : 1;
-    if (amount <= 0) throw new LanguageError([{ line, message: 'CLOCK divisor/multiplier must be greater than 0' }]);
-    clock.parent = parent;
-    clock.rate = op === '/' ? 1 / amount : amount;
-    clock.rateLabel = `${op}${formatSourceNumber(amount)}`;
-    const definition = sourceDefinitions.get(clock.name);
-    if (definition?.kind === 'clock') definition.rateLabel = clock.rateLabel;
-    return `__clockparent(${JSON.stringify(clock.name)},${JSON.stringify(parent)},${JSON.stringify(clock.rateLabel)});`;
-  }
   if (key === 'jitter' || key === 'drift' || key === 'drifter') {
     const publicKey = key === 'drift' ? 'drifter' : key;
     const amount = numberValue(value, line, `CLOCK ${publicKey}`);
@@ -1930,7 +1997,7 @@ function compileModulationRoute(
   line: number,
   modSources: Map<string, ModSourceDefinition>,
 ): string | null {
-  const match = value.match(/^from\s+([A-Za-z_][A-Za-z0-9_]*)\.([a-d])(?:\s+with\s+depth\s+(-?\d+(?:\.\d+)?))?$/i);
+  const match = value.match(/^([A-Za-z_][A-Za-z0-9_]*)\.([a-d])(?:\s+with\s+depth\s+(-?\d+(?:\.\d+)?))?$/i);
   if (!match) return null;
   const source = modSources.get(modSourceKey(voice.name, match[1])) ?? modSources.get(match[1]);
   if (!source) throw new LanguageError([{ line, message: `unknown MOD source '${match[1]}'` }]);
@@ -1950,7 +2017,7 @@ function compileFxModulation(
   line: number,
   modSources: Map<string, ModSourceDefinition>,
 ): string | null {
-  const match = value.match(/^from\s+([A-Za-z_][A-Za-z0-9_]*)\.([a-d])(?:\s+with\s+depth\s+(-?\d+(?:\.\d+)?))?$/i);
+  const match = value.match(/^([A-Za-z_][A-Za-z0-9_]*)\.([a-d])(?:\s+with\s+depth\s+(-?\d+(?:\.\d+)?))?$/i);
   if (!match) return null;
   const source = modSources.get(modSourceKey(fx.name, match[1])) ?? modSources.get(match[1]);
   if (!source) throw new LanguageError([{ line, message: `unknown MOD source '${match[1]}'` }]);
@@ -1992,6 +2059,10 @@ function compileFxProperty(
   const key = property.toLowerCase();
   const value = rawValue.trim();
 
+  if (key === 'note' || key === 'freq' || key === 'scale') {
+    throw new LanguageError([{ line, message: `${property.toUpperCase()} is no longer an FX property; use PITCH SCALE ..., PITCH NOTES ..., or PITCH FREQS ...` }]);
+  }
+
   if (key === 'model') {
     const modelId = value.toLowerCase();
     const schema = FX_MODEL_REGISTRY[modelId];
@@ -2032,11 +2103,11 @@ function compileFxProperty(
   }
 
   const pitchModeMatch = key === 'pitch'
-    ? value.match(/^(note|scale|freq)\s+(.+)$/i)
+    ? value.match(/^(notes|scale|freqs)\s+(.+)$/i)
     : null;
   const musicalPitchKey = pitchModeMatch
-    ? pitchModeMatch[1].toLowerCase() as 'note' | 'scale' | 'freq'
-    : (key === 'note' || key === 'scale' || key === 'freq' ? key : null);
+    ? (pitchModeMatch[1].toLowerCase() === 'notes' ? 'note' : pitchModeMatch[1].toLowerCase() === 'freqs' ? 'freq' : 'scale') as 'note' | 'scale' | 'freq'
+    : null;
   const musicalPitchValue = pitchModeMatch ? pitchModeMatch[2].trim() : value;
 
   if (musicalPitchKey) {
@@ -2052,18 +2123,11 @@ function compileFxProperty(
     let pitchFavor: SequenceFavorEntry[] = [];
     let pitchView = false;
 
-    const fromSource = split.base.match(/^from\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(.+))?$/i);
-    if (fromSource) {
-      const sourceName = fromSource[1];
-      const definition = sourceDefinitions.get(sourceName);
-      if (!definition) {
-        throw new LanguageError([{ line, message: `unknown source '${sourceName}'` }]);
-      }
-
-      const modifiers = (fromSource[2] ?? '')
-        .split(',')
-        .map((item) => item.trim())
-        .filter(Boolean);
+    const directSource = splitWith(split.base);
+    const sourceName = directSource.base;
+    const definition = IDENTIFIER.test(sourceName) ? sourceDefinitions.get(sourceName) : undefined;
+    if (definition) {
+      const modifiers = directSource.modifiers;
       pitchView = modifiers.some((modifier) => /^view$/i.test(modifier));
       const selection = parseSelectionMode(
         modifiers.filter((modifier) => !/^view$/i.test(modifier)),
@@ -2158,7 +2222,10 @@ function compileFxProperty(
     const timing = envelopeSplit.every ? parseEverySpec(envelopeSplit.every, line, sourceDefinitions) : null;
     return envelopeParamDirective('fx', fx.name, parameter, envelope, line, timing);
   }
-  const modulation = /^from\s+/i.test(value) ? compileFxModulation(fx, parameter, value, line, modSources) : null;
+  if (/^from\b/i.test(value)) {
+    throw new LanguageError([{ line, message: "FROM is no longer supported; use the source name directly" }]);
+  }
+  const modulation = compileFxModulation(fx, parameter, value, line, modSources);
   if (modulation) return modulation;
 
   const split = splitEveryClause(value);
@@ -2436,7 +2503,13 @@ function compileFilterProperty(
   sourceDefinitions: Map<string, SourceDefinition>,
 ): string {
   const key = property.toLowerCase();
-  const value = rawValue.trim();
+  let value = rawValue.trim();
+  if (key === 'pitch') {
+    const pitch = value.match(/^(notes|freqs|scale)\s+(.+)$/i);
+    if (!pitch) throw new LanguageError([{ line, message: 'FILTER PITCH expects SCALE ..., NOTES [...], or FREQS [...]' }]);
+    const kind = pitch[1].toLowerCase();
+    value = `${kind === 'notes' ? 'notes' : kind === 'freqs' ? 'freqs' : 'scale'} ${pitch[2].trim()}`;
+  }
 
   if (key === 'every') {
     const timing = parseEverySpec(value, line, sourceDefinitions);
@@ -2507,12 +2580,12 @@ function compileFilterProperty(
     return initial;
   }
 
-  if (key !== 'cutoff') throw new LanguageError([{ line, message: `unknown FILTER property '${property}'` }]);
+  if (key !== 'cutoff' && key !== 'pitch') throw new LanguageError([{ line, message: `unknown FILTER property '${property}'` }]);
 
   const split = splitEveryClause(value);
   const base = split.base.trim();
 
-  const note = base.match(/^note\s+(.+)$/i);
+  const note = base.match(/^notes\s+(.+)$/i);
   if (note) {
     const parsed = splitWith(note[1].trim());
     const view = parsed.modifiers.some((modifier) => /^view$/i.test(modifier));
@@ -2549,7 +2622,7 @@ function compileFilterProperty(
     return `${filter.internalName}.cutoff(${parsed.values[0]});\n${prelude}__filtersequence(${JSON.stringify(filter.internalName)},${JSON.stringify(parsed.values.join('|'))},${JSON.stringify(parsed.mode)},${parsed.amount},${JSON.stringify(JSON.stringify(parsed.favor))},${every.amount},${JSON.stringify(every.unit)},${every.chance},${every.drift},${every.loose},${JSON.stringify(every.clockSource)});${piano}`;
   }
 
-  const freq = base.match(/^freq\s+(.+)$/i);
+  const freq = base.match(/^freqs\s+(.+)$/i);
   if (freq) {
     const parsed = splitWith(freq[1].trim());
     const values = parseList(parsed.base, line, 'cutoff freq').map((item) => {
@@ -2572,7 +2645,7 @@ function compileFilterProperty(
   const expression = scalarExpressionFromSource(generative.base, sourceDefinitions);
   const literal = Number(expression);
   if (Number.isFinite(literal) && (literal < 0 || literal > 100)) {
-    throw new LanguageError([{ line, message: 'cutoff expects 0..100, or cutoff freq/note/scale' }]);
+    throw new LanguageError([{ line, message: 'cutoff expects 0..100; use PITCH SCALE ..., PITCH NOTES ..., or PITCH FREQS ... for musical cutoff material' }]);
   }
   const initial = `${filter.internalName}.cutoffPercent(${expression});`;
   if (generative.mode) {
@@ -2610,15 +2683,12 @@ function parseBlockPropertyStatement(
   const live = Boolean(match[1]);
   const property = match[2];
   const value = match[3].trim();
-  if (live && label === 'VOICE' && /^note$/i.test(property) && /^from\s+/i.test(value)) {
-    throw new LanguageError([{ line, message: 'LIVE NOTE currently expects a direct note or note list, not FROM' }]);
-  }
-  if (live && !(label === 'VOICE' && /^note$/i.test(property))) {
+  if (live && !(label === 'VOICE' && /^pitch$/i.test(property))) {
     const literal = value.match(/^(\d+(?:\.\d+)?)(?=\s|$)/);
-    if (!literal) throw new LanguageError([{ line, message: 'LIVE currently requires a literal 0..100 value, except LIVE NOTE' }]);
+    if (!literal) throw new LanguageError([{ line, message: 'LIVE currently requires a literal 0..100 value, except LIVE PITCH' }]);
     const amount = Number(literal[1]);
     if (!Number.isFinite(amount) || amount < 0 || amount > 100) {
-      throw new LanguageError([{ line, message: 'LIVE currently requires a literal 0..100 value, except LIVE NOTE' }]);
+      throw new LanguageError([{ line, message: 'LIVE currently requires a literal 0..100 value, except LIVE PITCH' }]);
     }
   }
   return { property, value, live };
@@ -2627,8 +2697,8 @@ function parseBlockPropertyStatement(
 function validateLiveVoiceProperty(voice: VoiceState, property: string, line: number): void {
   const key = property.toLowerCase();
   const soundParameter = voice.soundId ? SOUND_ENGINE_REGISTRY[voice.soundId]?.parameters[key] : undefined;
-  if (soundParameter || key === 'level' || key === 'bow' || key === 'blow' || key === 'strike' || key === 'note') return;
-  throw new LanguageError([{ line, message: `LIVE is available only for 0..100 VOICE parameters or NOTE; '${property}' is not eligible` }]);
+  if (soundParameter || key === 'level' || key === 'bow' || key === 'blow' || key === 'strike' || key === 'pitch') return;
+  throw new LanguageError([{ line, message: `LIVE is available only for 0..100 VOICE parameters or PITCH; '${property}' is not eligible` }]);
 }
 
 function validateLiveFxProperty(fx: FxState, property: string, line: number): void {
@@ -2803,8 +2873,8 @@ export function compileLanguageSource(source: string): string {
         }
         seqs.add(name);
         sourceKinds.set(name, 'seq');
-        sourceDefinitions.set(name, { kind: 'seq', values: [], display: `SEQ ${name}` });
-        currentSeq = { name, line: lineNumber, indentation, modelId: null, length: 8, change: 10, values: [], material: null };
+        sourceDefinitions.set(name, { kind: 'seq', model: null, values: [], display: `SEQ ${name}` });
+        currentSeq = { name, line: lineNumber, indentation, modelId: null, lifeVariant: 'conway', length: 8, change: 10, size: 8, density: 34, maxDensity: null, values: [], material: null };
         const viewDirective = seqMatch[2] ? `\n__seqview(${JSON.stringify(name)});` : '';
         output[index] = `__seq(${JSON.stringify(name)});${viewDirective}`;
         continue;

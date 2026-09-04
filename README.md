@@ -10,7 +10,7 @@ Sonus Umbrae is not built around one synthesizer family or one upstream hardware
 
 - Text-first modular live coding with hot reload quantized to the musical transport.
 - Shared beat/wall-clock scheduler for `every`, probability, named clock objects, clock-rate derivation and generative events.
-- Typed reusable values including scalar, time, note, frequency, scale and envelope specifications.
+- Typed reusable values including scalar, time, note, frequency, scale and envelope specifications, with a unified `PITCH` property for `SCALE`, `NOTES`, and `FREQS` material.
 - Stateful `SEQ` sources, including a Turing-style generative sequencer.
 - Stereo-aware routing, serial processing chains and explicit per-route levels.
 - AudioWorklet processing with C/C++ DSP compiled to independent WebAssembly modules.

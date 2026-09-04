@@ -871,6 +871,15 @@ export class AudioEngine {
       damping: definition.damping,
       position: definition.position,
     });
+    // The worklet starts with Rings' own defaults (model 0/modal). Send the
+    // complete initial definition immediately so the first strum already uses
+    // the SOUND selected by the program. Port message ordering guarantees this
+    // params message is handled before a subsequent trigger/strum message.
+    node.port.postMessage({
+      type: 'params', model: definition.model, polyphony: definition.polyphony, note: definition.note,
+      structure: definition.structure / 100, brightness: definition.brightness / 100,
+      damping: definition.damping / 100, position: definition.position / 100,
+    });
   }
 
   private updateResonator(definition: AudioProgram['resonators'][number], hotReload = false): void {

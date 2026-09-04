@@ -9,8 +9,7 @@ This roadmap is directional rather than a release commitment. Features may move,
 The first tagged development release establishes the current high-level
 language and DSP architecture:
 
-- `VOICE` objects with model-specific sound engines, per-object level, note /
-  frequency / scale sequencing, LPG option, and parameter modulation.
+- `VOICE` objects with model-specific sound engines, per-object level, unified `PITCH` material (`SCALE`, `NOTES`, `FREQS`) sequencing, LPG option, and parameter modulation.
 - `MOD` objects with four related outputs, local declaration inside `VOICE` and
   `FX`, shared transport semantics, and optional scope views.
 - `FX` objects with the current `mist.*` model family, stereo routing, dynamic
@@ -378,7 +377,7 @@ Sonus Umbrae should continue to follow these principles:
 - [x] Compile Mutable Instruments Elements DSP into a dedicated `matter.wasm`.
 - [x] Run Elements in an AudioWorklet with host-rate resampling while preserving the original 32 kHz DSP contract.
 - [x] Expose Elements as one high-level `matter` VOICE engine with mixed BOW/BLOW/STRIKE exciters and stereo output.
-- [x] Integrate Matter voices with note/scale sequencing, routing, levels, hot reload, Scheme, and musical transport stop.
+- [x] Integrate Matter voices with unified PITCH sequencing, routing, levels, hot reload, Scheme, and musical transport stop.
 - [x] Add typed AD/ADR/ASR/ADSR/DAHDSR envelope values, SET/FROM compatibility, and Matter DRIVE triggering through the global scheduler.
 - [ ] Evaluate future audio-rate modulation inputs for selected Matter parameters without exposing the original Eurorack panel semantics.
 
@@ -388,7 +387,7 @@ Sonus Umbrae should continue to follow these principles:
 - [x] Compile Mutable Instruments Rings DSP into a dedicated `resonator.wasm`.
 - [x] Expose the three primary Rings resonator models as `resonator.modal`, `resonator.sympathetic`, and `resonator.string`.
 - [x] Support Rings 1/2/4-note internal polyphony through `SOUND ... WITH N NOTES`.
-- [x] Automatically strum on VOICE note events.
+- [x] Automatically strum on VOICE pitch events.
 - [x] Treat MAIN/AUX as a logical stereo output (MAIN -> L, AUX -> R) while allowing explicit `.main` / `.aux` mono routing.
 - [x] Expose the original mono audio input so a Resonator VOICE can also process another source in `PLAY ... THROUGH resonator THEN ...` chains.
 - [ ] Evaluate explicit strum/pitch decoupling only after the initial note-driven workflow has been tested musically.

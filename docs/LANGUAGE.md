@@ -62,7 +62,7 @@ CLOCK set 120 bpm
 
 VOICE lead:
     sound macro.fm
-    note C4
+    PITCH NOTES C4
 
 PLAY lead through MAIN
 ```
@@ -225,7 +225,7 @@ Use named clocks from beat-based `EVERY` clauses:
 ```text
 VOICE bass:
     SOUND macro.analog
-    NOTE [C2 Eb2 G2] WITH WALK EVERY 1 beat on CLOCK slow
+    PITCH NOTES [C2 Eb2 G2] WITH WALK EVERY 1 beat on CLOCK slow
 ```
 
 or use an anonymous master-derived rate directly when no persistent clock
@@ -385,7 +385,7 @@ VOICE lead:
         ATTACK 20 ms
         RELEASE 1 beat
 
-    NOTE notes EVERY 1 beat
+    PITCH notes EVERY 1 beat
     TIMBRE motion
 ```
 
@@ -429,42 +429,57 @@ voice.
 A voice can use a fixed note:
 
 ```text
-note C4
+PITCH NOTES C4
 ```
 
 A fixed frequency:
 
 ```text
-freq 220
+PITCH FREQS 220
 ```
 
 A list:
 
 ```text
-note [C3 G3 Bb3]
+PITCH NOTES [C3 G3 Bb3]
 ```
 
 Selection modifiers:
 
 ```text
-note [C3 G3 Bb3] with random
-note [C3 G3 Bb3] with walk
-note [C3 G3 Bb3] with shuffle
-note [C3 G3 Bb3] with reverse
+PITCH NOTES [C3 G3 Bb3] with random
+PITCH NOTES [C3 G3 Bb3] with walk
+PITCH NOTES [C3 G3 Bb3] with shuffle
+PITCH NOTES [C3 G3 Bb3] with reverse
 ```
 
 Scales are written as:
 
 ```text
-scale C minor
+PITCH SCALE C minor
 ```
 
-The root note is normalized automatically to uppercase.
+The root note is normalized automatically to uppercase. Supported scale modes include the diatonic modes plus major and minor-pentatonic scales:
+
+```text
+PITCH SCALE C major-pentatonic
+PITCH SCALE A minor-pentatonic
+```
+
+Pentatonic scales use the same range, selection, sequencing, `SET`, and `SEQ life` machinery as the other scales. For example:
+
+```text
+SEQ sparks WITH VIEW:
+    MODEL life
+    SIZE 16
+    PITCH SCALE C minor-pentatonic WITH RANGE C2 C5
+    EVOLVE EVERY 8 beat
+```
 
 A range and sequencing mode can be combined:
 
 ```text
-scale C minor with range C2 C5, walk
+PITCH SCALE C minor with range C2 C5, walk
 ```
 
 ## every
@@ -478,7 +493,7 @@ morph rnd(30,70) every 1 sec
 ```
 
 ```text
-scale C minor with walk every 2 beats
+PITCH SCALE C minor with walk every 2 beats
 ```
 
 Timing modifiers belong to the `every` clause:
@@ -488,7 +503,7 @@ morph rnd(20,80) every 3 sec on drift
 ```
 
 ```text
-scale C minor with random every 2 beats on loose, chance 80
+PITCH SCALE C minor with random every 2 beats on loose, chance 80
 ```
 
 The canonical order is:
@@ -608,7 +623,7 @@ VOICE lead:
         rate 4 sec
         shape sine
 
-    morph from motion.a with depth 40
+    morph motion.a with depth 40
 ```
 
 The local name is scoped to the containing object. Internally the runtime uses
@@ -625,9 +640,9 @@ VOICE lead:
         rate 4 sec
         relation phase with shift 100
 
-    morph from motion.a with depth 30
-    timbre from motion.b with depth 20
-    harmo from motion.c with depth 15
+    morph motion.a with depth 30
+    timbre motion.b with depth 20
+    harmo motion.c with depth 15
 ```
 
 `depth` is expressed in the logical -100..100 modulation range.
@@ -728,7 +743,7 @@ Compatible Mist models accept musical pitch syntax.
 Fixed transposition by note:
 
 ```text
-note C4
+PITCH NOTES C4
 ```
 
 C4 is the current zero-semitone reference.
@@ -750,13 +765,13 @@ maps to approximately +12 semitones.
 Sequenced pitch:
 
 ```text
-note [C3 G3 Bb3] with random every 1 beat
+PITCH NOTES [C3 G3 Bb3] with random every 1 beat
 ```
 
 Scale sequencing:
 
 ```text
-scale C minor with range C3 C5, walk every 2 beats
+PITCH SCALE C minor with range C3 C5, walk every 2 beats
 ```
 
 Frequency syntax is also accepted where musical pitch is supported:
@@ -777,8 +792,8 @@ FX grain:
         rate 4 sec
         shape sine
 
-    position from motion.a with depth 30
-    density from motion.b with depth 20
+    position motion.a with depth 30
+    density motion.b with depth 20
 ```
 
 The current Mist integration receives this modulation at control rate rather
@@ -1026,7 +1041,7 @@ A leading underscore on a live object declaration temporarily excludes that obje
 ```text
 _VOICE bass:
     SOUND macro.analog
-    NOTE C2
+    PITCH NOTES C2
 
 _FILTER tone:
     MODEL svf
@@ -1173,8 +1188,8 @@ reverse
 `walk` can optionally take an amount:
 
 ```text
-scale C minor with walk every 1 beat
-scale C minor with walk 3 every 1 beat
+PITCH SCALE C minor with walk every 1 beat
+PITCH SCALE C minor with walk 3 every 1 beat
 ```
 
 Without an amount, `walk` moves by one sequence step at a time. With an amount,
@@ -1184,7 +1199,7 @@ each update.
 For a scale, these are scale degrees/list positions rather than semitones.
 
 ```text
-scale C minor with range C2 C5, walk 2 every 1 beat
+PITCH SCALE C minor with range C2 C5, walk 2 every 1 beat
 ```
 
 remains inside the declared C2..C5 range.
@@ -1205,7 +1220,7 @@ CLOCK slow RATE /2
 
 VOICE lead:
     sound macro.fm
-    scale C minor with range C3 C5, walk 2 every 2 beats on clock slow
+    PITCH SCALE C minor with range C3 C5, walk 2 every 2 beats on clock slow
     morph 50 with trend 20 every 1 beat on clock /4
 ```
 
@@ -1228,16 +1243,16 @@ SEQ melody:
     model turing
     length 8
     change 12
-    scale C minor with range C2 C4
+    PITCH SCALE C minor with range C2 C4
     every 1 beat
 ```
 
-The generated source is read with `from`:
+The generated source is used directly by name:
 
 ```text
 VOICE bass:
     sound macro.analog
-    note from melody every 1 beat
+    PITCH melody every 1 beat
 ```
 
 The `SEQ` timing and the consumer timing are independent. For example:
@@ -1247,12 +1262,12 @@ SEQ melody:
     model turing
     length 8
     change 10
-    scale D dorian with range D2 D4
+    PITCH SCALE D dorian with range D2 D4
     every 2 beats
 
 VOICE bass:
     sound macro.analog
-    note from melody every 1 beat
+    PITCH melody every 1 beat
 ```
 
 Here the Turing register advances every two beats, while the voice reads its
@@ -1278,7 +1293,7 @@ more variation.
 The musical material can be supplied as a scale:
 
 ```text
-scale C minor with range C2 C4
+PITCH SCALE C minor with range C2 C4
 ```
 
 or as an explicit note vocabulary:
@@ -1303,10 +1318,75 @@ A SEQ source controls its own generation, so consumers do not add list
 selection modes on top of it. The canonical form is therefore:
 
 ```text
-note from melody every 1 beat
+PITCH melody every 1 beat
 ```
 
-rather than `note from melody with random ...`.
+rather than `note melody with random ...`.
+
+### Life note-pool sequencer
+
+`MODEL life` is a pool sequencer rather than a single-current-note source. At startup it creates one cellular grid and maps the live cells onto the declared pitch material. With no suffix it uses Conway's classic Life rule (`B3/S23`). Named Life-like variants can be selected with a dotted model name: `life.highlife` (`B36/S23`), `life.seeds` (`B2/S`), `life.day-night` (`B3678/S34678`), or `life.morley` (`B368/S245`). If no `EVOLVE` property is present, the initial grid remains static for the whole run.
+
+```text
+SEQ ecosystem WITH VIEW:
+    MODEL life
+    SIZE 16
+    PITCH SCALE C minor WITH RANGE C2 C5
+```
+
+`SIZE` currently accepts `8` or `16`. `PITCH SCALE ... WITH RANGE ...`, `PITCH NOTES [...]`, or `PITCH FREQS [...]` defines the pitch material available to the grid. The SEQ itself has no playhead and does not choose a current note. Its view therefore shows only the live/dead cell matrix.
+
+Available Life-like models:
+
+```text
+MODEL life             // Conway B3/S23 (default)
+MODEL life.highlife    // B36/S23
+MODEL life.seeds       // B2/S
+MODEL life.day-night   // B3678/S34678
+MODEL life.morley      // B368/S245
+```
+
+All variants use the same square grid and 8-neighbour Moore neighbourhood; only their birth/survival rule differs. `DENSITY`, `MAX`, `RESPAWN`, `EVOLVE`, `PITCH`, and consumer reader modes work identically for every variant.
+
+Evolution is explicit and optional:
+
+```text
+SEQ ecosystem WITH VIEW:
+    MODEL life
+    SIZE 16
+    DENSITY 15 WITH MAX 20, RESPAWN
+    PITCH SCALE C minor WITH RANGE C2 C5
+    EVOLVE EVERY 8 beat
+```
+
+`EVOLVE EVERY ...` uses the normal scheduling grammar, including `ON CLOCK ...`, `ON CHANCE ...`, and the other compatible timing modifiers. Each evolution changes the pool only; it never forces a consumer to change its currently sounding note.
+
+`DENSITY` controls the random population used when the Life grid is first created. The default is `34`, preserving the original behavior. An optional `WITH MAX` caps the percentage of live cells both after initialization and after every evolution; excess live cells are removed at random. Add `RESPAWN` to regenerate the grid with the initial density whenever an evolution reaches zero live cells.
+
+```text
+DENSITY 15 WITH MAX 20, RESPAWN
+```
+
+`MAX` must be in `0..100` and cannot be lower than the initial `DENSITY`. `RESPAWN` can also be used without a maximum (`DENSITY 10 WITH RESPAWN`). It acts only after an evolution produces an empty grid; it does not inject cells while Life is still active. `DENSITY` does not otherwise bias Conway's evolution; it only seeds the initial state, while `MAX` acts as an explicit musical population limiter.
+
+Consumers read the same pool independently. Unlike Turing, a Life pool requires a reader mode at the point of use:
+
+```text
+VOICE arp:
+    PITCH ecosystem WITH WALK EVERY 1/2 beat
+
+VOICE bells:
+    PITCH ecosystem WITH RANDOM EVERY 4 beat ON CHANCE 30
+
+VOICE anchor:
+    PITCH ecosystem WITH FIRST EVERY 2 beat
+```
+
+The initial reader modes are `ORDER`, `RANDOM`, `WALK`, `REVERSE`, `PENDULUM`, `FIRST`, and `LAST`. Each consumer owns its own reader state, so two voices may choose different notes from the same live-cell pool at the same time.
+
+When `EVOLVE` kills the cell currently associated with a consumer, the consumer keeps its current note until its own next `EVERY` event. At that point it chooses again from the new pool. `WALK` retains the old cell position as its geometric reference even if that cell has died. If the grid temporarily has no live cells, consumers retain their previous note until live material becomes available again.
+
+A future inline reader view may overlay the consumer's selected cell, but the SEQ module view itself intentionally remains state-only: it displays just the active cells.
 
 ### Turing view
 
@@ -1389,7 +1469,7 @@ PLAY source THROUGH tone.hp THEN MAIN
 
 which means `source -> tone.in -> tone.hp -> MAIN`. Embedded FILTER blocks follow the same rule. DaisySP also computes a peak response internally, but Sonus does not expose it as a routing port in this language version.
 
-`CUTOFF` retains the typed musical cutoff forms already supported by FILTER. It can be driven by a normalized scalar/generative value, explicit frequencies, notes or scales, including the existing selection and `EVERY ... WITH ...` timing grammar where applicable. `RESONANCE` and `DRIVE` use the 0..100 Sonus control range. The SVF is intentionally exposed as the DaisySP filter itself; Sonus does not add artificial self-oscillation or oscillator behaviour.
+`CUTOFF` remains the normalized scalar/generative cutoff control. Musical cutoff material now uses the same unified `PITCH` property as other objects: `PITCH SCALE ...`, `PITCH NOTES [...]`, or `PITCH FREQS [...]`, including the existing selection and `EVERY ... WITH ...` timing grammar where applicable. `RESONANCE` and `DRIVE` use the 0..100 Sonus control range. The SVF is intentionally exposed as the DaisySP filter itself; Sonus does not add artificial self-oscillation or oscillator behaviour.
 
 The implementation is compiled into the independent `daisy-filters.wasm` module. Future DaisySP DSP areas may use separate WASM modules rather than expanding this filter binary into a general-purpose monolith.
 
@@ -1530,15 +1610,15 @@ LIVE CUTOFF 60 WITH WANDER 15
 Changing the control to 72 rewrites only the literal as
 `LIVE CUTOFF 72 WITH WANDER 15`; the wander process is preserved.
 
-`LIVE NOTE` is the first typed exception to the scalar rule. It opens the inline piano view for the note value or note list, so the canonical performance form is now:
+`LIVE PITCH` is the first typed exception to the scalar rule. It opens the inline piano view for the note value or note list, so the canonical performance form is now:
 
 ```text
 VOICE lead:
     SOUND macro.analog
-    LIVE NOTE C3
+    LIVE PITCH NOTES C3
 ```
 
-The older `NOTE ... WITH VIEW` form remains accepted for compatibility, but `LIVE NOTE ...` is the preferred spelling. The piano is display-only in this version; direct key editing of the source note/list is reserved for a later iteration. Other typed or derived values such as `FREQ`, `SCALE`, `FROM` and envelopes are not yet `LIVE`-editable. The qualifier is UI metadata; it does not introduce a second scheduler or hidden parameter value.
+The older `PITCH NOTES ... WITH VIEW` form remains accepted for compatibility, but `LIVE PITCH NOTES ...` is the preferred spelling. The piano is display-only in this version; direct key editing of the source note/list is reserved for a later iteration. Other typed or derived values such as `PITCH FREQS`, `PITCH SCALE`, named sources and envelopes are not yet `LIVE`-editable. The qualifier is UI metadata; it does not introduce a second scheduler or hidden parameter value.
 
 ## USE directive
 
@@ -1566,14 +1646,30 @@ The Interface section includes the variable inspector, lightweight runtime metri
 
 ### Direct typed SET values
 
-A compatible `SET` value can be used directly as a property value; `FROM` is no longer required for ordinary typed values. Name resolution checks local scope first and then global scope:
+A compatible named value or runtime source is used directly as a property value. `FROM` is no longer part of the public language. Name resolution checks local scope first and then global scope:
 
 ```text
 VOICE bass:
     SET notes: [C2 G1 C2 Bb1]
-    NOTE notes WITH ORDER EVERY 2 beat ON CLOCK bassclock
+    PITCH notes WITH ORDER EVERY 2 beat ON CLOCK bassclock
 ```
 
-`FROM` remains meaningful for runtime-producing objects such as `SEQ` and `MOD` outputs, where the source is not a static typed value.
+`SEQ` and `MOD` outputs follow the same rule: use the source name directly, for example `PITCH melody` or `MORPH motion.a WITH DEPTH 30`. The source type determines how the parameter consumes it.
 
 During quantized hot reload, voices driven by a sequence keep their current pitch instead of jumping back to the first declared note. This avoids an unnecessary pitch/strum discontinuity when the same live program is reconciled.
+
+### Manual Life reset
+
+A running `SEQ` using `MODEL life` can be repopulated without recompiling the program or changing transport state:
+
+```text
+:life reset ecosystem
+```
+
+Omit the name to reset every active Life sequence:
+
+```text
+:life reset
+```
+
+The new population uses the sequence's current `DENSITY` and optional `MAX` settings. Manual reset is independent of `EVOLVE` and does not require `RESPAWN`.
