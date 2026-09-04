@@ -178,6 +178,13 @@ const MATTER_PARAMETERS: Record<string, SoundParameterSchema> = {
   space: { min: 0, max: 100, modulatable: false },
 };
 
+const RESONATOR_PARAMETERS: Record<string, SoundParameterSchema> = {
+  structure: { min: 0, max: 100, modulatable: false },
+  brightness: { min: 0, max: 100, modulatable: false },
+  damping: { min: 0, max: 100, modulatable: false },
+  position: { min: 0, max: 100, modulatable: false },
+};
+
 const SOUND_ENGINE_REGISTRY: Record<string, SoundEngineSchema> = {
   'macro.analog': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
   'macro.waves': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
@@ -197,6 +204,10 @@ const SOUND_ENGINE_REGISTRY: Record<string, SoundEngineSchema> = {
   'macro.strings': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
   'macro.chiptune': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
   'matter': { parameters: MATTER_PARAMETERS, options: new Set() },
+  'resonator.modal': { parameters: RESONATOR_PARAMETERS, options: new Set() },
+  'resonator.sympathetic': { parameters: RESONATOR_PARAMETERS, options: new Set() },
+  'resonator.strings': { parameters: RESONATOR_PARAMETERS, options: new Set() },
+  'resonator.string': { parameters: RESONATOR_PARAMETERS, options: new Set() },
 };
 
 const SOUND_PARAMETER_NAMES = new Set(
@@ -205,6 +216,10 @@ const SOUND_PARAMETER_NAMES = new Set(
 
 const MIST_PARAMETERS = new Set<FxParameter>([
   'position', 'size', 'pitch', 'density', 'texture', 'mix', 'spread', 'feedback', 'reverb',
+]);
+
+const SKY_PARAMETERS = new Set<FxParameter>([
+  'position', 'size', 'density', 'texture', 'mix', 'spread', 'feedback', 'reverb',
 ]);
 
 const FX_MODEL_REGISTRY: Record<string, FxModelSchema> = {
@@ -216,7 +231,7 @@ const FX_MODEL_REGISTRY: Record<string, FxModelSchema> = {
   'mist.resonator': { lowLevelMode: 'resonestor',      parameters: MIST_PARAMETERS, musicalPitch: true },
   'mist.repeat':    { lowLevelMode: 'beat_repeat',     parameters: MIST_PARAMETERS, musicalPitch: true },
   'mist.smear':     { lowLevelMode: 'spectral_clouds', parameters: MIST_PARAMETERS, musicalPitch: true },
-  'vast':           { lowLevelMode: 'vast',            parameters: MIST_PARAMETERS, musicalPitch: false },
+  'sky':            { lowLevelMode: 'sky',             parameters: SKY_PARAMETERS, musicalPitch: false },
 };
 
 
@@ -981,7 +996,19 @@ function compileVoiceProperty(
       const schema = SOUND_ENGINE_REGISTRY[soundId];
       if (!schema) throw new LanguageError([{ line, message: `unknown sound '${soundId}'` }]);
 
-      const options = (match[2] ?? '').split(',').map((v) => v.trim().toLowerCase()).filter(Boolean);
+      const optionText = (match[2] ?? '').trim();
+      if (soundId.startsWith('resonator.')) {
+        let polyphony = 1;
+        if (optionText) {
+          const poly = optionText.match(/^([124])\s+notes?$/i);
+          if (!poly) throw new LanguageError([{ line, message: `${soundId} expects WITH 1 NOTE, 2 NOTES, or 4 NOTES` }]);
+          polyphony = Number(poly[1]);
+        }
+        voice.soundId = soundId;
+        return `${voice.name}.model(${JSON.stringify(soundId)});\n${voice.name}.polyphony(${polyphony});`;
+      }
+
+      const options = optionText.split(',').map((v) => v.trim().toLowerCase()).filter(Boolean);
       const seen = new Set<string>();
       for (const option of options) {
         if (seen.has(option)) throw new LanguageError([{ line, message: `duplicate sound option '${option}'` }]);
@@ -1680,14 +1707,17 @@ function compileFxProperty(
     throw new LanguageError([{ line, message: `${property} requires FX model to be declared first` }]);
   }
   const schema = FX_MODEL_REGISTRY[fx.modelId];
-  const vastAliases: Record<string, FxParameter> = {
+  const skyAliases: Record<string, FxParameter> = {
     decay: 'feedback',
     damp: 'texture',
+    damping: 'texture',
+    bloom: 'density',
     diffuse: 'density',
     predelay: 'position',
     motion: 'reverb',
+    width: 'spread',
   };
-  const effectiveKey = fx.modelId === 'vast' ? (vastAliases[key] ?? key) : key;
+  const effectiveKey = fx.modelId === 'sky' ? (skyAliases[key] ?? key) : key;
 
   if (key === 'freeze' || key === 'reverse') {
     if (!/^(on|off|true|false)$/i.test(value)) {
@@ -1856,17 +1886,17 @@ function compileFxProperty(
 type PlayEndpoint = {
   name: string;
   channel: 'L' | 'R' | null;
-  port: 'out' | 'aux' | 'lp12' | 'bp12' | 'lp24' | null;
+  port: 'out' | 'main' | 'aux' | 'lp12' | 'bp12' | 'lp24' | null;
   amount: number;
 };
 
 function parsePlayEndpoint(raw: string, line: number): PlayEndpoint {
-  const match = raw.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\.(out|aux|lp12|bp12|lp24|L|R))?(?:\s+at\s+(.+))?$/i);
+  const match = raw.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\.(out|main|aux|lp12|bp12|lp24|L|R))?(?:\s+at\s+(.+))?$/i);
   if (!match) throw new LanguageError([{ line, message: `invalid PLAY endpoint '${raw.trim()}'` }]);
   const suffix = match[2]?.toLowerCase() ?? null;
   return {
     name: match[1],
-    port: suffix === 'out' || suffix === 'aux' || suffix === 'lp12' || suffix === 'bp12' || suffix === 'lp24' ? suffix : null,
+    port: suffix === 'out' || suffix === 'main' || suffix === 'aux' || suffix === 'lp12' || suffix === 'bp12' || suffix === 'lp24' ? suffix : null,
     channel: suffix === 'l' ? 'L' : suffix === 'r' ? 'R' : null,
     amount: match[3] === undefined ? 100 : normalizedAmount(match[3].trim(), line),
   };
@@ -1879,6 +1909,7 @@ function compilePlay(
   fxs: Set<string>,
   filters: Set<string>,
   voiceEmbeddedFilters: Map<string, string>,
+  voiceSoundIds: Map<string, string>,
 ): string {
   const body = lineText.trim().replace(/^PLAY\s+/i, '');
   if (body === lineText.trim()) throw new LanguageError([{ line, message: 'PLAY expects a source' }]);
@@ -1898,8 +1929,8 @@ function compilePlay(
     throw new LanguageError([{ line, message: "after the first 'through', PLAY chains use 'then'" }]);
   }
 
-  const kindOf = (name: string): 'voice' | 'fx' | 'filter' | 'main' => {
-    if (voices.has(name)) return 'voice';
+  const kindOf = (name: string): 'voice' | 'resonator' | 'fx' | 'filter' | 'main' => {
+    if (voices.has(name)) return voiceSoundIds.get(name)?.startsWith('resonator.') ? 'resonator' : 'voice';
     if (fxs.has(name)) return 'fx';
     if (filters.has(name)) return 'filter';
     if (name.toUpperCase() === 'MAIN') return 'main';
@@ -1913,10 +1944,10 @@ function compilePlay(
     const sourceKind = kindOf(source.name);
     const targetKind = kindOf(target.name);
     if (sourceKind === 'main') throw new LanguageError([{ line, message: 'MAIN cannot be used as a PLAY source' }]);
-    if (targetKind === 'voice') throw new LanguageError([{ line, message: 'VOICE cannot be used as an audio destination' }]);
+    if (targetKind === 'voice') throw new LanguageError([{ line, message: 'VOICE cannot be used as an audio destination unless its sound is resonator.*' }]);
 
-    const embeddedFilter = sourceKind === 'voice' ? voiceEmbeddedFilters.get(source.name) : undefined;
-    if (sourceKind === 'voice') {
+    const embeddedFilter = sourceKind === 'voice' || sourceKind === 'resonator' ? voiceEmbeddedFilters.get(source.name) : undefined;
+    if (sourceKind === 'voice' || sourceKind === 'resonator') {
       if (source.channel) throw new LanguageError([{ line, message: 'VOICE outputs are mono ports; .L/.R are not valid' }]);
       if (embeddedFilter) {
         if (!source.port || !['lp12','bp12','lp24'].includes(source.port)) {
@@ -1924,6 +1955,10 @@ function compilePlay(
         }
       } else if (source.port && ['lp12','bp12','lp24'].includes(source.port)) {
         throw new LanguageError([{ line, message: `VOICE '${source.name}' has no embedded FILTER; use .out or .aux` }]);
+      }
+      if (sourceKind === 'resonator' && source.port === 'main') source.port = 'out';
+      if (sourceKind === 'voice' && source.port === 'main') {
+        throw new LanguageError([{ line, message: `.main is available only on resonator.* voices` }]);
       }
     }
     if (sourceKind === 'filter') {
@@ -1933,12 +1968,14 @@ function compilePlay(
       }
     }
     if (sourceKind === 'fx' && source.port) throw new LanguageError([{ line, message: 'FX outputs use .L/.R, not named mono ports' }]);
+    if (targetKind === 'resonator' && (target.port || target.channel)) throw new LanguageError([{ line, message: `resonator destination '${target.name}' uses its single mono IN and does not take an output selector` }]);
     if (targetKind === 'filter' && (target.port || target.channel)) throw new LanguageError([{ line, message: 'FILTER destination does not select an output port' }]);
     if (targetKind === 'fx' && target.port) throw new LanguageError([{ line, message: 'FX destination uses .L/.R channel selectors' }]);
 
     const amount = source.amount;
-    const sourceMono = sourceKind === 'voice' || sourceKind === 'filter' || source.channel !== null;
-    const sourceMonoSignal = sourceKind === 'voice'
+    const resonatorStereo = sourceKind === 'resonator' && !source.port && source.channel === null;
+    const sourceMono = sourceKind === 'voice' || sourceKind === 'filter' || source.channel !== null || (sourceKind === 'resonator' && !resonatorStereo);
+    const sourceMonoSignal = sourceKind === 'voice' || sourceKind === 'resonator'
       ? `${source.name}.${embeddedFilter ? source.port : (source.port ?? 'out')}`
       : sourceKind === 'filter'
         ? `${source.name}.${source.port}`
@@ -1950,6 +1987,9 @@ function compilePlay(
         routes.push(`${sourceMonoSignal}(${amount}) -> Audio.out_${target.channel};`);
       } else if (sourceMono) {
         routes.push(`${sourceMonoSignal}(${amount}) -> Audio.out;`);
+      } else if (sourceKind === 'resonator') {
+        routes.push(`${source.name}.out(${amount}) -> Audio.out_L;`);
+        routes.push(`${source.name}.aux(${amount}) -> Audio.out_R;`);
       } else {
         routes.push(`${source.name}.out_L(${amount}) -> Audio.out_L;`);
         routes.push(`${source.name}.out_R(${amount}) -> Audio.out_R;`);
@@ -1957,9 +1997,14 @@ function compilePlay(
       continue;
     }
 
-    if (targetKind === 'filter') {
-      if (!sourceMono) throw new LanguageError([{ line, message: `stereo FX '${source.name}' must select .L or .R before mono FILTER '${target.name}'` }]);
-      routes.push(`${sourceMonoSignal}(${amount}) -> ${target.name}.in;`);
+    if (targetKind === 'filter' || targetKind === 'resonator') {
+      const targetPort = `${target.name}.in`;
+      if (!sourceMono) {
+        if (sourceKind === 'resonator') routes.push(`${source.name}.out(${amount}) -> ${targetPort};`);
+        else throw new LanguageError([{ line, message: `stereo FX '${source.name}' must select .L or .R before mono destination '${target.name}'` }]);
+      } else {
+        routes.push(`${sourceMonoSignal}(${amount}) -> ${targetPort};`);
+      }
       continue;
     }
 
@@ -1968,6 +2013,9 @@ function compilePlay(
       routes.push(`${sourceMonoSignal}(${amount}) -> ${target.name}.in${target.channel};`);
     } else if (sourceMono) {
       routes.push(`${sourceMonoSignal}(${amount}) -> ${target.name}.in;`);
+    } else if (sourceKind === 'resonator') {
+      routes.push(`${source.name}.out(${amount}) -> ${target.name}.inL;`);
+      routes.push(`${source.name}.aux(${amount}) -> ${target.name}.inR;`);
     } else {
       routes.push(`${source.name}.out_L(${amount}) -> ${target.name}.inL;`);
       routes.push(`${source.name}.out_R(${amount}) -> ${target.name}.inR;`);
@@ -2148,6 +2196,7 @@ export function compileLanguageSource(source: string): string {
   const fxs = new Set<string>();
   const filters = new Set<string>();
   const voiceEmbeddedFilters = new Map<string, string>();
+  const voiceSoundIds = new Map<string, string>();
   const scalarNames = new Set<string>();
   const sourceKinds = new Map<string, SourceKind>();
   const sourceDefinitions = new Map<string, SourceDefinition>();
@@ -2371,7 +2420,7 @@ export function compileLanguageSource(source: string): string {
         requireFxModel(currentFx, diagnostics);
         currentVoice = null;
         currentFx = null;
-        output[index] = compilePlay(trimmed, lineNumber, voices, fxs, filters, voiceEmbeddedFilters);
+        output[index] = compilePlay(trimmed, lineNumber, voices, fxs, filters, voiceEmbeddedFilters, voiceSoundIds);
         continue;
       }
 
@@ -2397,7 +2446,10 @@ export function compileLanguageSource(source: string): string {
           throw new LanguageError([{ line: lineNumber, message: 'expected VOICE property and value' }]);
         }
         output[index] = compileVoiceProperty(currentVoice, propertyMatch[1], propertyMatch[2], lineNumber, sourceKinds, sourceDefinitions, modSources);
-        if (propertyMatch[1].toLowerCase() === 'sound') currentVoice.hasSound = true;
+        if (propertyMatch[1].toLowerCase() === 'sound') {
+          currentVoice.hasSound = true;
+          if (currentVoice.soundId) voiceSoundIds.set(currentVoice.name, currentVoice.soundId);
+        }
         continue;
       }
 

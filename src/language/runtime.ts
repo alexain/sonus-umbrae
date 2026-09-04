@@ -166,13 +166,14 @@ interface GainDefinition {
   parameters: Map<string, string>;
 }
 
-type VoiceEngineKind = 'macro' | 'matter';
-type VoiceParameterName = 'harmo' | 'timbre' | 'morph' | 'geometry' | 'brightness' | 'damping' | 'position' | 'space' | 'bow' | 'bowTimbre' | 'blow' | 'blowTimbre' | 'strike' | 'strikeTimbre';
+type VoiceEngineKind = 'macro' | 'matter' | 'resonator';
+type VoiceParameterName = 'harmo' | 'timbre' | 'morph' | 'geometry' | 'structure' | 'brightness' | 'damping' | 'position' | 'space' | 'bow' | 'bowTimbre' | 'blow' | 'blowTimbre' | 'strike' | 'strikeTimbre';
 
 interface VoiceDefinition {
   engine: VoiceEngineKind;
   soundId: string;
   model: number;
+  polyphony: 1 | 2 | 4;
   lpg: boolean;
   level: number;
   frequency: number;
@@ -180,6 +181,7 @@ interface VoiceDefinition {
   timbre: number;
   morph: number;
   geometry: number;
+  structure: number;
   brightness: number;
   damping: number;
   position: number;
@@ -1114,6 +1116,7 @@ export class SonusRuntime {
           engine: 'macro',
           soundId: 'macro.analog',
           model: 1,
+          polyphony: 1,
           lpg: false,
           level: 100,
           frequency: 440,
@@ -1121,6 +1124,7 @@ export class SonusRuntime {
           timbre: 50,
           morph: 50,
           geometry: 45,
+          structure: 50,
           brightness: 65,
           damping: 55,
           position: 35,
@@ -1740,6 +1744,30 @@ export class SonusRuntime {
         continue;
       }
 
+      match = line.match(/^([A-Za-z_]\w*)\.polyphony\(\s*(.+)\s*\)\s*$/);
+      if (match) {
+        const [, name, rawValue] = match;
+        const voice = voices.get(name);
+        if (!voice) {
+          diagnostics.push({ line: lineNumber, message: `unknown Voice object: ${name}` });
+          continue;
+        }
+        if (voice.engine !== 'resonator') {
+          diagnostics.push({ line: lineNumber, message: 'polyphony is available only for resonator.* sounds' });
+          continue;
+        }
+        const value = evalNumber(rawValue, lineNumber, 'polyphony');
+        if (value === undefined) continue;
+        if (![1, 2, 4].includes(value)) {
+          diagnostics.push({ line: lineNumber, message: 'polyphony expects 1, 2, or 4' });
+          continue;
+        }
+        voice.polyphony = value as 1 | 2 | 4;
+        voice.parameters.set('POLYPHONY', `${value} NOTES`);
+        results.push({ message: `${name}.polyphony ${value}` });
+        continue;
+      }
+
       match = line.match(/^([A-Za-z_]\w*)\.drive\(\s*(.+)\s*\)\s*$/);
       if (match) {
         const [, name, rawValue] = match;
@@ -1773,7 +1801,22 @@ export class SonusRuntime {
         continue;
       }
 
-      match = line.match(/^([A-Za-z_]\w*)\.(harmo|timbre|morph|geometry|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)\(\s*(.+)\s*\)\s*$/);
+      match = line.match(/^([A-Za-z_]\w*)\.(position|size|pitch|density|texture|mix|spread|feedback|reverb|freeze|reverse|mode)\(\s*(.+)\s*\)\s*$/);
+      if (match && mists.has(match[1])) {
+        const definition = mists.get(match[1])!;
+        const error = applyMistCall(
+          match[1],
+          definition,
+          { name: match[2], argument: match[3] },
+          moduleViews,
+          (expression) => evalValue(expression, lineNumber),
+        );
+        if (error) diagnostics.push({ line: lineNumber, message: error });
+        else results.push({ message: `${match[1]}.${match[2]}` });
+        continue;
+      }
+
+      match = line.match(/^([A-Za-z_]\w*)\.(harmo|timbre|morph|geometry|structure|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)\(\s*(.+)\s*\)\s*$/);
       if (match) {
         const [, name, parameter, rawValue] = match;
         const voice = voices.get(name);
@@ -1792,21 +1835,6 @@ export class SonusRuntime {
         voice[voiceParameter] = value;
         voice.parameters.set(parameter.toUpperCase(), `${formatNumber(value)}%`);
         results.push({ message: `${name}.${parameter} ${formatNumber(value)}%` });
-        continue;
-      }
-
-      match = line.match(/^([A-Za-z_]\w*)\.(position|size|pitch|density|texture|mix|spread|feedback|reverb|freeze|reverse|mode)\(\s*(.+)\s*\)\s*$/);
-      if (match && mists.has(match[1])) {
-        const definition = mists.get(match[1])!;
-        const error = applyMistCall(
-          match[1],
-          definition,
-          { name: match[2], argument: match[3] },
-          moduleViews,
-          (expression) => evalValue(expression, lineNumber),
-        );
-        if (error) diagnostics.push({ line: lineNumber, message: error });
-        else results.push({ message: `${match[1]}.${match[2]}` });
         continue;
       }
 
@@ -1989,6 +2017,8 @@ export class SonusRuntime {
           // Mono convenience input feeding both Mist channels.
         } else if (targetPort === 'in' && filters.has(targetName)) {
           // Mono FILTER input.
+        } else if (targetPort === 'in' && voices.get(targetName)?.engine === 'resonator') {
+          // Rings/Resonator has one mono external excitation input.
         } else if (!(targetName === 'Audio' && targetPort === 'out') && !gains.has(targetName)) {
           diagnostics.push({ line: lineNumber, message: `unknown or non-input object: ${targetName}` });
           continue;
@@ -2578,6 +2608,19 @@ export class SonusRuntime {
           position: definition.position,
           space: definition.space,
         })),
+      resonators: [...voices.entries()]
+        .filter(([, definition]) => definition.engine === 'resonator')
+        .map(([name, definition]) => ({
+          name,
+          model: definition.model,
+          polyphony: definition.polyphony,
+          note: 69 + 12 * Math.log2(definition.frequency / 440),
+          level: definition.level,
+          structure: definition.structure,
+          brightness: definition.brightness,
+          damping: definition.damping,
+          position: definition.position,
+        })),
       voices: [...voices.entries()]
         .filter(([, definition]) => definition.engine === 'macro')
         .map(([name, definition]) => ({
@@ -2602,7 +2645,7 @@ export class SonusRuntime {
         range: definition.range,
       })),
       mists: [...mists.entries()]
-        .filter(([name]) => languageFxMeta.get(name)?.modelId !== 'vast')
+        .filter(([name]) => languageFxMeta.get(name)?.modelId !== 'sky')
         .map(([name, definition]) => ({
           name,
           position: definition.position,
@@ -2618,17 +2661,17 @@ export class SonusRuntime {
           reverse: definition.reverse,
           mode: definition.mode,
         })),
-      vasts: [...mists.entries()]
-        .filter(([name]) => languageFxMeta.get(name)?.modelId === 'vast')
+      skies: [...mists.entries()]
+        .filter(([name]) => languageFxMeta.get(name)?.modelId === 'sky')
         .map(([name, definition]) => ({
           name,
           size: definition.size,
           decay: definition.feedback,
           damp: definition.texture,
-          diffuse: definition.density,
+          bloom: definition.density,
           predelay: definition.position,
           motion: definition.reverb,
-          spread: definition.spread,
+          width: definition.spread,
           mix: definition.mix,
           freeze: definition.freeze,
         })),
@@ -2810,7 +2853,7 @@ export class SonusRuntime {
       this.audio.applyProgram(program);
     if (!hotReload) {
       for (const [name, voice] of voices) {
-        if (voice.lpg || (voice.engine === 'matter' && !languageDriveEvery.has(name))) this.audio.triggerVoice(name);
+        if (voice.lpg || voice.engine === 'resonator' || (voice.engine === 'matter' && !languageDriveEvery.has(name))) this.audio.triggerVoice(name);
       }
     }
 
@@ -3379,13 +3422,13 @@ export class SonusRuntime {
         voice.frequency = frequency;
         this.audio.setVoiceParameter(name, 'freq', frequency);
         updateInlinePiano('voice', name, frequency);
-        if (voice.lpg || (voice.engine === 'matter' && !languageDriveEvery.has(name))) this.audio.triggerVoice(name);
+        if (voice.lpg || voice.engine === 'resonator' || (voice.engine === 'matter' && !languageDriveEvery.has(name))) this.audio.triggerVoice(name);
 
         const retrig = sequence
           ? sequenceFavorForValue(frequency, sequence.favor, 'frequency')
               .find((entry) => entry.operator === 'retrig')
           : undefined;
-        if ((voice.lpg || (voice.engine === 'matter' && !languageDriveEvery.has(name))) && retrig && retrig.amount > 1) {
+        if ((voice.lpg || voice.engine === 'resonator' || (voice.engine === 'matter' && !languageDriveEvery.has(name))) && retrig && retrig.amount > 1) {
           const count = Math.round(retrig.amount);
           const stepMs = cycle.unit === 'beat'
             ? Math.max(1, 60000 / Math.max(1, this.audio.getClockStatus().bpm) * cycle.amount)
@@ -3991,7 +4034,7 @@ function parseLanguageParameterCycleDirective(
   lineNumber: number,
 ): LanguageParameterCycleDefinition | null {
   const match = line.match(
-    /^__paramcycle\("([A-Za-z_]\w*)","(harmo|timbre|morph|geometry|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)","((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/,
+    /^__paramcycle\("([A-Za-z_]\w*)","(harmo|timbre|morph|geometry|structure|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)","((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/,
   );
   if (!match) return null;
 
@@ -4021,7 +4064,7 @@ function parseLanguageParameterDefaultDirective(
   lineNumber: number,
 ): LanguageParameterDefaultDefinition | null {
   const match = line.match(
-    /^__paramdefault\("([A-Za-z_]\w*)","(harmo|timbre|morph|geometry|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)","((?:[^"\\]|\\.)*)"\)$/,
+    /^__paramdefault\("([A-Za-z_]\w*)","(harmo|timbre|morph|geometry|structure|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)","((?:[^"\\]|\\.)*)"\)$/,
   );
   if (!match) return null;
 
@@ -4444,12 +4487,12 @@ function applyMistCall(
         kammerl: { id: 6, label: 'BEAT REPEAT' },
         spectral_clouds: { id: 7, label: 'SPECTRAL CLOUDS' },
         spectral_cloud: { id: 7, label: 'SPECTRAL CLOUDS' },
-        vast: { id: 8, label: 'VAST / VALLEY PLATEAU' },
+        sky: { id: 8, label: 'SKY / CLOUDSEEDCORE' },
       };
 
       const mode = modes[normalized];
       if (!mode) {
-        return 'mode expects granular, stretch, looping_delay, spectral, oliverb, resonestor, beat_repeat, spectral_clouds, or vast';
+        return 'mode expects granular, stretch, looping_delay, spectral, oliverb, resonestor, beat_repeat, spectral_clouds, or sky';
       }
 
       definition.mode = mode.id;
@@ -4678,6 +4721,7 @@ function applyVoiceCall(
     case 'timbre':
     case 'morph':
     case 'geometry':
+    case 'structure':
     case 'brightness':
     case 'damping':
     case 'position':
@@ -4696,6 +4740,14 @@ function applyVoiceCall(
       const parameter = call.name as VoiceParameterName;
       voice[parameter] = value;
       voice.parameters.set(call.name.toUpperCase(), `${formatNumber(value)}%`);
+      return null;
+    }
+    case 'polyphony': {
+      const value = evaluate(call.argument);
+      if (value === undefined) return null;
+      if (typeof value !== 'number' || ![1, 2, 4].includes(value)) return 'polyphony expects 1, 2, or 4';
+      voice.polyphony = value as 1 | 2 | 4;
+      voice.parameters.set('POLYPHONY', `${value} NOTES`);
       return null;
     }
     case 'drive': {
@@ -4727,9 +4779,23 @@ function applyVoiceModelValue(voice: VoiceDefinition, value: ScalarValue): strin
       voice.parameters.set('MODEL', normalized.toUpperCase());
       return null;
     }
+    const resonatorModels: Record<string, number> = {
+      'resonator.modal': 0,
+      'resonator.sympathetic': 1,
+      'resonator.strings': 1,
+      'resonator.string': 2,
+    };
+    if (normalized in resonatorModels) {
+      voice.engine = 'resonator';
+      voice.soundId = normalized;
+      voice.model = resonatorModels[normalized];
+      voice.lpg = false;
+      voice.parameters.set('MODEL', normalized.toUpperCase());
+      return null;
+    }
   }
   const model = parseVoiceModelValue(value);
-  if (model === null) return 'model expects a macro.* or matter sound';
+  if (model === null) return 'model expects a macro.*, matter, or resonator.* sound';
   voice.engine = 'macro';
   voice.model = model;
   voice.soundId = formatVoiceModelId(model);

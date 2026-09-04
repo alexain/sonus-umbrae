@@ -12,11 +12,10 @@ The Sonus Umbrae adaptation removes VCV Rack and SIMD dependencies and exposes
 a WebAssembly C ABI, while preserving the virtual-analog filter topology and
 the LP12/BP12/LP24 output model.
 
+## Ghost Note Audio CloudSeedCore
 
-## Valley Plateau
+The `sky` FX backend uses Ghost Note Audio's CloudSeedCore reverb algorithm. The upstream source is fetched by `npm run dsp:setup` into `vendor/cloudseed-core/` and compiled into its own `sky.wasm` WebAssembly backend.
 
-The `vast` FX backend uses the original `Dattorro` DSP core from ValleyAudio's ValleyRackFree Plateau module. The upstream source is fetched by `npm run dsp:setup` into `vendor/valley-rack-free/` and compiled into its own `vast.wasm` WebAssembly backend. Mist/Clouds remains a separate SuperParasites backend; Rack module/UI code is not compiled.
+CloudSeedCore is MIT licensed. Copyright remains with Ghost Note Engineering Ltd / Ghost Note Audio. Sonus Umbrae uses the name `sky` for its public model and does not present itself as an official Cloud Seed product.
 
-ValleyRackFree is GPL-3.0 licensed and identifies Plateau as a plate reverb based on Jon Dattorro's 1997 reverberator algorithm. Copyright and GPL terms remain with the upstream project.
-
-Upstream: https://github.com/ValleyAudio/ValleyRackFree
+Upstream: https://github.com/GhostNoteAudio/CloudSeedCore

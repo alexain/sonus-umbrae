@@ -50,6 +50,17 @@ export interface AudioProgram {
     position: number;
     space: number;
   }>;
+  resonators: Array<{
+    name: string;
+    model: number;
+    polyphony: 1 | 2 | 4;
+    note: number;
+    level: number;
+    structure: number;
+    brightness: number;
+    damping: number;
+    position: number;
+  }>;
   swells: Array<{
     name: string;
     frequency: number;
@@ -76,15 +87,15 @@ export interface AudioProgram {
     reverse: boolean;
     mode: number;
   }>;
-  vasts: Array<{
+  skies: Array<{
     name: string;
     size: number;
     decay: number;
     damp: number;
-    diffuse: number;
+    bloom: number;
     predelay: number;
     motion: number;
-    spread: number;
+    width: number;
     mix: number;
     freeze: boolean;
   }>;
@@ -153,6 +164,16 @@ interface MatterVoice {
   level: number;
 }
 
+interface ResonatorVoice {
+  node: AudioWorkletNode;
+  mainGain: GainNode;
+  auxGain: GainNode;
+  note: number;
+  level: number;
+  model: number;
+  polyphony: 1 | 2 | 4;
+}
+
 interface SwellVoice {
   node: AudioWorkletNode;
   frequency: number;
@@ -192,8 +213,10 @@ interface MistVoice {
   mode: number;
 }
 
-interface VastVoice {
+interface SkyVoice {
   node: AudioWorkletNode;
+  inputMerger: ChannelMergerNode;
+  outputSplitter: ChannelSplitterNode;
   monoInput: GainNode;
   inputL: GainNode;
   inputR: GainNode;
@@ -206,10 +229,10 @@ interface VastVoice {
   size: number;
   decay: number;
   damp: number;
-  diffuse: number;
+  bloom: number;
   predelay: number;
   motion: number;
-  spread: number;
+  width: number;
   mix: number;
   freeze: boolean;
 }
@@ -276,9 +299,10 @@ export class AudioEngine {
   private gains = new Map<string, GainVoice>();
   private voices = new Map<string, MacroVoice>();
   private matters = new Map<string, MatterVoice>();
+  private resonators = new Map<string, ResonatorVoice>();
   private swells = new Map<string, SwellVoice>();
   private mists = new Map<string, MistVoice>();
-  private vasts = new Map<string, VastVoice>();
+  private skies = new Map<string, SkyVoice>();
   private filters = new Map<string, LiquidFilterVoice>();
   private clocks = new Map<string, ClockSource>();
   private clockTriggerListeners = new Map<string, Set<() => void>>();
@@ -286,15 +310,17 @@ export class AudioEngine {
   private clockTransportRunning = true;
   private voiceWasmBytes: ArrayBuffer | null = null;
   private matterWasmBytes: ArrayBuffer | null = null;
+  private resonatorWasmBytes: ArrayBuffer | null = null;
   private swellWasmBytes: ArrayBuffer | null = null;
   private mistWasmBytes: ArrayBuffer | null = null;
-  private vastWasmBytes: ArrayBuffer | null = null;
+  private skyWasmBytes: ArrayBuffer | null = null;
   private liquidWasmBytes: ArrayBuffer | null = null;
   private voiceWorkletLoaded = false;
   private matterWorkletLoaded = false;
+  private resonatorWorkletLoaded = false;
   private swellWorkletLoaded = false;
   private mistWorkletLoaded = false;
-  private vastWorkletLoaded = false;
+  private skyWorkletLoaded = false;
   private liquidWorkletLoaded = false;
   private clockWorkletLoaded = false;
   private pendingProgram: AudioProgram | null = null;
@@ -313,7 +339,7 @@ export class AudioEngine {
           : 'suspended',
       sampleRate: this.context?.sampleRate ?? null,
       testFrequency: this.testOscillator?.frequency.value ?? null,
-      objectCount: this.oscillators.size + this.gains.size + this.voices.size + this.matters.size + this.swells.size + this.mists.size + this.vasts.size + this.filters.size + this.clocks.size,
+      objectCount: this.oscillators.size + this.gains.size + this.voices.size + this.matters.size + this.resonators.size + this.swells.size + this.mists.size + this.skies.size + this.filters.size + this.clocks.size,
       routeCount: this.routes.size,
     };
   }
@@ -328,9 +354,10 @@ export class AudioEngine {
     const context = this.ensureContext();
     await this.ensureVoiceRuntime();
     await this.ensureMatterRuntime();
+    await this.ensureResonatorRuntime();
     await this.ensureSwellRuntime();
     await this.ensureMistRuntime();
-    await this.ensureVastRuntime();
+    await this.ensureSkyRuntime();
     await this.ensureLiquidRuntime();
     await this.ensureClockRuntime();
     if (context.state !== 'running') await context.resume();
@@ -352,9 +379,10 @@ export class AudioEngine {
   applyProgram(program: AudioProgram): void {
     if ((program.voices.length > 0 && !this.voiceWorkletLoaded) ||
         (program.matters.length > 0 && !this.matterWorkletLoaded) ||
+        (program.resonators.length > 0 && !this.resonatorWorkletLoaded) ||
         (program.swells.length > 0 && !this.swellWorkletLoaded) ||
         (program.mists.length > 0 && !this.mistWorkletLoaded) ||
-        (program.vasts.length > 0 && !this.vastWorkletLoaded) ||
+        (program.skies.length > 0 && !this.skyWorkletLoaded) ||
         (program.filters.length > 0 && !this.liquidWorkletLoaded)) {
       this.pendingProgram = program;
       return;
@@ -371,9 +399,10 @@ export class AudioEngine {
     const desiredOscillators = new Map(program.oscillators.map((definition) => [definition.name, definition]));
     const desiredVoices = new Map(program.voices.map((definition) => [definition.name, definition]));
     const desiredMatters = new Map(program.matters.map((definition) => [definition.name, definition]));
+    const desiredResonators = new Map(program.resonators.map((definition) => [definition.name, definition]));
     const desiredSwells = new Map(program.swells.map((definition) => [definition.name, definition]));
     const desiredMists = new Map(program.mists.map((definition) => [definition.name, definition]));
-    const desiredVasts = new Map(program.vasts.map((definition) => [definition.name, definition]));
+    const desiredSkies = new Map(program.skies.map((definition) => [definition.name, definition]));
     const desiredFilters = new Map(program.filters.map((definition) => [definition.name, definition]));
     const desiredGains = new Map(program.gains.map((definition) => [definition.name, definition]));
     const desiredRoutes = new Map(program.routes.map((route) => [`${route.source}->${route.destination}`, route]));
@@ -411,6 +440,10 @@ export class AudioEngine {
       if (!desiredMatters.has(name)) this.removeMatter(name);
     }
 
+    for (const [name] of this.resonators) {
+      if (!desiredResonators.has(name)) this.removeResonator(name);
+    }
+
     for (const [name] of this.swells) {
       if (!desiredSwells.has(name)) this.removeSwell(name);
     }
@@ -420,8 +453,8 @@ export class AudioEngine {
       if (!desiredMists.has(name)) this.removeMist(name);
     }
 
-    for (const [name] of this.vasts) {
-      if (!desiredVasts.has(name)) this.removeVast(name);
+    for (const [name] of this.skies) {
+      if (!desiredSkies.has(name)) this.removeSky(name);
     }
 
     for (const definition of program.clockSources) this.createOrUpdateClock(definition.name, definition.rate, definition.jitter, definition.drift);
@@ -442,6 +475,11 @@ export class AudioEngine {
       this.updateMatter(definition);
     }
 
+    for (const definition of program.resonators) {
+      this.createResonator(definition);
+      this.updateResonator(definition);
+    }
+
     for (const definition of program.filters) {
       this.createFilter(definition);
       this.updateFilter(definition);
@@ -459,9 +497,9 @@ export class AudioEngine {
       this.updateMist(definition);
     }
 
-    for (const definition of program.vasts) {
-      this.createVast(definition);
-      this.updateVast(definition);
+    for (const definition of program.skies) {
+      this.createSky(definition);
+      this.updateSky(definition);
     }
 
     for (const definition of program.gains) {
@@ -636,6 +674,63 @@ export class AudioEngine {
     const matter = this.matters.get(name);
     if (!matter) throw new Error(`unknown Matter object: ${name}`);
     matter.node.port.postMessage({ type: 'trigger' });
+  }
+
+  private createResonator(definition: AudioProgram['resonators'][number]): void {
+    if (this.resonators.has(definition.name)) return;
+    if (!this.resonatorWorkletLoaded || !this.resonatorWasmBytes) {
+      throw new Error('Resonator DSP is not ready; run :start after building the DSP');
+    }
+
+    const context = this.ensureContext();
+    const node = new AudioWorkletNode(context, 'sonus-resonator', {
+      numberOfInputs: 1,
+      numberOfOutputs: 2,
+      outputChannelCount: [1, 1],
+      processorOptions: { wasmBytes: this.resonatorWasmBytes.slice(0), hostSampleRate: context.sampleRate },
+    });
+    const mainGain = context.createGain();
+    const auxGain = context.createGain();
+    const level = Math.max(0, Math.min(1, definition.level / 100));
+    mainGain.gain.value = level;
+    auxGain.gain.value = level;
+    node.connect(mainGain, 0, 0);
+    node.connect(auxGain, 1, 0);
+    this.resonators.set(definition.name, {
+      node, mainGain, auxGain, note: definition.note, level: definition.level,
+      model: definition.model, polyphony: definition.polyphony,
+    });
+  }
+
+  private updateResonator(definition: AudioProgram['resonators'][number]): void {
+    const resonator = this.resonators.get(definition.name);
+    if (!resonator) return;
+    const noteChanged = Math.abs(resonator.note - definition.note) > 0.0001;
+    resonator.note = definition.note;
+    resonator.level = definition.level;
+    resonator.model = definition.model;
+    resonator.polyphony = definition.polyphony;
+    const level = Math.max(0, Math.min(1, definition.level / 100));
+    const context = this.ensureContext();
+    resonator.mainGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
+    resonator.auxGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
+    resonator.node.port.postMessage({
+      type: 'params',
+      model: definition.model,
+      polyphony: definition.polyphony,
+      note: definition.note,
+      structure: definition.structure / 100,
+      brightness: definition.brightness / 100,
+      damping: definition.damping / 100,
+      position: definition.position / 100,
+    });
+    if (noteChanged) resonator.node.port.postMessage({ type: 'strum' });
+  }
+
+  triggerResonator(name: string): void {
+    const resonator = this.resonators.get(name);
+    if (!resonator) throw new Error(`unknown Resonator object: ${name}`);
+    resonator.node.port.postMessage({ type: 'strum' });
   }
 
   private createFilter(definition: AudioProgram['filters'][number]): void {
@@ -886,44 +981,48 @@ export class AudioEngine {
   }
 
 
-  private createVast(definition: AudioProgram['vasts'][number]): void {
-    if (this.vasts.has(definition.name)) return;
-    if (!this.vastWorkletLoaded || !this.vastWasmBytes) {
-      throw new Error('Vast DSP is not ready; run :start after building the DSP');
+  private createSky(definition: AudioProgram['skies'][number]): void {
+    if (this.skies.has(definition.name)) return;
+    if (!this.skyWorkletLoaded || !this.skyWasmBytes) {
+      throw new Error('Sky DSP is not ready; run :start after building the DSP');
     }
     const context = this.ensureContext();
-    const node = new AudioWorkletNode(context, 'sonus-vast', {
-      numberOfInputs: 2,
-      numberOfOutputs: 2,
-      outputChannelCount: [1, 1],
-      processorOptions: { wasmBytes: this.vastWasmBytes.slice(0) },
+    const node = new AudioWorkletNode(context, 'sonus-sky', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [2],
+      channelCount: 2,
+      channelCountMode: 'explicit',
+      channelInterpretation: 'discrete',
+      processorOptions: { wasmBytes: this.skyWasmBytes.slice(0) },
     });
-    node.addEventListener('processorerror', () => console.error('[Vast] AudioWorklet processor failed'));
-
+    node.addEventListener('processorerror', () => console.error('[Sky] AudioWorklet processor failed'));
     const monoInput=context.createGain(), inputL=context.createGain(), inputR=context.createGain();
+    const inputMerger=context.createChannelMerger(2), outputSplitter=context.createChannelSplitter(2);
     const dryL=context.createGain(), dryR=context.createGain(), wetL=context.createGain(), wetR=context.createGain();
     const outputL=context.createGain(), outputR=context.createGain();
     monoInput.connect(inputL); monoInput.connect(inputR);
-    inputL.connect(node,0,0); inputR.connect(node,0,1);
+    inputL.connect(inputMerger,0,0); inputR.connect(inputMerger,0,1); inputMerger.connect(node);
     inputL.connect(dryL); inputR.connect(dryR); dryL.connect(outputL); dryR.connect(outputR);
-    node.connect(wetL,0,0); node.connect(wetR,1,0); wetL.connect(outputL); wetR.connect(outputR);
+    node.connect(outputSplitter);
+    outputSplitter.connect(wetL,0,0); outputSplitter.connect(wetR,1,0); wetL.connect(outputL); wetR.connect(outputR);
 
-    this.vasts.set(definition.name, { node, monoInput, inputL, inputR, dryL, dryR, wetL, wetR, outputL, outputR, ...definition });
+    this.skies.set(definition.name, { node, inputMerger, outputSplitter, monoInput, inputL, inputR, dryL, dryR, wetL, wetR, outputL, outputR, ...definition });
   }
 
-  private updateVast(definition: AudioProgram['vasts'][number]): void {
-    const vast=this.vasts.get(definition.name); if(!vast) return;
-    Object.assign(vast,definition);
+  private updateSky(definition: AudioProgram['skies'][number]): void {
+    const sky=this.skies.get(definition.name); if(!sky) return;
+    Object.assign(sky,definition);
     const context=this.ensureContext();
     const mix=Math.max(0,Math.min(1,definition.mix/100));
     const dryGain=Math.cos(mix*Math.PI*0.5), wetGain=Math.sin(mix*Math.PI*0.5);
-    vast.dryL.gain.setTargetAtTime(dryGain,context.currentTime,0.008);
-    vast.dryR.gain.setTargetAtTime(dryGain,context.currentTime,0.008);
-    vast.wetL.gain.setTargetAtTime(wetGain,context.currentTime,0.008);
-    vast.wetR.gain.setTargetAtTime(wetGain,context.currentTime,0.008);
-    vast.node.port.postMessage({ type:'params', size:definition.size/100, decay:definition.decay/100,
-      damp:definition.damp/100, diffuse:definition.diffuse/100, predelay:definition.predelay/100,
-      motion:definition.motion/100, spread:definition.spread/100, freeze:definition.freeze });
+    sky.dryL.gain.setTargetAtTime(dryGain,context.currentTime,0.008);
+    sky.dryR.gain.setTargetAtTime(dryGain,context.currentTime,0.008);
+    sky.wetL.gain.setTargetAtTime(wetGain,context.currentTime,0.008);
+    sky.wetR.gain.setTargetAtTime(wetGain,context.currentTime,0.008);
+    sky.node.port.postMessage({ type:'params', size:definition.size/100, decay:definition.decay/100,
+      damp:definition.damp/100, bloom:definition.bloom/100, predelay:definition.predelay/100,
+      motion:definition.motion/100, width:definition.width/100, freeze:definition.freeze });
   }
 
   createGain(name: string): void {
@@ -1125,7 +1224,7 @@ export class AudioEngine {
 
     const mistOutput = signal.match(/^([A-Za-z_]\w*)\.(out_L|out_R)$/);
     if (mistOutput) {
-      const fx = this.mists.get(mistOutput[1]) ?? this.vasts.get(mistOutput[1]);
+      const fx = this.mists.get(mistOutput[1]) ?? this.skies.get(mistOutput[1]);
       if (!fx) throw new Error(`unknown stereo FX object: ${mistOutput[1]}`);
       return { node: mistOutput[2] === 'out_R' ? fx.outputR : fx.outputL, output: 0 };
     }
@@ -1148,6 +1247,8 @@ export class AudioEngine {
     if (voice) return { node: port === 'aux' ? voice.auxGain : voice.outGain, output: 0 };
     const matter = this.matters.get(name);
     if (matter) return { node: port === 'aux' ? matter.auxGain : matter.mainGain, output: 0 };
+    const resonator = this.resonators.get(name);
+    if (resonator) return { node: port === 'aux' ? resonator.auxGain : resonator.mainGain, output: 0 };
 
     if (port === 'aux') throw new Error(`aux output is not available on ${name}`);
     const oscillator = this.oscillators.get(name);
@@ -1175,7 +1276,7 @@ export class AudioEngine {
 
     const mistInput = port.match(/^([A-Za-z_]\w*)\.(in|inL|inR)$/);
     if (mistInput) {
-      const fx = this.mists.get(mistInput[1]) ?? this.vasts.get(mistInput[1]);
+      const fx = this.mists.get(mistInput[1]) ?? this.skies.get(mistInput[1]);
       if (!fx) throw new Error(`unknown stereo FX input: ${mistInput[1]}`);
       if (mistInput[2] === 'in') return { node: fx.monoInput, input: 0 };
       return { node: mistInput[2] === 'inR' ? fx.inputR : fx.inputL, input: 0 };
@@ -1218,6 +1319,11 @@ export class AudioEngine {
           ? voice.timbreInput
           : voice.morphInput;
       return { node: input, input: 0 };
+    }
+
+    const resonatorInput = port.match(/^([A-Za-z_]\w*)\.in$/);
+    if (resonatorInput && this.resonators.has(resonatorInput[1])) {
+      return { node: this.resonators.get(resonatorInput[1])!.node, input: 0 };
     }
 
     const filterInput = port.match(/^([A-Za-z_]\w*)\.in$/);
@@ -1266,6 +1372,11 @@ export class AudioEngine {
   }
 
   triggerVoice(name: string): void {
+    const resonator = this.resonators.get(name);
+    if (resonator) {
+      resonator.node.port.postMessage({ type: 'strum' });
+      return;
+    }
     const matter = this.matters.get(name);
     if (matter) {
       matter.node.port.postMessage({ type: 'trigger' });
@@ -1278,9 +1389,27 @@ export class AudioEngine {
 
   setVoiceParameter(
     name: string,
-    parameter: 'freq' | 'model' | 'harmo' | 'timbre' | 'morph' | 'geometry' | 'brightness' | 'damping' | 'position' | 'space' | 'bow' | 'bowTimbre' | 'blow' | 'blowTimbre' | 'strike' | 'strikeTimbre',
+    parameter: 'freq' | 'model' | 'harmo' | 'timbre' | 'morph' | 'geometry' | 'structure' | 'brightness' | 'damping' | 'position' | 'space' | 'bow' | 'bowTimbre' | 'blow' | 'blowTimbre' | 'strike' | 'strikeTimbre',
     value: number,
   ): void {
+    const resonator = this.resonators.get(name);
+    if (resonator) {
+      if (parameter === 'freq') {
+        const note = 69 + 12 * Math.log2(value / 440);
+        resonator.note = note;
+        resonator.node.port.postMessage({ type: 'params', note });
+        return;
+      }
+      if (parameter === 'model') {
+        resonator.model = value;
+        resonator.node.port.postMessage({ type: 'params', model: value });
+        return;
+      }
+      if (parameter === 'brightness' || parameter === 'damping' || parameter === 'position' || parameter === 'structure') {
+        resonator.node.port.postMessage({ type: 'params', [parameter]: value / 100 });
+      }
+      return;
+    }
     const matter = this.matters.get(name);
     if (matter) {
       if (parameter === 'freq') {
@@ -1323,20 +1452,20 @@ export class AudioEngine {
     parameter: 'position' | 'size' | 'pitch' | 'density' | 'texture' | 'mix' | 'spread' | 'feedback' | 'reverb',
     value: number,
   ): void {
-    const vast = this.vasts.get(name);
-    if (vast) {
-      if (!Number.isFinite(value) || value < 0 || value > 100) throw new RangeError(`Vast ${parameter} must be between 0 and 100`);
-      const map = { position:'predelay', size:'size', density:'diffuse', texture:'damp', mix:'mix', spread:'spread', feedback:'decay', reverb:'motion' } as const;
-      if (parameter === 'pitch') throw new RangeError('Vast does not expose pitch');
+    const sky = this.skies.get(name);
+    if (sky) {
+      if (!Number.isFinite(value) || value < 0 || value > 100) throw new RangeError(`Sky ${parameter} must be between 0 and 100`);
+      const map = { position:'predelay', size:'size', density:'bloom', texture:'damp', mix:'mix', spread:'width', feedback:'decay', reverb:'motion' } as const;
+      if (parameter === 'pitch') throw new RangeError('Sky does not expose pitch');
       const mapped = map[parameter];
-      (vast as unknown as Record<string, unknown>)[mapped] = value;
+      (sky as unknown as Record<string, unknown>)[mapped] = value;
       if (mapped === 'mix') {
         const context=this.ensureContext(), mix=Math.max(0,Math.min(1,value/100));
         const dryGain=Math.cos(mix*Math.PI*0.5), wetGain=Math.sin(mix*Math.PI*0.5);
-        vast.dryL.gain.setTargetAtTime(dryGain,context.currentTime,0.008); vast.dryR.gain.setTargetAtTime(dryGain,context.currentTime,0.008);
-        vast.wetL.gain.setTargetAtTime(wetGain,context.currentTime,0.008); vast.wetR.gain.setTargetAtTime(wetGain,context.currentTime,0.008);
+        sky.dryL.gain.setTargetAtTime(dryGain,context.currentTime,0.008); sky.dryR.gain.setTargetAtTime(dryGain,context.currentTime,0.008);
+        sky.wetL.gain.setTargetAtTime(wetGain,context.currentTime,0.008); sky.wetR.gain.setTargetAtTime(wetGain,context.currentTime,0.008);
       } else {
-        vast.node.port.postMessage({ type:'params', [mapped]: value/100 });
+        sky.node.port.postMessage({ type:'params', [mapped]: value/100 });
       }
       return;
     }
@@ -1551,6 +1680,7 @@ export class AudioEngine {
       ...this.oscillators.keys(),
       ...this.voices.keys(),
       ...this.matters.keys(),
+      ...this.resonators.keys(),
       ...this.swells.keys(),
     ]);
     for (const [key, route] of [...this.routes.entries()]) {
@@ -1653,14 +1783,14 @@ export class AudioEngine {
     this.filters.delete(name);
   }
 
-  private removeVast(name: string): void {
-    const vast=this.vasts.get(name); if(!vast) return;
-    for(const node of [vast.monoInput,vast.inputL,vast.inputR,vast.dryL,vast.dryR,vast.wetL,vast.wetR,vast.outputL,vast.outputR]) {
+  private removeSky(name: string): void {
+    const sky=this.skies.get(name); if(!sky) return;
+    for(const node of [sky.monoInput,sky.inputL,sky.inputR,sky.inputMerger,sky.outputSplitter,sky.dryL,sky.dryR,sky.wetL,sky.wetR,sky.outputL,sky.outputR]) {
       try { node.disconnect(); } catch {}
     }
-    try { vast.node.disconnect(); } catch {}
-    vast.node.port.close();
-    this.vasts.delete(name);
+    try { sky.node.disconnect(); } catch {}
+    sky.node.port.close();
+    this.skies.delete(name);
   }
 
   private removeMist(name: string): void {
@@ -1699,6 +1829,18 @@ export class AudioEngine {
     matter.node.disconnect();
     matter.node.port.close();
     this.matters.delete(name);
+  }
+
+  private removeResonator(name: string): void {
+    const resonator = this.resonators.get(name);
+    if (!resonator) return;
+    this.removeView(`${name}.out`);
+    this.removeView(`${name}.aux`);
+    resonator.mainGain.disconnect();
+    resonator.auxGain.disconnect();
+    resonator.node.disconnect();
+    resonator.node.port.close();
+    this.resonators.delete(name);
   }
 
   private removeVoice(name: string): void {
@@ -1769,14 +1911,14 @@ export class AudioEngine {
     this.mistWorkletLoaded = true;
   }
 
-  private async ensureVastRuntime(): Promise<void> {
-    if (this.vastWorkletLoaded && this.vastWasmBytes) return;
+  private async ensureSkyRuntime(): Promise<void> {
+    if (this.skyWorkletLoaded && this.skyWasmBytes) return;
     const context=this.ensureContext();
-    const response=await fetch('/dsp/vast.wasm');
-    if (!response.ok) throw new Error('Vast DSP missing. Run npm run dsp:setup and npm run dsp:build.');
-    this.vastWasmBytes=await response.arrayBuffer();
-    await context.audioWorklet.addModule('/worklets/vast-processor.js');
-    this.vastWorkletLoaded=true;
+    const response=await fetch('/dsp/sky.wasm');
+    if (!response.ok) throw new Error('Sky DSP missing. Run npm run dsp:setup and npm run dsp:build.');
+    this.skyWasmBytes=await response.arrayBuffer();
+    await context.audioWorklet.addModule('/worklets/sky-processor.js');
+    this.skyWorkletLoaded=true;
   }
 
   private async ensureLiquidRuntime(): Promise<void> {
@@ -1806,6 +1948,18 @@ export class AudioEngine {
     this.matterWasmBytes = await response.arrayBuffer();
     await context.audioWorklet.addModule('/worklets/matter-processor.js');
     this.matterWorkletLoaded = true;
+  }
+
+  private async ensureResonatorRuntime(): Promise<void> {
+    if (this.resonatorWorkletLoaded && this.resonatorWasmBytes) return;
+    const context = this.ensureContext();
+    const response = await fetch('/dsp/resonator.wasm');
+    if (!response.ok) {
+      throw new Error('Resonator DSP missing. Run npm run dsp:setup and npm run dsp:build.');
+    }
+    this.resonatorWasmBytes = await response.arrayBuffer();
+    await context.audioWorklet.addModule('/worklets/resonator-processor.js');
+    this.resonatorWorkletLoaded = true;
   }
 
   private async ensureVoiceRuntime(): Promise<void> {

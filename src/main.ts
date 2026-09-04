@@ -2321,7 +2321,7 @@ editor.addEventListener('keydown', (event) => {
 
     let indentation = currentIndent;
     if (!trimmed) indentation = currentIndent.length >= 4 ? currentIndent.slice(0, -4) : '';
-    else if (/^(VOICE|FX|FILTER|MOD)\b.*:\s*$/i.test(trimmed)) indentation = `${currentIndent}    `;
+    else if (/^(VOICE|FX|FILTER|MOD|SEQ)\b.*:\s*$/i.test(trimmed)) indentation = `${currentIndent}    `;
     else if (/^PLAY\b/i.test(trimmed) && !/\bthrough\b/i.test(trimmed)) indentation = `${currentIndent}    `;
     else if (currentIndent.length > 0 && /^(through|then)\b/i.test(trimmed)) indentation = currentIndent;
 

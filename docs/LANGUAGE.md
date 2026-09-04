@@ -1232,25 +1232,113 @@ truth, the runtime reconciles it live, and Scheme remains an observer rather
 than a graphical editor.
 
 
-### Vast reverb (Valley Plateau)
+### Sky ambient reverb
 
-`vast` uses the original GPLv3 Valley Plateau Dattorro DSP core. Sonus maps its compact FX vocabulary onto Plateau: `size`, `decay`, `damp`, `diffuse`, `predelay`, `motion`, `spread`, and `mix`.
+`sky` uses Ghost Note Audio's MIT-licensed CloudSeedCore algorithm. It is tuned as an ambient/special-effect reverb rather than a room simulation, with a compact Sonus control surface over CloudSeedCore's diffusion, modulation, late delay network, filtering, and stereo decorrelation.
 
 ```text
 FX space:
-    model vast
-    size 72
-    decay 88
-    damp 38
-    diffuse 76
-    predelay 8
-    motion 24
-    spread 85
-    mix 42
+    MODEL sky
+    SIZE 82
+    DECAY 94
+    BLOOM 76
+    DAMPING 38
+    PREDELAY 12
+    MOTION 30
+    WIDTH 92
+    MIX 45
 ```
 
-The upstream Valley sources are fetched by `npm run dsp:setup` and remain under their GPLv3 license.
+The accepted aliases are:
+
+- `DECAY` -> feedback/tail length;
+- `DAMP` or `DAMPING` -> high-frequency damping;
+- `BLOOM` (or legacy `DIFFUSE`) -> progressive early/late diffusion density;
+- `PREDELAY` -> 0..500 ms normalized pre-delay;
+- `MOTION` -> delay/diffuser modulation;
+- `WIDTH` (or `SPREAD`) -> stereo decorrelation;
+- `SIZE`, `MIX`, and `FREEZE` retain their usual FX meanings.
+
+`sky` does not expose musical pitch. The upstream source is fetched by `npm run dsp:setup` into `vendor/cloudseed-core/` and compiled into `sky.wasm`. ValleyRackFree/Plateau is no longer part of the DSP build.
 
 ### Hot-reload timing continuity
 
 When live code is already running, `Cmd/Ctrl+Enter` applies the validated update on the next master beat. Matching `every` jobs preserve their current phase across that update: for example, an `every 4 beats` sequence already at beat 3 continues to its fourth beat instead of restarting a new four-beat cycle. The same rule applies to beat-based and wall-clock `every` jobs as long as their source and interval are unchanged. Changing the cadence intentionally starts a new phase. `when(..., cycle(...))` event positions are preserved as well.
+
+
+### Resonator voices
+
+`resonator.*` is backed by the original Mutable Instruments Rings DSP, compiled
+into a separate WebAssembly module. It is intentionally presented as a Sonus
+Umbrae resonator family rather than as a virtual Eurorack panel.
+
+The primary models are:
+
+```text
+SOUND resonator.modal
+SOUND resonator.sympathetic
+SOUND resonator.string
+```
+
+`resonator.strings` is an alias for `resonator.sympathetic`. Rings internal
+polyphony is declared directly on the sound selector:
+
+```text
+SOUND resonator.modal WITH 1 NOTE
+SOUND resonator.modal WITH 2 NOTES
+SOUND resonator.modal WITH 4 NOTES
+```
+
+Only 1, 2, and 4 are valid. The default is 1 note.
+
+The initial high-level parameters mirror the four shared Rings resonator
+controls while preserving Sonus defaults when omitted:
+
+```text
+STRUCTURE  0..100
+BRIGHTNESS 0..100
+DAMPING    0..100
+POSITION   0..100
+```
+
+Every new NOTE/scale/sequence pitch event automatically performs a Rings strum.
+Pitch changes caused by hot reload also strum the existing resonator instance.
+There is no explicit STRUM property in this first language version.
+
+#### Resonator I/O and routing
+
+The backend has one mono audio input and two mono outputs. Sonus treats the pair
+as one logical stereo VOICE output:
+
+```text
+resonator.main -> stereo L
+resonator.aux  -> stereo R
+```
+
+Thus:
+
+```text
+PLAY bells THROUGH MAIN
+```
+
+expands to MAIN -> `Audio.out_L` and AUX -> `Audio.out_R`. Explicit mono access
+is available as:
+
+```text
+PLAY bells.main THROUGH MAIN
+PLAY bells.aux THROUGH MAIN
+```
+
+If an unsuffixed Resonator output is sent to a mono destination, the language
+selects its MAIN output automatically.
+
+The Rings input is mono and is addressed by routing another object through the
+Resonator VOICE:
+
+```text
+PLAY source THROUGH bells THEN MAIN
+```
+
+When an external source is connected, the Rings worklet uses the original
+external-exciter path; with no input connection it uses the original internal
+exciter.

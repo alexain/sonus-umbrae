@@ -4,13 +4,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VENDOR="$ROOT/vendor/eurorack"
 SUPERPARASITES="$ROOT/vendor/superparasites"
-VALLEY="$ROOT/vendor/valley-rack-free"
+CLOUDSEED="$ROOT/vendor/cloudseed-core"
 VOICE_OUTPUT="$ROOT/public/dsp/voice.wasm"
 SWELL_OUTPUT="$ROOT/public/dsp/swell.wasm"
 MIST_OUTPUT="$ROOT/public/dsp/mist.wasm"
 LIQUID_OUTPUT="$ROOT/public/dsp/liquid.wasm"
-VAST_OUTPUT="$ROOT/public/dsp/vast.wasm"
+SKY_OUTPUT="$ROOT/public/dsp/sky.wasm"
 MATTER_OUTPUT="$ROOT/public/dsp/matter.wasm"
+RESONATOR_OUTPUT="$ROOT/public/dsp/resonator.wasm"
 
 if ! command -v em++ >/dev/null 2>&1; then
   echo "em++ not found. Install/activate Emscripten (emsdk) before building the DSP." >&2
@@ -77,6 +78,33 @@ em++ \
 
 echo "Built $MATTER_OUTPUT (Elements backend, native 32 kHz / 16-frame blocks)"
 
+echo "Building Resonator (Mutable Instruments Rings backend)..."
+RINGS_DSP=()
+while IFS= read -r source; do
+  RINGS_DSP+=("$source")
+done < <(find "$VENDOR/rings/dsp" -name '*.cc' -type f | sort)
+
+em++ \
+  -std=c++17 \
+  -O3 \
+  -DTEST \
+  -I"$VENDOR" \
+  "$ROOT/dsp/resonator_bridge.cc" \
+  "$VENDOR/stmlib/utils/random.cc" \
+  "$VENDOR/stmlib/dsp/atan.cc" \
+  "$VENDOR/stmlib/dsp/units.cc" \
+  "${RINGS_DSP[@]}" \
+  "$VENDOR/rings/resources.cc" \
+  -s STANDALONE_WASM=1 \
+  -s ALLOW_MEMORY_GROWTH=0 \
+  -s INITIAL_MEMORY=33554432 \
+  -s FILESYSTEM=0 \
+  -s EXPORTED_FUNCTIONS='["_su_resonator_create","_su_resonator_destroy","_su_resonator_set_model","_su_resonator_set_polyphony","_su_resonator_set_note","_su_resonator_set_structure","_su_resonator_set_brightness","_su_resonator_set_damping","_su_resonator_set_position","_su_resonator_set_internal_exciter","_su_resonator_strum","_su_resonator_in","_su_resonator_main","_su_resonator_aux","_su_resonator_block_size","_su_resonator_sample_rate","_su_resonator_process"]' \
+  -Wl,--no-entry \
+  -o "$RESONATOR_OUTPUT"
+
+echo "Built $RESONATOR_OUTPUT (Rings backend, native 48 kHz / 24-frame blocks)"
+
 em++ \
   -std=c++17 \
   -O3 \
@@ -134,19 +162,23 @@ em++ \
   -std=c++17 \
   -O3 \
   -DNDEBUG \
-  -I"$VALLEY/src" \
-  "$ROOT/dsp/vast_bridge.cc" \
-  "$VALLEY/src/Plateau/Dattorro.cpp" \
-  "$VALLEY/src/dsp/filters/OnePoleFilters.cpp" \
+  -DBUFFER_SIZE=128 \
+  -DMAX_STR_SIZE=32 \
+  -include "$ROOT/dsp/cloudseed_compat.h" \
+  -I"$CLOUDSEED" \
+  "$ROOT/dsp/sky_bridge.cc" \
+  "$CLOUDSEED/DSP/Biquad.cpp" \
+  "$CLOUDSEED/DSP/RandomBuffer.cpp" \
+  "$CLOUDSEED/Parameters.cpp" \
   -s STANDALONE_WASM=1 \
   -s ALLOW_MEMORY_GROWTH=0 \
-  -s INITIAL_MEMORY=33554432 \
+  -s INITIAL_MEMORY=134217728 \
   -s FILESYSTEM=0 \
-  -s EXPORTED_FUNCTIONS='["_su_vast_create","_su_vast_destroy","_su_vast_set_sample_rate","_su_vast_set_size","_su_vast_set_decay","_su_vast_set_damp","_su_vast_set_diffuse","_su_vast_set_predelay","_su_vast_set_motion","_su_vast_set_spread","_su_vast_set_freeze","_su_vast_in_l","_su_vast_in_r","_su_vast_out_l","_su_vast_out_r","_su_vast_process"]' \
+  -s EXPORTED_FUNCTIONS='["_su_sky_create","_su_sky_destroy","_su_sky_set_sample_rate","_su_sky_set_size","_su_sky_set_decay","_su_sky_set_damp","_su_sky_set_bloom","_su_sky_set_predelay","_su_sky_set_motion","_su_sky_set_width","_su_sky_set_freeze","_su_sky_in_l","_su_sky_in_r","_su_sky_out_l","_su_sky_out_r","_su_sky_process"]' \
   -Wl,--no-entry \
-  -o "$VAST_OUTPUT"
+  -o "$SKY_OUTPUT"
 
-echo "Built $VAST_OUTPUT (Valley Plateau Dattorro backend)"
+echo "Built $SKY_OUTPUT (Ghost Note Audio CloudSeedCore backend)"
 
 em++ \
   -std=c++17 \

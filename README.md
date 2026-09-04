@@ -18,7 +18,8 @@ runtime, DSP registry, and UI are still evolving.
 - Web Audio engine with AudioWorklet processing.
 - WebAssembly DSP compiled from C/C++ with Emscripten.
 - `VOICE` macro-oscillator family backed by Mutable Instruments Plaits DSP.
-- `VOICE` `matter.*` physical-modeling family backed by Mutable Instruments Elements DSP.
+- `VOICE` `matter` physical-modeling engine backed by Mutable Instruments Elements DSP.
+- `VOICE` `resonator.*` family backed by Mutable Instruments Rings DSP, with 1/2/4-note internal polyphony and stereo MAIN/AUX output.
 - `MOD` four-output modulation source backed by Mutable Instruments Tides 2018 DSP.
 - `FX` stereo effects backed by the current Mist / SuperParasites integration.
 - Per-object and per-route level control.
@@ -254,6 +255,26 @@ scale C minor with range C3 C5, random every 2 beats
 
 C4 is the current zero-semitone pitch reference for this mapping.
 
+
+### Sky ambient reverb
+
+`sky` is the dedicated ambient reverb model backed by Ghost Note Audio's MIT-licensed CloudSeedCore algorithm. It replaces the previous Valley/Plateau backend.
+
+```text
+FX space:
+    MODEL sky
+    SIZE 82
+    DECAY 94
+    BLOOM 76
+    DAMPING 38
+    PREDELAY 12
+    MOTION 30
+    WIDTH 92
+    MIX 45
+```
+
+The compact Sonus aliases map onto the existing FX parameter vocabulary: `DECAY`, `DAMP`/`DAMPING`, `BLOOM`, `PREDELAY`, `MOD`/`MOTION`, and `WIDTH`. `FREEZE ON` suppresses new input and pushes the CloudSeed tail to its maximum decay range.
+
 ## Interface
 
 The main screen is intentionally minimal: a status bar and the live source
@@ -318,3 +339,44 @@ Those components retain their own copyright and license terms. See
 
 Mutable Instruments is a registered trademark. Sonus Umbrae is an independent
 project and is not affiliated with or endorsed by Mutable Instruments.
+
+
+## Resonator / Rings backend
+
+`resonator.*` uses the original Mutable Instruments Rings DSP as a dedicated
+WebAssembly backend. The three primary resonator models are exposed as:
+
+```text
+SOUND resonator.modal
+SOUND resonator.sympathetic
+SOUND resonator.string
+```
+
+`resonator.strings` is accepted as an alias for `resonator.sympathetic`. Internal
+polyphony is selected on `SOUND` and is restricted to the values supported by
+the original engine:
+
+```text
+VOICE bells:
+    SOUND resonator.modal WITH 4 NOTES
+    NOTE [C3 Eb3 G3 Bb3] WITH ORDER EVERY 2 beat
+    STRUCTURE 55
+    BRIGHTNESS 70
+    DAMPING 65
+    POSITION 30
+
+PLAY bells THROUGH MAIN
+```
+
+A new note event updates pitch and automatically issues a strum. The logical
+voice output is stereo: Resonator MAIN is routed to the left channel and AUX to
+the right channel. The two mono outputs can be selected explicitly with
+`.main` and `.aux`. When a Resonator stereo output feeds a mono destination,
+MAIN is selected by default.
+
+Rings also has one mono audio input, so the same object can be used as a signal
+processor:
+
+```text
+PLAY source THROUGH bells THEN MAIN
+```

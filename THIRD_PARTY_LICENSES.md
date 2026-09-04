@@ -6,7 +6,7 @@ This file is informational and does not replace the authoritative license files 
 
 ## Mutable Instruments Eurorack DSP
 
-Current use: DSP implementation behind the Sonus Umbrae `VOICE` macro-engine family.
+Current use: DSP implementations behind the Sonus Umbrae `VOICE` macro-engine family, the `matter` physical-modeling engine (Elements), and the `resonator.*` family (Rings).
 
 Upstream project:
 
@@ -20,7 +20,7 @@ The upstream Eurorack repository states:
 - STM32F project code: MIT
 - Hardware files: CC BY-SA 3.0
 
-Sonus Umbrae currently builds the Plaits DSP from the STM32F portion of that repository. The source is fetched by `npm run dsp:setup` into `vendor/eurorack/` and is intentionally not vendored in this repository.
+Sonus Umbrae currently builds Plaits, Elements, and Rings DSP code from the STM32F portion of that repository. The source is fetched by `npm run dsp:setup` into `vendor/eurorack/` and is intentionally not vendored in this repository.
 
 The original Plaits source files carry the MIT license notice. The original copyright and license terms remain applicable to that code and to substantial portions derived from it.
 
@@ -30,6 +30,17 @@ Upstream references:
 
 - https://github.com/pichenettes/eurorack
 - https://github.com/pichenettes/stmlib
+
+
+## Ghost Note Audio CloudSeedCore
+
+The Sonus Umbrae `sky` FX model uses the CloudSeedCore algorithm by Ghost Note Audio / Ghost Note Engineering Ltd. The source is fetched by `npm run dsp:setup` into `vendor/cloudseed-core/` and compiled to a separate `sky.wasm` artifact.
+
+CloudSeedCore is released under the MIT License. Sonus Umbrae retains the upstream copyright and license notices and exposes the algorithm under its own `sky` model name.
+
+Upstream repository:
+
+- https://github.com/GhostNoteAudio/CloudSeedCore
 
 ## Emscripten
 

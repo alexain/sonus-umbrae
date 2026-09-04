@@ -82,8 +82,9 @@ Current direction:
 
 - `VOICE` macro engines backed initially by Mutable Instruments Plaits DSP.
 - `MOD` modulation backed initially by Mutable Instruments Tides 2018 DSP.
-- `FX` processors backed initially by the Mist / SuperParasites integration.
+- `FX` processors backed by Mist / SuperParasites plus the MIT-licensed `sky` ambient reverb based on CloudSeedCore.
 - Additional permissively licensed DSP where appropriate.
+- [x] Replace the GPL-3.0 Valley Plateau reverb dependency with Ghost Note Audio CloudSeedCore (MIT), exposed as `MODEL sky`.
 - Original Sonus Umbrae DSP modules.
 - Inspiration from other modular systems and open algorithms without necessarily reproducing their original user interfaces.
 - A stable module metadata format describing parameters, ports, signal semantics, and visual behavior.
@@ -375,3 +376,14 @@ Sonus Umbrae should continue to follow these principles:
 - [x] Integrate Matter voices with note/scale sequencing, routing, levels, hot reload, Scheme, and musical transport stop.
 - [x] Add typed AD/ADR/ASR/ADSR/DAHDSR envelope values, SET/FROM compatibility, and Matter DRIVE triggering through the global scheduler.
 - [ ] Evaluate future audio-rate modulation inputs for selected Matter parameters without exposing the original Eurorack panel semantics.
+
+
+## Resonator physical modeling
+
+- [x] Compile Mutable Instruments Rings DSP into a dedicated `resonator.wasm`.
+- [x] Expose the three primary Rings resonator models as `resonator.modal`, `resonator.sympathetic`, and `resonator.string`.
+- [x] Support Rings 1/2/4-note internal polyphony through `SOUND ... WITH N NOTES`.
+- [x] Automatically strum on VOICE note events.
+- [x] Treat MAIN/AUX as a logical stereo output (MAIN -> L, AUX -> R) while allowing explicit `.main` / `.aux` mono routing.
+- [x] Expose the original mono audio input so a Resonator VOICE can also process another source in `PLAY ... THROUGH resonator THEN ...` chains.
+- [ ] Evaluate explicit strum/pitch decoupling only after the initial note-driven workflow has been tested musically.

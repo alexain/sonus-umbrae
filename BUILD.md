@@ -10,7 +10,7 @@ For the web application:
 - Node.js 24 LTS
 - npm
 
-For building the current WebAssembly DSP engines (`VOICE`, `MOD`, `FX`, and the experimental `Matter` backend):
+For building the current WebAssembly DSP engines (`VOICE`, `MOD`, `FX`, Matter, Resonator, and Sky):
 
 - Emscripten SDK (`emsdk`)
 - a C/C++ toolchain suitable for Emscripten
@@ -78,13 +78,15 @@ From the Sonus Umbrae repository:
 npm run dsp:setup
 ```
 
-This downloads the upstream Mutable Instruments Eurorack repository and its required `stmlib` submodule under:
+This downloads the required upstream DSP sources under `vendor/`, including:
 
 ```text
 vendor/eurorack/
+vendor/superparasites/
+vendor/cloudseed-core/
 ```
 
-The vendor directory is intentionally ignored by Git. Upstream source code is not copied into the Sonus Umbrae repository.
+`cloudseed-core` is Ghost Note Audio's MIT-licensed CloudSeedCore algorithm used by the Sonus `sky` reverb. The vendor directory is intentionally ignored by Git. Upstream source code is not copied into the Sonus Umbrae repository.
 
 ## 5. Build the WebAssembly DSP
 
@@ -101,11 +103,13 @@ public/dsp/voice.wasm
 public/dsp/swell.wasm
 public/dsp/mist.wasm
 public/dsp/matter.wasm
+public/dsp/resonator.wasm
+public/dsp/sky.wasm
 ```
 
 `voice.wasm` provides the current macro-oscillator `VOICE` backend, `swell.wasm`
 provides the four-output modulation backend used by `MOD`, and `mist.wasm`
-provides the current stereo `FX` backend. `matter.wasm` is the physical-modeling backend built from the original Mutable Instruments Elements DSP and exposed publicly through the `matter.*` VOICE family.
+provides the current Mist stereo `FX` backend. `sky.wasm` provides the ambient `sky` reverb backed by CloudSeedCore. `matter.wasm` is the physical-modeling backend built from the original Mutable Instruments Elements DSP and exposed publicly through `SOUND matter`.
 
 Generated WASM files are ignored by Git and should be rebuilt locally.
 
@@ -250,3 +254,43 @@ npm run dsp:build
 ```
 
 The runtime loads the module automatically when a program declares `SOUND matter`. Matter DRIVE envelopes run in the AudioWorklet while all explicit `EVERY` trigger events remain registered on the runtime's single global scheduler. No separate Matter test page is part of the application.
+
+
+## Resonator / Rings WebAssembly backend
+
+`resonator.wasm` compiles the original Mutable Instruments Rings DSP from
+`vendor/eurorack/rings/` into a separate WebAssembly module. The bridge uses
+`rings::Part`, preserving the original three primary resonator models, the
+1/2/4-voice polyphony allocator, internal strum/exciter path, mono external
+input, and MAIN/AUX output pair.
+
+Rings runs natively at 48 kHz in 24-frame blocks.
+`public/worklets/resonator-processor.js` adapts host AudioWorklet quantum sizes
+and resamples only when the host sample rate differs from 48 kHz; the upstream
+DSP code is left unchanged.
+
+Build it with the other DSP targets:
+
+```bash
+npm run dsp:setup
+npm run dsp:build
+```
+
+The runtime loads `/dsp/resonator.wasm` automatically when a program contains a
+`SOUND resonator.*` voice.
+
+
+## Sky / CloudSeedCore WebAssembly backend
+
+`sky.wasm` compiles Ghost Note Audio's MIT-licensed CloudSeedCore reverb into a dedicated WebAssembly module. `npm run dsp:setup` fetches the upstream source into `vendor/cloudseed-core/`; ValleyRackFree/Plateau is no longer fetched or built.
+
+The Sonus bridge exposes an ambient-oriented macro surface over CloudSeedCore's diffusion and late-field network: `SIZE`, `DECAY`, `DAMP`, `BLOOM`, `PREDELAY`, `MOTION`, `WIDTH`, `MIX`, and `FREEZE`. `BLOOM` drives the early/late diffusion stages together so higher values build a denser field more gradually.
+
+Build with the normal DSP command:
+
+```bash
+npm run dsp:setup
+npm run dsp:build
+```
+
+The runtime loads `/dsp/sky.wasm` automatically when an `FX` declares `MODEL sky`.
