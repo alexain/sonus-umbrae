@@ -170,6 +170,7 @@ type VoiceEngineKind = 'macro' | 'matter' | 'resonator';
 type VoiceParameterName = 'harmo' | 'timbre' | 'morph' | 'geometry' | 'structure' | 'brightness' | 'damping' | 'position' | 'space' | 'bow' | 'bowTimbre' | 'blow' | 'blowTimbre' | 'strike' | 'strikeTimbre';
 
 interface VoiceDefinition {
+  disabled: boolean;
   engine: VoiceEngineKind;
   soundId: string;
   model: number;
@@ -210,6 +211,7 @@ interface SwellDefinition {
 
 
 interface MistDefinition {
+  disabled: boolean;
   position: number;
   size: number;
   pitch: number;
@@ -226,6 +228,7 @@ interface MistDefinition {
 }
 
 interface FilterDefinition {
+  disabled: boolean;
   model: 'svf';
   ownerVoice: string | null;
   displayName: string;
@@ -244,6 +247,7 @@ interface RouteDefinition {
 }
 
 interface ClockDefinition {
+  disabled: boolean;
   rate: number;
   localRate: number;
   rateLabel: string;
@@ -323,6 +327,7 @@ interface LanguageMasterClockDefinition {
   drift: boolean;
   jitter: number;
   timingDrift: number;
+  disabled: boolean;
   line: number;
 }
 
@@ -565,6 +570,14 @@ class RuntimeScheduler {
     this.deferred = [];
   }
 
+  resetBeatPhase(): void {
+    for (const job of this.beatJobs) job.counter = 0;
+    this.preservedBeatPhase.clear();
+    // Deferred callbacks are produced only by loose beat jobs. A fresh master
+    // clock epoch must not fire callbacks that belonged to the previous epoch.
+    this.deferred = [];
+  }
+
   private tickWallClock(): void {
     const elapsed = performance.now() - this.epochMs;
 
@@ -650,6 +663,10 @@ export class SonusRuntime {
     }
   }
 
+  restartMusicalEpoch(): void {
+    this.scheduler.resetBeatPhase();
+  }
+
   validate(source: string): EvaluationResult[] {
     const saved = {
       parameterViews: this.parameterViews,
@@ -705,6 +722,32 @@ export class SonusRuntime {
         ? { ...view, availableMidi: [...view.availableMidi] }
         : { ...view, history: [...view.history] },
     );
+  }
+
+  previewInlineViews(source: string): InlineViewState[] {
+    const saved = {
+      parameterViews: this.parameterViews,
+      variableViews: this.variableViews,
+      explicitSignalViews: this.explicitSignalViews,
+      moduleViews: this.moduleViews,
+      inlineViews: this.inlineViews,
+      turingViews: this.turingViews,
+      scheme: this.scheme,
+      randomState: this.randomState,
+    };
+    try {
+      this.evaluate(source, { applyAudio: false, hotReload: true });
+      return this.getInlineViews();
+    } finally {
+      this.parameterViews = saved.parameterViews;
+      this.variableViews = saved.variableViews;
+      this.explicitSignalViews = saved.explicitSignalViews;
+      this.moduleViews = saved.moduleViews;
+      this.inlineViews = saved.inlineViews;
+      this.turingViews = saved.turingViews;
+      this.scheme = saved.scheme;
+      this.randomState = saved.randomState;
+    }
   }
 
   getSchemeModel(): SchemeModel {
@@ -1065,6 +1108,7 @@ export class SonusRuntime {
         }
         const config = languageClockConfigs.get(name);
         const definition: ClockDefinition = {
+          disabled: false,
           rate,
           localRate: config?.rate ?? rate,
           rateLabel: config?.rateLabel ?? label,
@@ -1078,7 +1122,11 @@ export class SonusRuntime {
         clockSources.set(name, definition);
         for (const call of calls) {
           if (call.name === 'view' && call.argument.length === 0) views.set(`${name}.out`, 'trigger');
-          else diagnostics.push({ line: lineNumber, message: `unknown clock method: ${call.name}` });
+          else if (call.name === 'disabled') {
+            const literal = call.argument.trim().toLowerCase();
+            if (literal !== 'true' && literal !== 'false') diagnostics.push({ line: lineNumber, message: 'clock disabled expects true or false' });
+            else definition.disabled = literal === 'true';
+          } else diagnostics.push({ line: lineNumber, message: `unknown clock method: ${call.name}` });
         }
         results.push({ message: `${name} = Clock ${label}` });
         continue;
@@ -1114,6 +1162,7 @@ export class SonusRuntime {
         if (swells.has(name) || reservedOrDuplicate(name, oscillators, gains, voices, diagnostics, lineNumber)) { if (swells.has(name)) diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue; }
 
         const definition: VoiceDefinition = {
+          disabled: false,
           engine: 'macro',
           soundId: 'macro.analog',
           model: 1,
@@ -1186,6 +1235,7 @@ export class SonusRuntime {
           diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue;
         }
         filters.set(name, {
+          disabled: false,
           model: 'svf',
           ownerVoice: null,
           displayName: name,
@@ -1212,6 +1262,7 @@ export class SonusRuntime {
           continue;
         }
         mists.set(name, {
+          disabled: false,
           position: 50,
           size: 50,
           pitch: 0,
@@ -1714,7 +1765,7 @@ export class SonusRuntime {
         continue;
       }
 
-      match = line.match(/^([A-Za-z_]\w*)\.(owner|displayName|model|cutoff|cutoffPercent|resonance|drive)\(\s*(.+)\s*\)\s*$/);
+      match = line.match(/^([A-Za-z_]\w*|__filter_[A-Za-z_]\w*)\.(disabled|owner|displayName|model|cutoff|cutoffPercent|resonance|drive)\(\s*(.+)\s*\)\s*$/);
       if (match && filters.has(match[1])) {
         const definition = filters.get(match[1])!;
         const error = applyFilterCall(
@@ -1803,7 +1854,7 @@ export class SonusRuntime {
         continue;
       }
 
-      match = line.match(/^([A-Za-z_]\w*)\.(position|size|pitch|density|texture|mix|spread|feedback|reverb|freeze|reverse|mode)\(\s*(.+)\s*\)\s*$/);
+      match = line.match(/^([A-Za-z_]\w*)\.(disabled|position|size|pitch|density|texture|mix|spread|feedback|reverb|freeze|reverse|mode)\(\s*(.+)\s*\)\s*$/);
       if (match && mists.has(match[1])) {
         const definition = mists.get(match[1])!;
         const error = applyMistCall(
@@ -1815,6 +1866,21 @@ export class SonusRuntime {
         );
         if (error) diagnostics.push({ line: lineNumber, message: error });
         else results.push({ message: `${match[1]}.${match[2]}` });
+        continue;
+      }
+
+      match = line.match(/^([A-Za-z_]\w*)\.disabled\(\s*(true|false)\s*\)\s*$/i);
+      if (match && voices.has(match[1])) {
+        const voice = voices.get(match[1])!;
+        const error = applyVoiceCall(
+          match[1],
+          voice,
+          { name: 'disabled', argument: match[2].toLowerCase() },
+          moduleViews,
+          (expression) => evalValue(expression, lineNumber),
+        );
+        if (error) diagnostics.push({ line: lineNumber, message: error });
+        else results.push({ message: `${match[1]}.disabled ${match[2].toLowerCase()}` });
         continue;
       }
 
@@ -2437,21 +2503,21 @@ export class SonusRuntime {
       }
       resolvingClocks.add(name);
       let parentRate = 1;
-      let parentJitter = masterJitter;
-      let parentDrift = masterTimingDrift;
       if (definition.parent !== 'Clock') {
         const parent = resolveClock(definition.parent);
         if (!parent) diagnostics.push({ line: languageMasterClock?.line ?? 1, message: `unknown parent CLOCK '${definition.parent}' for '${name}'` });
-        else { parentRate = parent.rate; parentJitter = parent.jitter; parentDrift = parent.drift; }
+        else parentRate = parent.rate;
       }
       definition.rate = parentRate * definition.localRate;
-      definition.jitter = Math.min(100, parentJitter + definition.localJitter);
-      definition.drift = Math.min(100, parentDrift + definition.localDrift);
+      // Named clock feel is local to the clock object. It shares the master's
+      // nominal tempo/rate relationship but can carry independent jitter/drifter.
+      definition.jitter = definition.localJitter;
+      definition.drift = definition.localDrift;
       definition.parameters = new Map([
         ['FROM', definition.parent === 'Clock' ? 'MASTER' : definition.parent.toUpperCase()],
         ['RATE', definition.rateLabel],
         ['JITTER', `${formatNumber(definition.localJitter)}%`],
-        ['DRIFT', `${formatNumber(definition.localDrift)}%`],
+        ['DRIFTER', `${formatNumber(definition.localDrift)}%`],
       ]);
       resolvingClocks.delete(name);
       resolvedClocks.add(name);
@@ -2463,7 +2529,7 @@ export class SonusRuntime {
       { id: 'Clock', label: 'CLOCK', kind: 'module' as const, parameters: clockBpm > 0 ? [
         { name: 'BPM', value: formatNumber(clockBpm) },
         { name: 'JITTER', value: `${formatNumber(masterJitter)}%` },
-        { name: 'DRIFT', value: `${formatNumber(masterTimingDrift)}%` },
+        { name: 'DRIFTER', value: `${formatNumber(masterTimingDrift)}%` },
       ] : [], views: embeddedViews.get('Clock') },
       ...[...clockSources.entries()]
         .filter(([name]) => name.toLowerCase() !== 'clock' && !name.startsWith('__clock_'))
@@ -2548,7 +2614,7 @@ export class SonusRuntime {
         parameters: [
           { name: 'BPM', value: `${formatNumber(clockBpm)} BPM` },
           { name: 'JITTER', value: `${formatNumber(masterJitter)}%` },
-          { name: 'DRIFT', value: `${formatNumber(masterTimingDrift)}%` },
+          { name: 'DRIFTER', value: `${formatNumber(masterTimingDrift)}%` },
         ],
         views: embeddedViews.get('Clock'),
       }] : []),
@@ -2582,9 +2648,9 @@ export class SonusRuntime {
       clock: { bpm: clockBpm, jitter: masterJitter, drift: masterTimingDrift },
       mainLevel,
       clockSources: [
-        { name: 'Clock', rate: 1, jitter: masterJitter, drift: masterTimingDrift },
-        ...[...clockSources.entries()].map(([name, definition]) => ({ name, rate: definition.rate, jitter: definition.jitter, drift: definition.drift })),
-        ...whenHandlers.filter((handler) => handler.sourceName !== 'Clock').map((handler) => ({ name: handler.sourceName, rate: handler.rate, jitter: masterJitter, drift: masterTimingDrift })),
+        { name: 'Clock', rate: 1, jitter: masterJitter, drift: masterTimingDrift, enabled: !(languageMasterClock?.disabled ?? false) },
+        ...[...clockSources.entries()].map(([name, definition]) => ({ name, rate: definition.rate, jitter: definition.jitter, drift: definition.drift, enabled: !definition.disabled })),
+        ...whenHandlers.filter((handler) => handler.sourceName !== 'Clock').map((handler) => ({ name: handler.sourceName, rate: handler.rate, jitter: masterJitter, drift: masterTimingDrift, enabled: true })),
       ],
       oscillators: [...oscillators.entries()].map(([name, definition]) => ({
         name,
@@ -2594,6 +2660,7 @@ export class SonusRuntime {
         .filter(([, definition]) => definition.engine === 'matter')
         .map(([name, definition]) => ({
           name,
+          enabled: !definition.disabled,
           note: 69 + 12 * Math.log2(definition.frequency / 440),
           level: definition.level,
           drive: definition.drive,
@@ -2616,6 +2683,7 @@ export class SonusRuntime {
         .filter(([, definition]) => definition.engine === 'resonator')
         .map(([name, definition]) => ({
           name,
+          enabled: !definition.disabled,
           model: definition.model,
           polyphony: definition.polyphony,
           note: 69 + 12 * Math.log2(definition.frequency / 440),
@@ -2629,6 +2697,7 @@ export class SonusRuntime {
         .filter(([, definition]) => definition.engine === 'macro')
         .map(([name, definition]) => ({
           name,
+          enabled: !definition.disabled,
           model: definition.model,
           lpg: definition.lpg,
           level: definition.level,
@@ -2652,6 +2721,7 @@ export class SonusRuntime {
         .filter(([name]) => languageFxMeta.get(name)?.modelId !== 'sky')
         .map(([name, definition]) => ({
           name,
+          bypassed: definition.disabled,
           position: definition.position,
           size: definition.size,
           pitch: definition.pitch,
@@ -2669,6 +2739,7 @@ export class SonusRuntime {
         .filter(([name]) => languageFxMeta.get(name)?.modelId === 'sky')
         .map(([name, definition]) => ({
           name,
+          bypassed: definition.disabled,
           size: definition.size,
           decay: definition.feedback,
           damp: definition.texture,
@@ -2681,6 +2752,7 @@ export class SonusRuntime {
         })),
       filters: [...filters.entries()].map(([name, definition]) => ({
         name,
+        bypassed: definition.disabled,
         model: definition.model,
         ownerVoice: definition.ownerVoice,
         displayName: definition.displayName,
@@ -3978,7 +4050,7 @@ function parseLanguageClockFeelDirective(line: string): { name: string; kind: 'j
 }
 
 function parseLanguageMasterClockDirective(line: string, lineNumber: number): LanguageMasterClockDefinition | null {
-  const match = line.match(/^__masterclock\("((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(true|false),(\d+(?:\.\d+)?),(\d+(?:\.\d+)?)\)$/);
+  const match = line.match(/^__masterclock\("((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(true|false),(\d+(?:\.\d+)?),(\d+(?:\.\d+)?)(?:,(true|false))?\)$/);
   if (!match) return null;
   let expression: string;
   try { expression = JSON.parse(`"${match[1]}"`) as string; } catch { return null; }
@@ -3989,6 +4061,7 @@ function parseLanguageMasterClockDirective(line: string, lineNumber: number): La
     drift: match[4] === 'true',
     jitter: Number(match[5]),
     timingDrift: Number(match[6]),
+    disabled: match[7] === 'true',
     line: lineNumber,
   };
 }
@@ -4394,6 +4467,12 @@ function applyFilterCall(
   evaluate: (expression: string) => ScalarValue | undefined,
 ): string | null {
   switch (call.name) {
+    case 'disabled': {
+      const value = evaluate(call.argument);
+      if (typeof value !== 'boolean') return 'disabled expects true or false';
+      definition.disabled = value;
+      return null;
+    }
     case 'model': {
       const value = evaluate(call.argument);
       if (value !== 'svf') return 'FILTER model expects svf';
@@ -4467,6 +4546,12 @@ function applyMistCall(
   };
 
   switch (call.name) {
+    case 'disabled': {
+      const value = evaluate(call.argument);
+      if (typeof value !== 'boolean') return 'disabled expects true or false';
+      definition.disabled = value;
+      return null;
+    }
     case 'position': return percent('position');
     case 'size': return percent('size');
     case 'density': return percent('density');
@@ -4721,6 +4806,12 @@ function applyVoiceCall(
   evaluate: (expression: string) => ScalarValue | undefined,
 ): string | null {
   switch (call.name) {
+    case 'disabled': {
+      const value = evaluate(call.argument);
+      if (typeof value !== 'boolean') return 'disabled expects true or false';
+      voice.disabled = value;
+      return null;
+    }
     case 'model': {
       const value = evaluate(call.argument);
       if (value === undefined) return null;

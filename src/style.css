@@ -658,11 +658,22 @@ button, input, textarea { font: inherit; }
 }
 .syntax-comment {
   display: inline-block;
-  color: var(--phosphor-dim);
-  font-style: normal;
+  color: #747880;
+  font-style: italic;
   transform: skewX(-9deg);
   transform-origin: left bottom;
-  text-shadow: 0 0 4px rgba(215, 169, 46, 0.10);
+  text-shadow: none;
+}
+.syntax-line.syntax-disabled-object {
+  color: #9b7c2c;
+  text-shadow: 0 0 4px rgba(155, 124, 44, 0.16);
+}
+.syntax-line.syntax-disabled-object .syntax-comment {
+  color: #747880;
+  font-style: italic;
+  transform: skewX(-9deg);
+  transform-origin: left bottom;
+  text-shadow: none;
 }
 
 .editor-stack .editor {

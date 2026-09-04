@@ -121,92 +121,102 @@ VOICE lead:
 
 ## CLOCK
 
-The master clock is explicit and its monitor is always available:
+The master clock is explicit:
 
 ```text
-CLOCK set 120 bpm
+CLOCK SET 120 bpm
 ```
 
-The master can deliberately move away from a perfectly rigid pulse:
+Its clock view is always active in the sidebar and in Scheme. `WITH VIEW` is
+therefore not used on the master clock.
+
+The master can have its own timing character:
 
 ```text
-CLOCK set 120 bpm with jitter 8, drift 12
+CLOCK SET 120 bpm WITH JITTER 8, DRIFTER 12
 ```
 
-`jitter 0..100` adds fast interval-to-interval timing variation. A value of 10
-allows roughly ±10% instantaneous interval variation around the nominal tempo.
-`drift 0..100` is slower and correlated: the clock gradually wanders around the
-nominal BPM instead of choosing a completely new offset on every tick. The BPM
-shown in the status bar remains the nominal BPM; the always-on master clock view
-shows the actual irregular trigger spacing.
+`JITTER 0..100` adds fast interval-to-interval timing variation. `DRIFTER
+0..100` adds a slower correlated wander around the nominal tempo. Both are
+properties of the clock object; the BPM shown in the status bar remains the
+nominal BPM while the master view shows the actual trigger spacing.
 
-A program using beat-based `every` statements remains stopped with respect to
-beat timing until a master clock is declared and the program transport is
-running.
+The master clock may be paused live without stopping the rest of the program:
+
+```text
+_CLOCK SET 120 bpm WITH JITTER 8
+```
+
+Pausing the master stops the entire musical clock tree: the master, all named
+clocks derived from it, and all beat-based jobs stop receiving ticks. Wall-clock
+`sec`/`ms` jobs and already-running audio tails continue independently.
+Removing the underscore starts a fresh musical clock epoch: beat phase is not
+recovered or caught up, named clocks restart from the new master downbeat, and
+no burst of missed beat events is emitted.
 
 The clock value can also be dynamic:
 
 ```text
-CLOCK set rnd(110,120) bpm with cycle 4 beats
+CLOCK SET rnd(110,120) bpm WITH CYCLE 4 beats
 ```
 
-### Named derived clocks
+### Named clocks
 
-Simple one-off dividers and multipliers remain available:
+A named clock is a runtime object and is declared with `CLOCK`, never with
+`SET`. `SET` remains reserved for typed values/parameters.
+
+A named clock inherits the master rate by default, so this is valid:
 
 ```text
-SET half: clock /2
-SET double: clock *2
+CLOCK human WITH JITTER 10
 ```
 
-For a clock with its own timing character, declare a named `CLOCK` block:
+It runs at the same nominal rate as the master but has its own local jitter.
+`RATE` is optional and expresses a multiplier/divider of the master:
 
 ```text
-CLOCK slow with view:
-    from MASTER /4
-    jitter 15
-    drift 25
+CLOCK slow RATE /2
+CLOCK fast RATE *2
+CLOCK broken RATE /4 WITH JITTER 30, DRIFTER 8
 ```
 
-`with view` is optional. Unlike the master clock, named clocks do not create a
-sidebar monitor unless requested.
-
-A named clock can derive from another named clock:
+A named clock gets a visual clock view only when explicitly requested:
 
 ```text
-CLOCK slow:
-    from MASTER /2
-    drift 10
-
-CLOCK broken with view:
-    from slow /3
-    jitter 30
-    drift 4
+CLOCK slow RATE /2 WITH VIEW
+CLOCK human WITH JITTER 10, DRIFTER 4, VIEW
 ```
 
-The rate is relative to the selected parent. The parent's jitter/drift character
-is inherited and the child's values are added on top, capped at 100. This lets a
-clock remain related to the master while becoming progressively less rigid.
+The view uses the same moving clock-point language as the master clock view.
+Named clock modifiers can therefore include `JITTER`, `DRIFTER` and `VIEW`,
+separated by commas.
 
-Use named clocks from any beat-based `every` clause:
+A named clock can be paused independently:
+
+```text
+_CLOCK human WITH JITTER 10, VIEW
+```
+
+Only that clock stops emitting ticks; the master and other clocks continue.
+There is deliberately no `_SET` form because `SET` can hold non-clock typed
+values and disabling it would invalidate unrelated dependencies.
+
+Use named clocks from beat-based `EVERY` clauses:
 
 ```text
 VOICE bass:
-    sound macro.analog
-    note [C2 Eb2 G2] with walk every 1 beat with clock slow
+    SOUND macro.analog
+    NOTE [C2 Eb2 G2] WITH WALK EVERY 1 beat WITH CLOCK slow
 ```
 
-or use an anonymous master-derived rate directly:
+or use an anonymous master-derived rate directly when no persistent clock
+object is needed:
 
 ```text
-morph 50 every 2 beats with clock /4
+MORPH 50 EVERY 2 beats WITH CLOCK /4
 ```
 
-The `every` count is measured in ticks of the selected clock. Therefore
-`every 2 beats with clock /2` updates every two ticks of the half-rate clock.
-Timing modifiers such as `chance`, `coin` and `loose` remain local to the
-`every` clause rather than changing the clock itself.
-
+The `EVERY` count is measured in ticks of the selected clock.
 
 ## VOICE
 
@@ -948,6 +958,30 @@ graphical patch editor.
 Declared parameter values are shown inside the owning module. Optional views
 can also appear in the Scheme representation.
 
+
+### Live disable, mute and bypass
+
+A leading underscore on a live object declaration temporarily excludes that object without deleting its definition or routes. The runtime keeps the object instantiated so removing the underscore is a fast hot-state change:
+
+```text
+_VOICE bass:
+    SOUND macro.analog
+    NOTE C2
+
+_FILTER tone:
+    MODEL svf
+    CUTOFF 60
+
+_FX space:
+    MODEL sky
+
+_CLOCK pulse RATE *2
+```
+
+The effect depends on the object's audio role: `_VOICE` mutes the voice output while preserving DSP state; `_FILTER` bypasses the filter and passes its input through all exposed filter outputs; `_FX` bypasses the processor dry while stopping new input into the wet engine so an existing reverb/delay tail can decay; `_CLOCK` pauses the selected named clock while the rest of the musical clock tree continues; `_CLOCK SET ... bpm` pauses the entire musical clock tree. Wall-clock `sec`/`ms` scheduling continues during a master-clock pause.
+
+The underscore is a live-performance state change. While the program is running, adding or removing `_` takes effect immediately without `Cmd+Enter`; the disabled-object colour follows the same runtime state, so a yellow block is already muted, bypassed or paused. A later normal compile preserves the source declaration as the source of truth. Timed mute/bypass scheduling is not part of this version yet.
+
 ## Command mode
 
 Press `Esc` from the editor to enter command mode.
@@ -976,7 +1010,7 @@ Current useful commands include:
 `:run` compiles and starts the current live program.
 
 `:run stop` stops the program transport without shutting down the Web Audio
-engine itself.
+engine itself. Generator scheduling and modulation stop, FILTER state is cleared immediately, while downstream tail-preserving FX remain alive long enough to decay naturally.
 
 ## Save and load
 
@@ -1106,7 +1140,7 @@ This distinction is intentional:
 Generative behavior composes with normal timing:
 
 ```text
-SET slow: clock /2
+CLOCK slow RATE /2
 
 VOICE lead:
     sound macro.fm
@@ -1408,3 +1442,39 @@ PLAY source THROUGH bells THEN MAIN
 When an external source is connected, the Rings worklet uses the original
 external-exciter path; with no input connection it uses the original internal
 exciter.
+
+### LIVE performance controls
+
+`LIVE` is a performance-UI qualifier. For direct parameters whose native Sonus domain is `0..100`, it exposes a realtime slider without changing the DSP meaning:
+
+```text
+FILTER tone:
+    MODEL svf
+    LIVE CUTOFF 60
+    LIVE RESONANCE 35
+    DRIVE 10
+```
+
+In the live editor, each `LIVE` parameter receives a compact realtime slider.
+Moving it sends the value directly to the active DSP parameter and also updates
+the literal in the source itself, so performance control stays smooth while the
+text remains the source of truth. When the gesture ends, the updated source is
+reconciled with the runtime. A scalar generative modifier remains attached to
+the updated base value, for example:
+
+```text
+LIVE CUTOFF 60 WITH WANDER 15
+```
+
+Changing the control to 72 rewrites only the literal as
+`LIVE CUTOFF 72 WITH WANDER 15`; the wander process is preserved.
+
+`LIVE NOTE` is the first typed exception to the scalar rule. It opens the inline piano view for the note value or note list, so the canonical performance form is now:
+
+```text
+VOICE lead:
+    SOUND macro.analog
+    LIVE NOTE C3
+```
+
+The older `NOTE ... WITH VIEW` form remains accepted for compatibility, but `LIVE NOTE ...` is the preferred spelling. The piano is display-only in this version; direct key editing of the source note/list is reserved for a later iteration. Other typed or derived values such as `FREQ`, `SCALE`, `FROM` and envelopes are not yet `LIVE`-editable. The qualifier is UI metadata; it does not introduce a second scheduler or hidden parameter value.

@@ -88,6 +88,7 @@ type ClockState = {
   rateLabel: string;
   jitter: number;
   drift: number;
+  view: boolean;
 };
 
 
@@ -815,6 +816,7 @@ function compileVoiceProperty(
   sourceKinds: Map<string, SourceKind>,
   sourceDefinitions: Map<string, SourceDefinition>,
   modSources: Map<string, ModSourceDefinition>,
+  live = false,
 ): string {
   const key = property.toLowerCase();
   const value = rawValue.trim();
@@ -1026,7 +1028,7 @@ function compileVoiceProperty(
       claimPitchProperty(voice, 'note', line, 'VOICE');
       const split = splitEveryClause(value);
       const { base, modifiers } = splitWith(split.base);
-      const noteView = modifiers.some((modifier) => /^view$/i.test(modifier));
+      const noteView = live || modifiers.some((modifier) => /^view$/i.test(modifier));
       const selectionModifiers = modifiers.filter((modifier) => !/^view$/i.test(modifier));
       const noteTokens = parseList(base, line, 'note').map((token) => parseNoteSequenceToken(token, line));
       const notes = noteTokens.map((token) => token.note);
@@ -1316,16 +1318,9 @@ function compileSet(
     return `${name} = ${JSON.stringify(envelope.display)};`;
   }
 
-  const clockAlias = body.match(/^clock\s+([/*])\s*(\d+(?:\.\d+)?)(?:\s+with\s+(view))?$/i);
-  if (clockAlias) {
-    const n = numberValue(clockAlias[2], line, 'clock rate');
-    if (n <= 0) throw new LanguageError([{ line, message: 'clock divisor/multiplier must be greater than 0' }]);
-    const label = `${clockAlias[1]}${formatSourceNumber(n)}`;
-    scalarNames.add(name);
-    sourceKinds.set(name, 'clock');
-    sourceDefinitions.set(name, { kind: 'clock', internalName: name, rateLabel: label, display: `clock ${label}` });
-    const view = clockAlias[3] ? '.view()' : '';
-    return `${name} = Clock.rate(${JSON.stringify(label)})${view};`;
+  // CLOCK is a runtime object and must be declared with the CLOCK keyword, not SET.
+  if (/^clock\b/i.test(body)) {
+    throw new LanguageError([{ line, message: 'SET cannot declare a clock; use CLOCK <name> [RATE /n|*n] instead' }]);
   }
 
   const scale = parseScaleSource(body, line);
@@ -1437,8 +1432,8 @@ function compileSet(
 }
 
 
-function requireClockReady(clock: ClockState | null, diagnostics: LanguageDiagnostic[]): void {
-  if (clock && !clock.parent) diagnostics.push({ line: clock.line, message: `CLOCK '${clock.name}' requires from <clock> /n or *n` });
+function requireClockReady(_clock: ClockState | null, _diagnostics: LanguageDiagnostic[]): void {
+  // Named clocks default to MASTER at rate *1 when no explicit parent/rate is supplied.
 }
 
 function compileClockProperty(
@@ -1470,26 +1465,41 @@ function compileClockProperty(
     if (definition?.kind === 'clock') definition.rateLabel = clock.rateLabel;
     return `__clockparent(${JSON.stringify(clock.name)},${JSON.stringify(parent)},${JSON.stringify(clock.rateLabel)});`;
   }
-  if (key === 'jitter' || key === 'drift') {
-    const amount = numberValue(value, line, `CLOCK ${key}`);
-    if (amount < 0 || amount > 100) throw new LanguageError([{ line, message: `CLOCK ${key} expects 0..100` }]);
+  if (key === 'jitter' || key === 'drift' || key === 'drifter') {
+    const publicKey = key === 'drift' ? 'drifter' : key;
+    const amount = numberValue(value, line, `CLOCK ${publicKey}`);
+    if (amount < 0 || amount > 100) throw new LanguageError([{ line, message: `CLOCK ${publicKey} expects 0..100` }]);
     if (key === 'jitter') clock.jitter = amount; else clock.drift = amount;
-    return `__clockfeel(${JSON.stringify(clock.name)},${JSON.stringify(key)},${amount});`;
+    const runtimeKey = key === 'jitter' ? 'jitter' : 'drift';
+    return `__clockfeel(${JSON.stringify(clock.name)},${JSON.stringify(runtimeKey)},${amount});`;
+  }
+  if (key === 'rate') {
+    const match = value.match(/^([/*])\s*(\d+(?:\.\d+)?)$/);
+    if (!match) throw new LanguageError([{ line, message: 'CLOCK rate expects /n or *n' }]);
+    const amount = numberValue(match[2], line, 'CLOCK rate');
+    if (amount <= 0) throw new LanguageError([{ line, message: 'CLOCK rate must be greater than 0' }]);
+    clock.parent = 'Clock';
+    clock.rate = match[1] === '/' ? 1 / amount : amount;
+    clock.rateLabel = `${match[1]}${formatSourceNumber(amount)}`;
+    const definition = sourceDefinitions.get(clock.name);
+    if (definition?.kind === 'clock') definition.rateLabel = clock.rateLabel;
+    return `__clockparent(${JSON.stringify(clock.name)},"Clock",${JSON.stringify(clock.rateLabel)});`;
   }
   throw new LanguageError([{ line, message: `unknown CLOCK property '${property}'` }]);
 }
 
 function compileClock(lineText: string, line: number): string {
-  const match = lineText.match(/^CLOCK\s+set\s+(.+?)\s+bpm(?:\s+with\s+(.+))?$/i);
-  if (!match) throw new LanguageError([{ line, message: 'CLOCK expects: CLOCK set <expression> bpm [with jitter <0..100>, drift <0..100>]' }]);
-  const expression = match[1].trim();
+  const match = lineText.match(/^(_)?CLOCK\s+set\s+(.+?)\s+bpm(?:\s+with\s+(.+))?$/i);
+  if (!match) throw new LanguageError([{ line, message: 'CLOCK expects: CLOCK set <expression> bpm [with jitter <0..100>, drifter <0..100>]' }]);
+  const disabled = Boolean(match[1]);
+  const expression = match[2].trim();
   if (!expression) throw new LanguageError([{ line, message: 'CLOCK set expects a BPM expression' }]);
   let cycleAmount: number | null = null;
   let cycleUnit: 'ms' | 'sec' | 'beat' | null = null;
   let expressionDrift = false;
   let jitter = 0;
   let timingDrift = 0;
-  const modifiers = (match[2] ?? '').split(',').map((item) => item.trim()).filter(Boolean);
+  const modifiers = (match[3] ?? '').split(',').map((item) => item.trim()).filter(Boolean);
   for (const modifier of modifiers) {
     const cycle = modifier.match(/^cycle\s+(\d+(?:\.\d+)?)\s+(ms|sec|secs|second|seconds|beat|beats)$/i);
     if (cycle) {
@@ -1506,16 +1516,65 @@ function compileClock(lineText: string, line: number): string {
       if (jitter < 0 || jitter > 100) throw new LanguageError([{ line, message: 'CLOCK jitter expects 0..100' }]);
       continue;
     }
-    const driftMatch = modifier.match(/^drift\s+(\d+(?:\.\d+)?)$/i);
-    if (driftMatch) {
-      timingDrift = numberValue(driftMatch[1], line, 'CLOCK drift');
-      if (timingDrift < 0 || timingDrift > 100) throw new LanguageError([{ line, message: 'CLOCK drift expects 0..100' }]);
+    const drifterMatch = modifier.match(/^(?:drifter|drift)\s+(\d+(?:\.\d+)?)$/i);
+    if (drifterMatch) {
+      timingDrift = numberValue(drifterMatch[1], line, 'CLOCK drifter');
+      if (timingDrift < 0 || timingDrift > 100) throw new LanguageError([{ line, message: 'CLOCK drifter expects 0..100' }]);
       continue;
     }
     if (/^drift$/i.test(modifier)) { expressionDrift = true; continue; }
+    if (/^view$/i.test(modifier)) throw new LanguageError([{ line, message: 'the master CLOCK view is always active; WITH VIEW is only for named clocks' }]);
     throw new LanguageError([{ line, message: `CLOCK does not support modifier '${modifier}'` }]);
   }
-  return `__masterclock(${JSON.stringify(expression)},${cycleAmount ?? 0},${JSON.stringify(cycleUnit ?? 'ms')},${expressionDrift},${jitter},${timingDrift});`;
+  return `__masterclock(${JSON.stringify(expression)},${cycleAmount ?? 0},${JSON.stringify(cycleUnit ?? 'ms')},${expressionDrift},${jitter},${timingDrift},${disabled});`;
+}
+
+function compileNamedClock(
+  lineText: string,
+  line: number,
+  sourceDefinitions: Map<string, SourceDefinition>,
+  reservedNames: Set<string>,
+): { name: string; output: string } | null {
+  const match = lineText.match(/^(_)?CLOCK\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+RATE\s+([/*])\s*(\d+(?:\.\d+)?))?(?:\s+WITH\s+(.+))?$/i);
+  if (!match || /^set$/i.test(match[2])) return null;
+  const disabled = Boolean(match[1]);
+  const name = match[2];
+  if (reservedNames.has(name) || sourceDefinitions.has(name) || /^master$/i.test(name)) {
+    throw new LanguageError([{ line, message: `CLOCK '${name}' is already defined or reserved` }]);
+  }
+  const op = match[3] ?? '*';
+  const amount = match[4] ? numberValue(match[4], line, 'CLOCK rate') : 1;
+  if (amount <= 0) throw new LanguageError([{ line, message: 'CLOCK rate must be greater than 0' }]);
+  const rateLabel = `${op}${formatSourceNumber(amount)}`;
+  let view = false;
+  let jitter = 0;
+  let drifter = 0;
+  const modifiers = (match[5] ?? '').split(',').map((item) => item.trim()).filter(Boolean);
+  for (const modifier of modifiers) {
+    if (/^view$/i.test(modifier)) { view = true; continue; }
+    const jitterMatch = modifier.match(/^jitter\s+(\d+(?:\.\d+)?)$/i);
+    if (jitterMatch) {
+      jitter = numberValue(jitterMatch[1], line, 'CLOCK jitter');
+      if (jitter < 0 || jitter > 100) throw new LanguageError([{ line, message: 'CLOCK jitter expects 0..100' }]);
+      continue;
+    }
+    const drifterMatch = modifier.match(/^(?:drifter|drift)\s+(\d+(?:\.\d+)?)$/i);
+    if (drifterMatch) {
+      drifter = numberValue(drifterMatch[1], line, 'CLOCK drifter');
+      if (drifter < 0 || drifter > 100) throw new LanguageError([{ line, message: 'CLOCK drifter expects 0..100' }]);
+      continue;
+    }
+    throw new LanguageError([{ line, message: `CLOCK '${name}' does not support modifier '${modifier}'` }]);
+  }
+  sourceDefinitions.set(name, { kind: 'clock', internalName: name, rateLabel, display: `clock ${rateLabel}` });
+  const calls = `${view ? '.view()' : ''}${disabled ? '.disabled(true)' : ''}`;
+  const directives = [
+    `${name} = Clock.rate(${JSON.stringify(rateLabel)})${calls};`,
+    `__clockparent(${JSON.stringify(name)},\"Clock\",${JSON.stringify(rateLabel)});`,
+  ];
+  if (jitter > 0) directives.push(`__clockfeel(${JSON.stringify(name)},\"jitter\",${jitter});`);
+  if (drifter > 0) directives.push(`__clockfeel(${JSON.stringify(name)},\"drift\",${drifter});`);
+  return { name, output: directives.join('\n') };
 }
 
 function modSourceKey(ownerVoice: string | null, name: string): string {
@@ -2280,6 +2339,57 @@ function requireVoiceSound(voice: VoiceState | null, diagnostics: LanguageDiagno
   }
 }
 
+
+function parseBlockPropertyStatement(
+  trimmed: string,
+  line: number,
+  label: 'VOICE' | 'FX' | 'FILTER',
+): { property: string; value: string; live: boolean } {
+  const match = trimmed.match(/^(LIVE\s+)?([A-Za-z_][A-Za-z0-9_]*)\s+(.+)$/i);
+  if (!match) throw new LanguageError([{ line, message: `expected ${label} property and value` }]);
+  const live = Boolean(match[1]);
+  const property = match[2];
+  const value = match[3].trim();
+  if (live && label === 'VOICE' && /^note$/i.test(property) && /^from\s+/i.test(value)) {
+    throw new LanguageError([{ line, message: 'LIVE NOTE currently expects a direct note or note list, not FROM' }]);
+  }
+  if (live && !(label === 'VOICE' && /^note$/i.test(property))) {
+    const literal = value.match(/^(\d+(?:\.\d+)?)(?=\s|$)/);
+    if (!literal) throw new LanguageError([{ line, message: 'LIVE currently requires a literal 0..100 value, except LIVE NOTE' }]);
+    const amount = Number(literal[1]);
+    if (!Number.isFinite(amount) || amount < 0 || amount > 100) {
+      throw new LanguageError([{ line, message: 'LIVE currently requires a literal 0..100 value, except LIVE NOTE' }]);
+    }
+  }
+  return { property, value, live };
+}
+
+function validateLiveVoiceProperty(voice: VoiceState, property: string, line: number): void {
+  const key = property.toLowerCase();
+  const soundParameter = voice.soundId ? SOUND_ENGINE_REGISTRY[voice.soundId]?.parameters[key] : undefined;
+  if (soundParameter || key === 'level' || key === 'bow' || key === 'blow' || key === 'strike' || key === 'note') return;
+  throw new LanguageError([{ line, message: `LIVE is available only for 0..100 VOICE parameters or NOTE; '${property}' is not eligible` }]);
+}
+
+function validateLiveFxProperty(fx: FxState, property: string, line: number): void {
+  if (!fx.modelId) throw new LanguageError([{ line, message: 'LIVE parameter requires FX model to be declared first' }]);
+  const key = property.toLowerCase();
+  const aliases: Record<string, FxParameter> = {
+    decay: 'feedback', damp: 'texture', damping: 'texture', bloom: 'density', diffuse: 'density',
+    predelay: 'position', motion: 'reverb', width: 'spread',
+  };
+  const effectiveKey = fx.modelId === 'sky' ? (aliases[key] ?? key) : key;
+  const schema = FX_MODEL_REGISTRY[fx.modelId];
+  if (schema.parameters.has(effectiveKey as FxParameter) && !['pitch'].includes(effectiveKey)) return;
+  throw new LanguageError([{ line, message: `LIVE is available only for 0..100 FX parameters; '${property}' is not eligible` }]);
+}
+
+function validateLiveFilterProperty(property: string, line: number): void {
+  const key = property.toLowerCase();
+  if (key === 'cutoff' || key === 'resonance' || key === 'drive') return;
+  throw new LanguageError([{ line, message: `LIVE is available only for CUTOFF, RESONANCE, or DRIVE on FILTER` }]);
+}
+
 export function compileLanguageSource(source: string): string {
   const lines = source.replace(/\r\n/g, '\n').split('\n');
 
@@ -2342,19 +2452,20 @@ export function compileLanguageSource(source: string): string {
         currentFilter = null;
       }
 
-      const clockBlockMatch = trimmed.match(/^CLOCK\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
+      const clockBlockMatch = trimmed.match(/^(_)?CLOCK\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
       if (clockBlockMatch) {
         if (indentation > 0) throw new LanguageError([{ line: lineNumber, message: 'CLOCK declarations are top-level only' }]);
         requireVoiceSound(currentVoice, diagnostics); requireFxModel(currentFx, diagnostics); requireSeqReady(currentSeq, diagnostics);
         currentVoice = null; currentFx = null; currentFilter = null; currentMod = null; currentSeq = null;
-        const name = clockBlockMatch[1];
+        const disabled = Boolean(clockBlockMatch[1]);
+        const name = clockBlockMatch[2];
         if (/^master$/i.test(name) || voices.has(name) || fxs.has(name) || filters.has(name) || scalarNames.has(name) || seqs.has(name) || sourceDefinitions.has(name)) {
           throw new LanguageError([{ line: lineNumber, message: `CLOCK '${name}' is already defined or reserved` }]);
         }
         sourceKinds.set(name, 'clock');
         sourceDefinitions.set(name, { kind: 'clock', internalName: name, rateLabel: '*1', display: 'clock *1' });
-        currentClock = { name, line: lineNumber, indentation, parent: null, rate: 1, rateLabel: '*1', jitter: 0, drift: 0 };
-        output[index] = `${name} = Clock.rate("*1")${clockBlockMatch[2] ? '.view()' : ''};`;
+        currentClock = { name, line: lineNumber, indentation, parent: 'Clock', rate: 1, rateLabel: '*1', jitter: 0, drift: 0, view: Boolean(clockBlockMatch[3]) };
+        output[index] = `${name} = Clock.rate("*1")${clockBlockMatch[3] ? '.view()' : ''}${disabled ? '.disabled(true)' : ''};`;
         continue;
       }
 
@@ -2426,9 +2537,10 @@ export function compileLanguageSource(source: string): string {
         continue;
       }
 
-      const filterMatch = trimmed.match(/^FILTER\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*$/i);
+      const filterMatch = trimmed.match(/^(_)?FILTER\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*$/i);
       if (filterMatch) {
-        const name = filterMatch[1];
+        const disabled = Boolean(filterMatch[1]);
+        const name = filterMatch[2];
         const embedded = indentation > 0 && currentVoice !== null;
         if (indentation > 0 && !embedded) throw new LanguageError([{ line: lineNumber, message: 'FILTER can be top-level or directly inside a VOICE' }]);
 
@@ -2448,52 +2560,63 @@ export function compileLanguageSource(source: string): string {
 
         const internalName = embedded ? `__filter_${currentVoice!.name}_${name}` : name;
         currentFilter = { name, internalName, line: lineNumber, indentation, ownerVoice: embedded ? currentVoice!.name : null, hasModel: false };
-        output[index] = `${internalName} = Filter();\n${internalName}.owner(${JSON.stringify(currentFilter.ownerVoice ?? '')});\n${internalName}.displayName(${JSON.stringify(name)});`;
+        output[index] = `${internalName} = Filter();\n${internalName}.owner(${JSON.stringify(currentFilter.ownerVoice ?? '')});\n${internalName}.displayName(${JSON.stringify(name)});${disabled ? `\n${internalName}.disabled(true);` : ''}`;
         continue;
       }
 
-      const fxMatch = trimmed.match(/^FX\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
+      const fxMatch = trimmed.match(/^(_)?FX\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
       if (fxMatch) {
         if (indentation > 0) throw new LanguageError([{ line: lineNumber, message: 'FX declarations are top-level only' }]);
         requireVoiceSound(currentVoice, diagnostics);
         requireFxModel(currentFx, diagnostics);
         currentVoice = null;
         currentMod = null;
-        const name = fxMatch[1];
+        const disabled = Boolean(fxMatch[1]);
+        const name = fxMatch[2];
         if (fxs.has(name) || voices.has(name) || filters.has(name) || scalarNames.has(name) || seqs.has(name)) {
           throw new LanguageError([{ line: lineNumber, message: `FX '${name}' is already defined` }]);
         }
         fxs.add(name);
         currentFx = { name, line: lineNumber, indentation, hasModel: false, modelId: null, pitchProperty: null };
-        const viewDirective = fxMatch[2] ? `\n${name}.view();` : '';
-        output[index] = `${name} = Mist();\n__fxmeta(${JSON.stringify(name)});${viewDirective}`;
+        const viewDirective = fxMatch[3] ? `\n${name}.view();` : '';
+        const disabledDirective = disabled ? `\n${name}.disabled(true);` : '';
+        output[index] = `${name} = Mist();\n__fxmeta(${JSON.stringify(name)});${viewDirective}${disabledDirective}`;
         continue;
       }
 
-      const voiceMatch = trimmed.match(/^VOICE\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
+      const voiceMatch = trimmed.match(/^(_)?VOICE\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
       if (voiceMatch) {
         requireVoiceSound(currentVoice, diagnostics);
         requireFxModel(currentFx, diagnostics);
         currentFx = null;
-        const name = voiceMatch[1];
+        const disabled = Boolean(voiceMatch[1]);
+        const name = voiceMatch[2];
         if (voices.has(name) || fxs.has(name) || scalarNames.has(name) || seqs.has(name)) {
           throw new LanguageError([{ line: lineNumber, message: `VOICE '${name}' is already defined` }]);
         }
         voices.add(name);
         sourceKinds.set(name, 'voice');
         currentVoice = { name, line: lineNumber, indentation, hasSound: false, soundId: null, pitchProperty: null, embeddedFilter: null };
-        output[index] = voiceMatch[2] ? `${name} = Voice();\n${name}.view();` : `${name} = Voice();`;
+        const viewDirective = voiceMatch[3] ? `\n${name}.view();` : '';
+        const disabledDirective = disabled ? `\n${name}.disabled(true);` : '';
+        output[index] = `${name} = Voice();${viewDirective}${disabledDirective}`;
         continue;
       }
 
-      if (/^CLOCK\b/i.test(trimmed)) {
+      if (/^_?CLOCK\b/i.test(trimmed)) {
         requireVoiceSound(currentVoice, diagnostics);
         requireFxModel(currentFx, diagnostics);
         requireSeqReady(currentSeq, diagnostics);
-  requireClockReady(currentClock, diagnostics);
         requireClockReady(currentClock, diagnostics);
         currentVoice = null; currentFx = null; currentSeq = null; currentClock = null;
-        output[index] = compileClock(trimmed, lineNumber);
+        const namedClock = compileNamedClock(
+          trimmed,
+          lineNumber,
+          sourceDefinitions,
+          new Set([...voices, ...fxs, ...filters, ...scalarNames, ...seqs]),
+        );
+        if (namedClock) sourceKinds.set(namedClock.name, 'clock');
+        output[index] = namedClock ? namedClock.output : compileClock(trimmed, lineNumber);
         continue;
       }
 
@@ -2536,28 +2659,24 @@ export function compileLanguageSource(source: string): string {
       }
 
       if (currentFilter && indentation > currentFilter.indentation) {
-        const propertyMatch = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s+(.+)$/);
-        if (!propertyMatch) throw new LanguageError([{ line: lineNumber, message: 'expected FILTER property and value' }]);
-        output[index] = compileFilterProperty(currentFilter, propertyMatch[1], propertyMatch[2], lineNumber, sourceDefinitions);
+        const statement = parseBlockPropertyStatement(trimmed, lineNumber, 'FILTER');
+        if (statement.live) validateLiveFilterProperty(statement.property, lineNumber);
+        output[index] = compileFilterProperty(currentFilter, statement.property, statement.value, lineNumber, sourceDefinitions);
         continue;
       }
 
       if (indentation > 0 && currentFx) {
-        const propertyMatch = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s+(.+)$/);
-        if (!propertyMatch) {
-          throw new LanguageError([{ line: lineNumber, message: 'expected FX property and value' }]);
-        }
-        output[index] = compileFxProperty(currentFx, propertyMatch[1], propertyMatch[2], lineNumber, sourceDefinitions, modSources);
+        const statement = parseBlockPropertyStatement(trimmed, lineNumber, 'FX');
+        if (statement.live) validateLiveFxProperty(currentFx, statement.property, lineNumber);
+        output[index] = compileFxProperty(currentFx, statement.property, statement.value, lineNumber, sourceDefinitions, modSources);
         continue;
       }
 
       if (indentation > 0 && currentVoice) {
-        const propertyMatch = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s+(.+)$/);
-        if (!propertyMatch) {
-          throw new LanguageError([{ line: lineNumber, message: 'expected VOICE property and value' }]);
-        }
-        output[index] = compileVoiceProperty(currentVoice, propertyMatch[1], propertyMatch[2], lineNumber, sourceKinds, sourceDefinitions, modSources);
-        if (propertyMatch[1].toLowerCase() === 'sound') {
+        const statement = parseBlockPropertyStatement(trimmed, lineNumber, 'VOICE');
+        if (statement.live) validateLiveVoiceProperty(currentVoice, statement.property, lineNumber);
+        output[index] = compileVoiceProperty(currentVoice, statement.property, statement.value, lineNumber, sourceKinds, sourceDefinitions, modSources, statement.live);
+        if (statement.property.toLowerCase() === 'sound') {
           currentVoice.hasSound = true;
           if (currentVoice.soundId) voiceSoundIds.set(currentVoice.name, currentVoice.soundId);
         }

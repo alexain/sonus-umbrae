@@ -302,6 +302,6 @@ The runtime loads `/dsp/sky.wasm` automatically when an `FX` declares `MODEL sky
 
 The module is deliberately separate from future DaisySP areas. Additional permissively licensed DaisySP effects, synthesis or utility code can later be built into their own WASM modules rather than growing one monolithic binary.
 
-The DaisySP SVF computes low, high, band, notch and peak responses simultaneously. Sonus currently exposes the four canonical routing ports `lp`, `hp`, `bp`, and `np`; `lp` is the default FILTER output. The peak response remains internal to the backend for now.
+The DaisySP SVF computes low, high, band, notch and peak responses simultaneously. The Sonus bridge also exports an explicit SVF reset used by musical transport stop, so resonant filter state is cleared while FX tails remain untouched. Sonus currently exposes the four canonical routing ports `lp`, `hp`, `bp`, and `np`; `lp` is the default FILTER output. The peak response remains internal to the backend for now.
 
 `npm run dsp:build` also removes a stale legacy `public/dsp/liquid.wasm` artifact if one exists from an older checkout.

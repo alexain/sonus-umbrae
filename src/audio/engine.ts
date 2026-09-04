@@ -15,13 +15,14 @@ const DEFAULT_HARDWARE_OUTPUT_GAIN = 0.12;
 export interface AudioProgram {
   clock: { bpm: number; jitter: number; drift: number };
   mainLevel: number;
-  clockSources: Array<{ name: string; rate: number; jitter: number; drift: number }>;
+  clockSources: Array<{ name: string; rate: number; jitter: number; drift: number; enabled: boolean }>;
   oscillators: Array<{
     name: string;
     frequency: number;
   }>;
   voices: Array<{
     name: string;
+    enabled: boolean;
     model: number;
     lpg: boolean;
     level: number;
@@ -32,6 +33,7 @@ export interface AudioProgram {
   }>;
   matters: Array<{
     name: string;
+    enabled: boolean;
     note: number;
     level: number;
     drive: { kind: string; values: number[] } | null;
@@ -52,6 +54,7 @@ export interface AudioProgram {
   }>;
   resonators: Array<{
     name: string;
+    enabled: boolean;
     model: number;
     polyphony: 1 | 2 | 4;
     note: number;
@@ -74,6 +77,7 @@ export interface AudioProgram {
   }>;
   mists: Array<{
     name: string;
+    bypassed: boolean;
     position: number;
     size: number;
     pitch: number;
@@ -89,6 +93,7 @@ export interface AudioProgram {
   }>;
   skies: Array<{
     name: string;
+    bypassed: boolean;
     size: number;
     decay: number;
     damp: number;
@@ -101,6 +106,7 @@ export interface AudioProgram {
   }>;
   filters: Array<{
     name: string;
+    bypassed: boolean;
     model: 'svf';
     ownerVoice: string | null;
     displayName: string;
@@ -141,6 +147,7 @@ interface GainVoice {
 }
 
 interface MacroVoice {
+  enabled: boolean;
   node: AudioWorkletNode;
   outGain: GainNode;
   auxGain: GainNode;
@@ -158,6 +165,7 @@ interface MacroVoice {
 }
 
 interface MatterVoice {
+  enabled: boolean;
   node: AudioWorkletNode;
   mainGain: GainNode;
   auxGain: GainNode;
@@ -166,6 +174,7 @@ interface MatterVoice {
 }
 
 interface ResonatorVoice {
+  enabled: boolean;
   node: AudioWorkletNode;
   mainGain: GainNode;
   auxGain: GainNode;
@@ -190,10 +199,13 @@ interface SwellVoice {
 
 
 interface MistVoice {
+  bypassed: boolean;
   node: AudioWorkletNode;
   monoInput: GainNode;
   inputL: GainNode;
   inputR: GainNode;
+  wetInputL: GainNode;
+  wetInputR: GainNode;
   dryL: GainNode;
   dryR: GainNode;
   wetL: GainNode;
@@ -215,12 +227,15 @@ interface MistVoice {
 }
 
 interface SkyVoice {
+  bypassed: boolean;
   node: AudioWorkletNode;
   inputMerger: ChannelMergerNode;
   outputSplitter: ChannelSplitterNode;
   monoInput: GainNode;
   inputL: GainNode;
   inputR: GainNode;
+  wetInputL: GainNode;
+  wetInputR: GainNode;
   dryL: GainNode;
   dryR: GainNode;
   wetL: GainNode;
@@ -239,6 +254,7 @@ interface SkyVoice {
 }
 
 interface SvfFilterVoice {
+  bypassed: boolean;
   node: AudioWorkletNode;
   input: GainNode;
   lowOut: GainNode;
@@ -269,6 +285,7 @@ interface TriggerVisualEvent {
 }
 
 interface ClockSource {
+  enabled: boolean;
   node: AudioWorkletNode;
   rate: number;
   jitter: number;
@@ -311,6 +328,7 @@ export class AudioEngine {
   private clocks = new Map<string, ClockSource>();
   private clockTriggerListeners = new Map<string, Set<() => void>>();
   private masterClockBpm = 0;
+  private masterClockEnabled = true;
   private clockTransportRunning = true;
   private voiceWasmBytes: ArrayBuffer | null = null;
   private matterWasmBytes: ArrayBuffer | null = null;
@@ -461,7 +479,8 @@ export class AudioEngine {
       if (!desiredSkies.has(name)) this.removeSky(name);
     }
 
-    for (const definition of program.clockSources) this.createOrUpdateClock(definition.name, definition.rate, definition.jitter, definition.drift);
+    this.masterClockEnabled = desiredClockSources.get('Clock')?.enabled ?? true;
+    for (const definition of program.clockSources) this.createOrUpdateClock(definition.name, definition.rate, definition.jitter, definition.drift, definition.enabled);
     this.updateAllClocks();
 
     for (const definition of program.oscillators) {
@@ -574,6 +593,7 @@ export class AudioEngine {
     morphInput.connect(node, 0, 4);
 
     this.voices.set(definition.name, {
+      enabled: definition.enabled,
       node,
       outGain,
       auxGain,
@@ -594,10 +614,11 @@ export class AudioEngine {
   private updateVoice(definition: AudioProgram['voices'][number]): void {
     const voice = this.voices.get(definition.name);
     if (!voice) return;
+    voice.enabled = definition.enabled;
     voice.model = definition.model;
     voice.lpg = definition.lpg;
     voice.level = definition.level;
-    const level = Math.max(0, Math.min(1, definition.level / 100));
+    const level = definition.enabled ? Math.max(0, Math.min(1, definition.level / 100)) : 0;
     voice.outGain.gain.setTargetAtTime(level, this.ensureContext().currentTime, 0.008);
     voice.auxGain.gain.setTargetAtTime(level, this.ensureContext().currentTime, 0.008);
     voice.frequency = definition.frequency;
@@ -636,6 +657,7 @@ export class AudioEngine {
     node.connect(mainGain, 0, 0);
     node.connect(auxGain, 1, 0);
     this.matters.set(definition.name, {
+      enabled: definition.enabled,
       node,
       mainGain,
       auxGain,
@@ -647,9 +669,10 @@ export class AudioEngine {
   private updateMatter(definition: AudioProgram['matters'][number]): void {
     const matter = this.matters.get(definition.name);
     if (!matter) return;
+    matter.enabled = definition.enabled;
     matter.note = definition.note;
     matter.level = definition.level;
-    const level = Math.max(0, Math.min(1, definition.level / 100));
+    const level = definition.enabled ? Math.max(0, Math.min(1, definition.level / 100)) : 0;
     const context = this.ensureContext();
     matter.mainGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
     matter.auxGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
@@ -701,6 +724,7 @@ export class AudioEngine {
     node.connect(mainGain, 0, 0);
     node.connect(auxGain, 1, 0);
     this.resonators.set(definition.name, {
+      enabled: definition.enabled,
       node, mainGain, auxGain, note: definition.note, level: definition.level,
       model: definition.model, polyphony: definition.polyphony,
     });
@@ -710,11 +734,12 @@ export class AudioEngine {
     const resonator = this.resonators.get(definition.name);
     if (!resonator) return;
     const noteChanged = Math.abs(resonator.note - definition.note) > 0.0001;
+    resonator.enabled = definition.enabled;
     resonator.note = definition.note;
     resonator.level = definition.level;
     resonator.model = definition.model;
     resonator.polyphony = definition.polyphony;
-    const level = Math.max(0, Math.min(1, definition.level / 100));
+    const level = definition.enabled ? Math.max(0, Math.min(1, definition.level / 100)) : 0;
     const context = this.ensureContext();
     resonator.mainGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
     resonator.auxGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
@@ -765,6 +790,7 @@ export class AudioEngine {
     node.connect(peakOut, 4, 0);
 
     this.filters.set(definition.name, {
+      bypassed: definition.bypassed,
       node, input, lowOut, highOut, bandOut, notchOut, peakOut,
       ownerVoice: definition.ownerVoice,
       displayName: definition.displayName,
@@ -790,11 +816,13 @@ export class AudioEngine {
   private updateFilter(definition: AudioProgram['filters'][number]): void {
     const filter = this.filters.get(definition.name);
     if (!filter) return;
+    filter.bypassed = definition.bypassed;
     filter.cutoff = definition.cutoff;
     filter.resonance = definition.resonance;
     filter.drive = definition.drive;
     filter.node.port.postMessage({
       type: 'params',
+      bypassed: definition.bypassed,
       cutoff: definition.cutoff,
       resonance: definition.resonance / 100,
       drive: definition.drive / 100,
@@ -912,6 +940,8 @@ export class AudioEngine {
     const monoInput = context.createGain();
     const inputL = context.createGain();
     const inputR = context.createGain();
+    const wetInputL = context.createGain();
+    const wetInputR = context.createGain();
     const dryL = context.createGain();
     const dryR = context.createGain();
     const wetL = context.createGain();
@@ -932,8 +962,10 @@ export class AudioEngine {
     monoInput.connect(inputL);
     monoInput.connect(inputR);
 
-    inputL.connect(node, 0, 0);
-    inputR.connect(node, 0, 1);
+    inputL.connect(wetInputL);
+    inputR.connect(wetInputR);
+    wetInputL.connect(node, 0, 0);
+    wetInputR.connect(node, 0, 1);
 
     inputL.connect(dryL);
     inputR.connect(dryR);
@@ -946,10 +978,13 @@ export class AudioEngine {
     wetR.connect(outputR);
 
     this.mists.set(definition.name, {
+      bypassed: definition.bypassed,
       node,
       monoInput,
       inputL,
       inputR,
+      wetInputL,
+      wetInputR,
       dryL,
       dryR,
       wetL,
@@ -978,8 +1013,10 @@ export class AudioEngine {
 
     const context = this.ensureContext();
     const mix = Math.max(0, Math.min(1, definition.mix / 100));
-    const dryGain = Math.cos(mix * Math.PI * 0.5);
+    const dryGain = definition.bypassed ? 1 : Math.cos(mix * Math.PI * 0.5);
     const wetGain = Math.sin(mix * Math.PI * 0.5);
+    mist.wetInputL.gain.setTargetAtTime(definition.bypassed ? 0 : 1, context.currentTime, 0.008);
+    mist.wetInputR.gain.setTargetAtTime(definition.bypassed ? 0 : 1, context.currentTime, 0.008);
 
     mist.dryL.gain.setTargetAtTime(dryGain, context.currentTime, 0.008);
     mist.dryR.gain.setTargetAtTime(dryGain, context.currentTime, 0.008);
@@ -1021,16 +1058,17 @@ export class AudioEngine {
     });
     node.addEventListener('processorerror', () => console.error('[Sky] AudioWorklet processor failed'));
     const monoInput=context.createGain(), inputL=context.createGain(), inputR=context.createGain();
+    const wetInputL=context.createGain(), wetInputR=context.createGain();
     const inputMerger=context.createChannelMerger(2), outputSplitter=context.createChannelSplitter(2);
     const dryL=context.createGain(), dryR=context.createGain(), wetL=context.createGain(), wetR=context.createGain();
     const outputL=context.createGain(), outputR=context.createGain();
     monoInput.connect(inputL); monoInput.connect(inputR);
-    inputL.connect(inputMerger,0,0); inputR.connect(inputMerger,0,1); inputMerger.connect(node);
+    inputL.connect(wetInputL); inputR.connect(wetInputR); wetInputL.connect(inputMerger,0,0); wetInputR.connect(inputMerger,0,1); inputMerger.connect(node);
     inputL.connect(dryL); inputR.connect(dryR); dryL.connect(outputL); dryR.connect(outputR);
     node.connect(outputSplitter);
     outputSplitter.connect(wetL,0,0); outputSplitter.connect(wetR,1,0); wetL.connect(outputL); wetR.connect(outputR);
 
-    this.skies.set(definition.name, { node, inputMerger, outputSplitter, monoInput, inputL, inputR, dryL, dryR, wetL, wetR, outputL, outputR, ...definition });
+    this.skies.set(definition.name, { node, inputMerger, outputSplitter, monoInput, inputL, inputR, wetInputL, wetInputR, dryL, dryR, wetL, wetR, outputL, outputR, ...definition });
   }
 
   private updateSky(definition: AudioProgram['skies'][number]): void {
@@ -1038,7 +1076,9 @@ export class AudioEngine {
     Object.assign(sky,definition);
     const context=this.ensureContext();
     const mix=Math.max(0,Math.min(1,definition.mix/100));
-    const dryGain=Math.cos(mix*Math.PI*0.5), wetGain=Math.sin(mix*Math.PI*0.5);
+    const dryGain=definition.bypassed?1:Math.cos(mix*Math.PI*0.5), wetGain=Math.sin(mix*Math.PI*0.5);
+    sky.wetInputL.gain.setTargetAtTime(definition.bypassed?0:1,context.currentTime,0.008);
+    sky.wetInputR.gain.setTargetAtTime(definition.bypassed?0:1,context.currentTime,0.008);
     sky.dryL.gain.setTargetAtTime(dryGain,context.currentTime,0.008);
     sky.dryR.gain.setTargetAtTime(dryGain,context.currentTime,0.008);
     sky.wetL.gain.setTargetAtTime(wetGain,context.currentTime,0.008);
@@ -1425,6 +1465,31 @@ export class AudioEngine {
     voice.node.port.postMessage({ type: 'trigger' });
   }
 
+  setVoiceLevel(name: string, level: number): void {
+    if (!Number.isFinite(level) || level < 0 || level > 100) throw new RangeError('VOICE level must be 0..100');
+    const context = this.ensureContext();
+    const gain = level / 100;
+    const resonator = this.resonators.get(name);
+    if (resonator) {
+      resonator.level = level;
+      resonator.mainGain.gain.setTargetAtTime(gain, context.currentTime, 0.008);
+      resonator.auxGain.gain.setTargetAtTime(gain, context.currentTime, 0.008);
+      return;
+    }
+    const matter = this.matters.get(name);
+    if (matter) {
+      matter.level = level;
+      matter.mainGain.gain.setTargetAtTime(gain, context.currentTime, 0.008);
+      matter.auxGain.gain.setTargetAtTime(gain, context.currentTime, 0.008);
+      return;
+    }
+    const voice = this.voices.get(name);
+    if (!voice) throw new Error(`unknown Voice object: ${name}`);
+    voice.level = level;
+    voice.outGain.gain.setTargetAtTime(gain, context.currentTime, 0.008);
+    voice.auxGain.gain.setTargetAtTime(gain, context.currentTime, 0.008);
+  }
+
   setVoiceParameter(
     name: string,
     parameter: 'freq' | 'model' | 'harmo' | 'timbre' | 'morph' | 'geometry' | 'structure' | 'brightness' | 'damping' | 'position' | 'space' | 'bow' | 'bowTimbre' | 'blow' | 'blowTimbre' | 'strike' | 'strikeTimbre',
@@ -1537,6 +1602,93 @@ export class AudioEngine {
     });
   }
 
+  setLiveObjectDisabled(kind: 'voice' | 'filter' | 'fx' | 'clock', name: string, disabled: boolean): void {
+    const context = this.ensureContext();
+
+    if (kind === 'voice') {
+      const resonator = this.resonators.get(name);
+      if (resonator) {
+        resonator.enabled = !disabled;
+        const level = disabled ? 0 : Math.max(0, Math.min(1, resonator.level / 100));
+        resonator.mainGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
+        resonator.auxGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
+        return;
+      }
+      const matter = this.matters.get(name);
+      if (matter) {
+        matter.enabled = !disabled;
+        const level = disabled ? 0 : Math.max(0, Math.min(1, matter.level / 100));
+        matter.mainGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
+        matter.auxGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
+        return;
+      }
+      const voice = this.voices.get(name);
+      if (!voice) return;
+      voice.enabled = !disabled;
+      const level = disabled ? 0 : Math.max(0, Math.min(1, voice.level / 100));
+      voice.outGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
+      voice.auxGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
+      return;
+    }
+
+    if (kind === 'filter') {
+      const filter = this.filters.get(name);
+      if (!filter) return;
+      filter.bypassed = disabled;
+      filter.node.port.postMessage({ type: 'params', bypassed: disabled });
+      return;
+    }
+
+    if (kind === 'fx') {
+      const sky = this.skies.get(name);
+      if (sky) {
+        sky.bypassed = disabled;
+        const mix = Math.max(0, Math.min(1, sky.mix / 100));
+        sky.wetInputL.gain.setTargetAtTime(disabled ? 0 : 1, context.currentTime, 0.008);
+        sky.wetInputR.gain.setTargetAtTime(disabled ? 0 : 1, context.currentTime, 0.008);
+        sky.dryL.gain.setTargetAtTime(disabled ? 1 : Math.cos(mix * Math.PI * 0.5), context.currentTime, 0.008);
+        sky.dryR.gain.setTargetAtTime(disabled ? 1 : Math.cos(mix * Math.PI * 0.5), context.currentTime, 0.008);
+        return;
+      }
+      const mist = this.mists.get(name);
+      if (!mist) return;
+      mist.bypassed = disabled;
+      const mix = Math.max(0, Math.min(1, mist.mix / 100));
+      mist.wetInputL.gain.setTargetAtTime(disabled ? 0 : 1, context.currentTime, 0.008);
+      mist.wetInputR.gain.setTargetAtTime(disabled ? 0 : 1, context.currentTime, 0.008);
+      mist.dryL.gain.setTargetAtTime(disabled ? 1 : Math.cos(mix * Math.PI * 0.5), context.currentTime, 0.008);
+      mist.dryR.gain.setTargetAtTime(disabled ? 1 : Math.cos(mix * Math.PI * 0.5), context.currentTime, 0.008);
+      return;
+    }
+
+    if (name === 'Clock') {
+      this.masterClockEnabled = !disabled;
+      const master = this.clocks.get('Clock');
+      if (master) master.enabled = !disabled;
+      // Stop emitting new clock triggers, but keep already-emitted visual
+      // particles alive until they naturally travel off the monitor. This
+      // matches the transport-stop visual behaviour.
+      this.updateAllClocks();
+      this.emit();
+      return;
+    }
+
+    const clock = this.clocks.get(name);
+    if (!clock) return;
+    clock.enabled = !disabled;
+    // Preserve already-emitted visual particles while a named clock is
+    // paused; only future trigger generation is stopped.
+    clock.node.port.postMessage({
+      type: 'clock',
+      bpm: this.masterClockBpm,
+      rate: clock.rate,
+      jitter: clock.jitter,
+      drift: clock.drift,
+      running: this.clockTransportRunning && this.masterClockEnabled && clock.enabled,
+    });
+    this.emit();
+  }
+
   readModOutput(name: string, channel: 1 | 2 | 3 | 4): number | null {
     const swell = this.swells.get(name);
     return swell ? swell.monitorValues[channel - 1] : null;
@@ -1568,7 +1720,7 @@ export class AudioEngine {
   }
 
   getClockStatus(): { bpm: number; running: boolean } {
-    return { bpm: this.masterClockBpm, running: this.clockTransportRunning && this.masterClockBpm > 0 };
+    return { bpm: this.masterClockBpm, running: this.clockTransportRunning && this.masterClockEnabled && this.masterClockBpm > 0 };
   }
 
   getTriggerViewEvents(signal: string): Array<{ progress: number; age: number }> {
@@ -1588,7 +1740,7 @@ export class AudioEngine {
     });
   }
 
-  private createOrUpdateClock(name: string, rate: number, jitter: number, drift: number): void {
+  private createOrUpdateClock(name: string, rate: number, jitter: number, drift: number, enabled = true): void {
     if (!this.clockWorkletLoaded) return;
     let clock = this.clocks.get(name);
     if (!clock) {
@@ -1599,7 +1751,7 @@ export class AudioEngine {
         outputChannelCount: [1],
         processorOptions: { bpm: this.masterClockBpm, rate, jitter, drift },
       });
-      clock = { node, rate, jitter, drift, lastTriggerTime: null, triggerCount: 0, visualEvents: [] };
+      clock = { enabled, node, rate, jitter, drift, lastTriggerTime: null, triggerCount: 0, visualEvents: [] };
       node.port.onmessage = (event) => {
         const message = event.data;
         if (!message || message.type !== 'trigger' || !Number.isFinite(message.frame)) return;
@@ -1619,10 +1771,12 @@ export class AudioEngine {
       };
       this.clocks.set(name, clock);
     }
+    clock.enabled = enabled;
+    if (name === 'Clock') this.masterClockEnabled = enabled;
     clock.rate = rate;
     clock.jitter = jitter;
     clock.drift = drift;
-    clock.node.port.postMessage({ type: 'clock', bpm: this.masterClockBpm, rate, jitter, drift, running: this.clockTransportRunning });
+    clock.node.port.postMessage({ type: 'clock', bpm: this.masterClockBpm, rate, jitter, drift, running: this.clockTransportRunning && this.masterClockEnabled && enabled });
   }
 
   private updateAllClocks(): void {
@@ -1633,7 +1787,7 @@ export class AudioEngine {
         rate: clock.rate,
         jitter: clock.jitter,
         drift: clock.drift,
-        running: this.clockTransportRunning,
+        running: this.clockTransportRunning && this.masterClockEnabled && clock.enabled,
       });
     }
   }
@@ -1720,11 +1874,18 @@ export class AudioEngine {
       ...this.matters.keys(),
       ...this.resonators.keys(),
       ...this.swells.keys(),
+      ...[...this.filters.entries()]
+        .filter(([, filter]) => Boolean(filter.ownerVoice))
+        .map(([name]) => name),
     ]);
     for (const [key, route] of [...this.routes.entries()]) {
       const sourceName = route.source.match(/^([A-Za-z_]\w*)\./)?.[1];
       if (sourceName && musicalSources.has(sourceName)) this.removeRoute(key);
     }
+
+    // FILTER is not a tail-preserving effect. Clear the SVF integrator state on
+    // musical stop so high resonance cannot remain audible after transport stops.
+    for (const filter of this.filters.values()) filter.node.port.postMessage({ type: 'reset' });
   }
 
   panic(): void {

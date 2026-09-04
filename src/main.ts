@@ -24,7 +24,7 @@ app.innerHTML = `
       <div id="live-screen" class="screen live-screen">
         <div class="editor-pane">
           <div id="line-gutter" class="line-gutter" aria-hidden="true"><div id="line-gutter-content" class="line-gutter-content"></div></div>
-          <div class="editor-stack"><div id="syntax-layer" class="syntax-layer" aria-hidden="true"></div><textarea id="editor" class="editor" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Live coding editor"></textarea><div id="inline-view-layer" class="inline-view-layer" aria-hidden="true"></div></div>
+          <div class="editor-stack"><div id="syntax-layer" class="syntax-layer" aria-hidden="true"></div><textarea id="editor" class="editor" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Live coding editor"></textarea><div id="live-control-layer" class="live-control-layer" aria-label="Live parameter controls"></div><div id="inline-view-layer" class="inline-view-layer" aria-hidden="true"></div></div>
         </div>
         <aside id="view-panel" class="view-panel hidden" aria-label="Signal views">
           <div id="view-stack" class="view-stack"></div>
@@ -106,6 +106,62 @@ const inlineViewStyle = document.createElement('style');
 inlineViewStyle.textContent = `
   .editor-stack { position: relative; }
   .inline-view-layer { display: none; }
+  .live-control-layer {
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+    pointer-events: none;
+    overflow: hidden;
+  }
+  .live-parameter-control {
+    position: absolute;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 1.08em;
+    pointer-events: auto;
+    color: rgb(112 224 213);
+    text-shadow: 0 0 4px rgb(112 224 213 / .45);
+  }
+  .live-parameter-control input[type=range] {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 78px;
+    height: 14px;
+    margin: 0 0 0 3px;
+    background: linear-gradient(to right, rgb(224 228 236 / .9), rgb(224 228 236 / .9)) center / 100% 3px no-repeat;
+    cursor: ew-resize;
+  }
+  .live-parameter-control input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 17px;
+    height: 17px;
+    border-radius: 50%;
+    border: 2px solid rgb(236 239 246);
+    background: rgb(69 70 79);
+    box-shadow: 0 0 4px rgb(112 224 213 / .25);
+  }
+  .live-parameter-control input[type=range]::-moz-range-track {
+    height: 3px;
+    border: 0;
+    background: rgb(224 228 236 / .9);
+  }
+  .live-parameter-control input[type=range]::-moz-range-thumb {
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    border: 2px solid rgb(236 239 246);
+    background: rgb(69 70 79);
+    box-shadow: 0 0 4px rgb(112 224 213 / .25);
+  }
+  .live-parameter-value {
+    min-width: 2.2em;
+    font-size: 11px;
+    line-height: 1;
+    text-align: right;
+    color: currentColor;
+  }
 
   .syntax-inline-spacer {
     position: relative;
@@ -204,6 +260,7 @@ document.head.append(inlineViewStyle);
 const editor = must<HTMLTextAreaElement>('editor');
 const syntaxLayer = must<HTMLElement>('syntax-layer');
 const inlineViewLayer = must<HTMLElement>('inline-view-layer');
+const liveControlLayer = must<HTMLElement>('live-control-layer');
 const lineGutterContent = must<HTMLElement>('line-gutter-content');
 const commandbar = must<HTMLElement>('commandbar');
 const command = must<HTMLInputElement>('command');
@@ -240,9 +297,14 @@ let previewTimer = 0;
 let scopeFrame = 0;
 let inlineViewFrame = 0;
 let inlineViewLastPaint = 0;
+const LIVE_CONTROL_REFRESH_MS = 16;
+let liveControlCommitTimer = 0;
+let liveControlRuntimeTimer = 0;
+let pendingLiveControlRuntimeUpdate: { kind: string; name: string; property: string; value: number } | null = null;
 let savedEditorSelection: { start: number; end: number; direction: 'forward' | 'backward' | 'none' } | null = null;
 let audioAutoStartPending = true;
 let codeRunning = false;
+let editingInlineViews: InlineViewState[] | null = null;
 let pendingLiveUpdate: { compiled: string; hasMasterClock: boolean } | null = null;
 let pendingLiveUpdateUnsubscribe: (() => void) | null = null;
 let diagnosticLines = new Set<number>();
@@ -396,6 +458,10 @@ function normalizeLanguageCommandCase(): void {
       (_match, indentation: string, commandName: string) => `${indentation}${commandName.toUpperCase()}`,
     )
     .replace(
+      /^(\s*)live(?=\s+[A-Za-z_]\w*\s+)/gim,
+      (_match, indentation: string) => `${indentation}LIVE`,
+    )
+    .replace(
       /^(\s*)mod(?=\s+[A-Za-z_]\w*(?:\s+with\s+view)?\s*:)/gim,
       (_match, indentation: string) => `${indentation}MOD`,
     )
@@ -449,10 +515,12 @@ function setCodeRunning(running: boolean): void {
   codeStatus.classList.toggle('disabled', !running);
   codeStatus.setAttribute('aria-label', running ? 'code running' : 'code stopped');
   if (running) {
+    syncLiveDisableSnapshot();
     renderSyntaxLayer();
     renderLineGutter();
     startInlineViewLoop();
   } else {
+    editingInlineViews = null;
     clearInlineViews();
   }
 }
@@ -497,6 +565,8 @@ function applyPendingLiveUpdate(): void {
   try {
     audioEngine.setClockTransport(pending.hasMasterClock);
     const results = runtime.evaluate(pending.compiled, { hotReload: true });
+    editingInlineViews = null;
+    syncLiveDisableSnapshot();
     clearDiagnostic();
     syncViews();
     notify(results.at(-1)?.message ? `updated · ${results.at(-1)!.message}` : 'updated');
@@ -513,7 +583,7 @@ function queueLiveUpdate(): boolean {
     const source = sourceText();
     const compiled = source.trim() ? compileLanguageSource(source) : '';
     runtime.validate(compiled);
-    const hasMasterClock = /^\s*CLOCK\b/im.test(source);
+    const hasMasterClock = /^\s*_?CLOCK\s+SET\b/im.test(source);
     pendingLiveUpdate = { compiled, hasMasterClock };
     pendingLiveUpdateUnsubscribe?.();
     pendingLiveUpdateUnsubscribe = null;
@@ -564,9 +634,11 @@ function evaluateLiveSource(): boolean {
     }
 
     const compiled = compileLanguageSource(source);
-    const hasMasterClock = /^\s*CLOCK\b/im.test(source);
+    const hasMasterClock = /^\s*_?CLOCK\s+SET\b/im.test(source);
     audioEngine.setClockTransport(hasMasterClock);
     const results = runtime.evaluate(compiled);
+    editingInlineViews = null;
+    syncLiveDisableSnapshot(source);
     const last = results.at(-1);
     syncViews();
     notify(last?.message ?? 'ok');
@@ -1728,12 +1800,29 @@ function activeInlineViewsByLine(): Map<number, InlineViewState[]> {
   const grouped = new Map<number, InlineViewState[]>();
   if (!codeRunning) return grouped;
 
-  for (const view of runtime.getInlineViews()) {
+  const views = editingInlineViews ?? runtime.getInlineViews();
+  for (const view of views) {
     const list = grouped.get(view.line) ?? [];
     list.push(view);
     grouped.set(view.line, list);
   }
   return grouped;
+}
+
+function refreshInlineViewEditingPreview(): void {
+  if (!codeRunning) {
+    editingInlineViews = null;
+    return;
+  }
+  try {
+    const source = sourceText();
+    const compiled = source.trim() ? compileLanguageSource(source) : '';
+    editingInlineViews = runtime.previewInlineViews(compiled);
+  } catch (error) {
+    // While a line is being typed it can be transiently incomplete. Keep the
+    // previous valid inline layout until the next syntactically valid edit.
+    if (!(error instanceof LanguageError) && !(error instanceof SonusEvaluationError)) console.warn(error);
+  }
 }
 
 
@@ -1823,7 +1912,7 @@ function statementLabels(source: string): string[] {
   for (let index = 0; index < lines.length; index += 1) {
     const trimmed = lines[index].trim();
     if (!trimmed || trimmed.startsWith('//')) continue;
-    if (/^(VOICE|FX|FILTER|MOD|SEQ|SET|CLOCK|PLAY)\b/i.test(trimmed)) {
+    if (/^_?(VOICE|FX|FILTER|MOD|SEQ|SET|CLOCK|PLAY)\b/i.test(trimmed)) {
       statement += 1;
       labels[index] = String(statement);
     }
@@ -1841,6 +1930,304 @@ function statementNumberForPhysicalLine(labels: string[], physicalLine: number):
   return null;
 }
 
+type LiveControlSource = {
+  line: number;
+  start: number;
+  end: number;
+  value: number;
+  property: string;
+  prefixColumns: number;
+  targetKind: 'voice' | 'fx' | 'filter';
+  targetName: string;
+};
+
+type LiveBlockScope = {
+  kind: 'voice' | 'fx' | 'filter' | 'other';
+  name: string;
+  targetName: string;
+  indentation: number;
+  ownerVoice?: string;
+};
+
+const LIVE_CONTROL_GAP_COLUMNS = 10;
+const LIVE_CONTROL_GAP = ' '.repeat(LIVE_CONTROL_GAP_COLUMNS);
+
+type LiveControlGap = { start: number; end: number };
+
+function liveControlGapRanges(source: string): LiveControlGap[] {
+  const ranges: LiveControlGap[] = [];
+  const lines = source.split('\n');
+  let offset = 0;
+  for (const line of lines) {
+    const codeEnd = commentStart(line);
+    const code = codeEnd < 0 ? line : line.slice(0, codeEnd);
+    const match = code.match(/^(\s*LIVE\s+[A-Za-z_][A-Za-z0-9_]*\s+\d+(?:\.\d+)?)([ \t]+)(?=(?:WITH\b|$))/i);
+    if (match && match[2].length >= LIVE_CONTROL_GAP_COLUMNS) {
+      const start = offset + match[1].length;
+      ranges.push({ start, end: start + match[2].length });
+    }
+    offset += line.length + 1;
+  }
+  return ranges;
+}
+
+function normalizeLiveControlSpacing(): boolean {
+  const source = editor.value;
+  const lines = source.split('\n');
+  const edits: Array<{ start: number; end: number; replacement: string }> = [];
+  let offset = 0;
+
+  for (const line of lines) {
+    const commentAt = commentStart(line);
+    const code = commentAt < 0 ? line : line.slice(0, commentAt);
+    const live = code.match(/^(\s*LIVE\s+[A-Za-z_][A-Za-z0-9_]*\s+\d+(?:\.\d+)?)([ \t]+)(?=(?:WITH\b|$))/i);
+    if (live) {
+      const gapStart = offset + live[1].length;
+      const gapEnd = gapStart + live[2].length;
+      if (live[2] !== LIVE_CONTROL_GAP) edits.push({ start: gapStart, end: gapEnd, replacement: LIVE_CONTROL_GAP });
+    } else {
+      // If LIVE is removed, remove only a conspicuously large reserved gap.
+      // Ordinary user spacing (one or a few spaces) is preserved.
+      const stale = code.match(/^(\s*[A-Za-z_][A-Za-z0-9_]*\s+\d+(?:\.\d+)?)( {8,})(?=(?:WITH\b|$))/i);
+      if (stale) {
+        const gapStart = offset + stale[1].length;
+        const gapEnd = gapStart + stale[2].length;
+        const replacement = /WITH\b/i.test(code.slice(stale[0].length)) ? ' ' : '';
+        edits.push({ start: gapStart, end: gapEnd, replacement });
+      }
+    }
+    offset += line.length + 1;
+  }
+
+  if (edits.length === 0) return false;
+  let selectionStart = editor.selectionStart;
+  let selectionEnd = editor.selectionEnd;
+  const direction = editor.selectionDirection ?? 'none';
+  const shift = (position: number, edit: { start: number; end: number; replacement: string }): number => {
+    if (position <= edit.start) return position;
+    if (position >= edit.end) return position + edit.replacement.length - (edit.end - edit.start);
+    return edit.start + edit.replacement.length;
+  };
+  for (const edit of [...edits].sort((a, b) => b.start - a.start)) {
+    selectionStart = shift(selectionStart, edit);
+    selectionEnd = shift(selectionEnd, edit);
+    editor.setRangeText(edit.replacement, edit.start, edit.end, 'preserve');
+  }
+  editor.setSelectionRange(selectionStart, selectionEnd, direction);
+  return true;
+}
+
+function moveCaretAcrossLiveControlGap(direction: 'forward' | 'backward' | 'nearest' = 'nearest'): boolean {
+  if (editor.selectionStart !== editor.selectionEnd) return false;
+  const caret = editor.selectionStart;
+  for (const gap of liveControlGapRanges(editor.value)) {
+    const inside = caret >= gap.start && caret <= gap.end;
+    if (!inside) continue;
+    let target = gap.end;
+    if (direction === 'backward') target = gap.start;
+    else if (direction === 'nearest') target = caret - gap.start < gap.end - caret ? gap.start : gap.end;
+    if (target === caret) return false;
+    editor.setSelectionRange(target, target);
+    return true;
+  }
+  return false;
+}
+
+function scanLiveControls(source: string): LiveControlSource[] {
+  const controls: LiveControlSource[] = [];
+  const lines = source.split('\n');
+  const scopes: LiveBlockScope[] = [];
+  let offset = 0;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const commentAt = commentStart(line);
+    const code = commentAt < 0 ? line : line.slice(0, commentAt);
+    const trimmed = code.trim();
+    const indentation = code.length - code.trimStart().length;
+
+    if (trimmed) {
+      while (scopes.length > 0 && indentation <= scopes[scopes.length - 1].indentation) scopes.pop();
+
+      const header = trimmed.match(/^_?(VOICE|FX|FILTER|MOD|SEQ)\s+([A-Za-z_][A-Za-z0-9_]*)\s*:/i);
+      if (header) {
+        const keyword = header[1].toLowerCase();
+        const name = header[2];
+        if (keyword === 'voice') scopes.push({ kind: 'voice', name, targetName: name, indentation });
+        else if (keyword === 'fx') scopes.push({ kind: 'fx', name, targetName: name, indentation });
+        else if (keyword === 'filter') {
+          const ownerVoice = [...scopes].reverse().find((scope) => scope.kind === 'voice')?.name;
+          const targetName = ownerVoice ? `__filter_${ownerVoice}_${name}` : name;
+          scopes.push({ kind: 'filter', name, targetName, indentation, ownerVoice });
+        } else scopes.push({ kind: 'other', name, targetName: name, indentation });
+      }
+    }
+
+    const match = code.match(/^(\s*)LIVE\s+([A-Za-z_][A-Za-z0-9_]*)\s+(\d+(?:\.\d+)?)(?=\s|$)/i);
+    if (match) {
+      const scope = [...scopes].reverse().find((candidate) => candidate.kind === 'voice' || candidate.kind === 'fx' || candidate.kind === 'filter');
+      const literal = match[3];
+      const localStart = match.index! + match[0].lastIndexOf(literal);
+      const value = Number(literal);
+      if (scope && Number.isFinite(value) && value >= 0 && value <= 100) {
+        controls.push({
+          line: index + 1,
+          start: offset + localStart,
+          end: offset + localStart + literal.length,
+          value,
+          property: match[2],
+          prefixColumns: localStart + literal.length,
+          targetKind: scope.kind as 'voice' | 'fx' | 'filter',
+          targetName: scope.targetName,
+        });
+      }
+    }
+    offset += line.length + 1;
+  }
+  return controls;
+}
+
+function applyLiveControlRuntime(kind: string, name: string, property: string, value: number): void {
+  if (!codeRunning) return;
+  const key = property.toLowerCase();
+  try {
+    if (kind === 'filter') {
+      if (key === 'cutoff') audioEngine.setFilterCutoff(name, 20 * (1000 ** (value / 100)));
+      else if (key === 'resonance') audioEngine.setFilterResonance(name, value);
+      else if (key === 'drive') audioEngine.setFilterDrive(name, value);
+      return;
+    }
+
+    if (kind === 'fx') {
+      const aliases: Record<string, 'position' | 'size' | 'density' | 'texture' | 'mix' | 'spread' | 'feedback' | 'reverb'> = {
+        position: 'position', predelay: 'position', size: 'size', density: 'density', bloom: 'density', diffuse: 'density',
+        texture: 'texture', damp: 'texture', damping: 'texture', mix: 'mix', spread: 'spread', width: 'spread',
+        feedback: 'feedback', decay: 'feedback', reverb: 'reverb', motion: 'reverb',
+      };
+      const mapped = aliases[key];
+      if (mapped) audioEngine.setMistParameter(name, mapped, value);
+      return;
+    }
+
+    if (kind === 'voice') {
+      if (key === 'level') { audioEngine.setVoiceLevel(name, value); return; }
+      const aliases: Record<string, 'harmo' | 'timbre' | 'morph' | 'geometry' | 'structure' | 'brightness' | 'damping' | 'position' | 'space' | 'bow' | 'blow' | 'strike'> = {
+        harmo: 'harmo', harmonics: 'harmo', timbre: 'timbre', morph: 'morph', geometry: 'geometry', structure: 'structure',
+        brightness: 'brightness', damping: 'damping', position: 'position', space: 'space', bow: 'bow', blow: 'blow', strike: 'strike',
+      };
+      const mapped = aliases[key];
+      if (mapped) audioEngine.setVoiceParameter(name, mapped, value);
+    }
+  } catch (error) {
+    console.warn('[LIVE] realtime parameter update failed', error);
+  }
+}
+
+function scheduleLiveControlRuntimeUpdate(kind: string, name: string, property: string, value: number): void {
+  pendingLiveControlRuntimeUpdate = { kind, name, property, value };
+  if (liveControlRuntimeTimer) return;
+  liveControlRuntimeTimer = window.setTimeout(() => {
+    liveControlRuntimeTimer = 0;
+    const pending = pendingLiveControlRuntimeUpdate;
+    pendingLiveControlRuntimeUpdate = null;
+    if (pending) applyLiveControlRuntime(pending.kind, pending.name, pending.property, pending.value);
+  }, LIVE_CONTROL_REFRESH_MS);
+}
+
+function commitLiveControlSource(): void {
+  if (!codeRunning) return;
+  window.clearTimeout(liveControlCommitTimer);
+  liveControlCommitTimer = window.setTimeout(() => {
+    liveControlCommitTimer = 0;
+    try {
+      const source = sourceText();
+      const compiled = source.trim() ? compileLanguageSource(source) : '';
+      runtime.evaluate(compiled, { hotReload: true });
+      editingInlineViews = null;
+      clearDiagnostic();
+      syncViews();
+    } catch (error) {
+      if (error instanceof LanguageError) showDiagnostics(error.diagnostics);
+      else if (error instanceof SonusEvaluationError) showDiagnostics(error.diagnostics);
+    }
+  }, 0);
+}
+
+function replaceLiveControlValue(control: HTMLElement, value: number): void {
+  const start = Number(control.dataset.sourceStart);
+  const end = Number(control.dataset.sourceEnd);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return;
+  const replacement = String(Math.round(value));
+  const selectionStart = editor.selectionStart;
+  const selectionEnd = editor.selectionEnd;
+  const selectionDirection = editor.selectionDirection ?? 'none';
+  const before = editor.value.slice(0, start);
+  const after = editor.value.slice(end);
+  editor.value = `${before}${replacement}${after}`;
+  const delta = replacement.length - (end - start);
+  control.dataset.sourceEnd = String(end + delta);
+  const shift = (position: number): number => position <= start ? position : position >= end ? position + delta : start + replacement.length;
+  editor.setSelectionRange(shift(selectionStart), shift(selectionEnd), selectionDirection);
+  const readout = control.querySelector<HTMLElement>('.live-parameter-value');
+  if (readout) readout.textContent = replacement;
+  scheduleLiveControlRuntimeUpdate(
+    control.dataset.targetKind ?? '',
+    control.dataset.targetName ?? '',
+    control.dataset.property ?? '',
+    Number(replacement),
+  );
+}
+
+function renderLiveControls(): void {
+  liveControlLayer.replaceChildren();
+  const controls = scanLiveControls(editor.value);
+  if (controls.length === 0) return;
+  const style = getComputedStyle(editor);
+  const font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  const canvas = document.createElement('canvas');
+  const context = canvas.getContext('2d');
+  if (!context) return;
+  context.font = font;
+  const lineHeight = Number.parseFloat(style.lineHeight) || Number.parseFloat(style.fontSize) * 1.08;
+  const lines = editor.value.split('\n');
+
+  for (const entry of controls) {
+    const line = lines[entry.line - 1] ?? '';
+    const prefix = line.slice(0, entry.prefixColumns);
+    const control = document.createElement('div');
+    control.className = 'live-parameter-control';
+    control.dataset.sourceStart = String(entry.start);
+    control.dataset.sourceEnd = String(entry.end);
+    control.dataset.targetKind = entry.targetKind;
+    control.dataset.targetName = entry.targetName;
+    control.dataset.property = entry.property;
+    const preferredLeft = context.measureText(prefix).width + 8;
+    control.style.left = `${preferredLeft - editor.scrollLeft}px`;
+    control.style.top = `${(entry.line - 1) * lineHeight + inlineSpacerBeforePhysicalLine(entry.line) - editor.scrollTop}px`;
+
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.min = '0';
+    slider.max = '100';
+    slider.step = '1';
+    slider.value = String(entry.value);
+    slider.setAttribute('aria-label', `Live ${entry.property}`);
+    slider.addEventListener('pointerdown', (event) => event.stopPropagation());
+    slider.addEventListener('input', () => replaceLiveControlValue(control, Number(slider.value)));
+    slider.addEventListener('change', () => {
+      commitLiveControlSource();
+      renderSyntaxLayer();
+      renderLineGutter();
+    });
+
+    const readout = document.createElement('span');
+    readout.className = 'live-parameter-value';
+    readout.textContent = String(Math.round(entry.value));
+    control.append(slider, readout);
+    liveControlLayer.append(control);
+  }
+}
+
 function renderSyntaxLayer(): void {
   const source = editor.value;
   const editorStyle = getComputedStyle(editor);
@@ -1855,11 +2242,21 @@ function renderSyntaxLayer(): void {
   syntaxLayer.replaceChildren();
 
   const lines = source.split('\n');
+  let disabledBlockIndent: number | null = null;
   lines.forEach((line, index) => {
     const physicalLine = index + 1;
     const row = document.createElement('div');
     row.className = 'syntax-line';
     const commentAt = commentStart(line);
+    const codePart = commentAt < 0 ? line : line.slice(0, commentAt);
+    const trimmedCode = codePart.trim();
+    const indentation = codePart.length - codePart.trimStart().length;
+    if (trimmedCode && disabledBlockIndent !== null && indentation <= disabledBlockIndent) disabledBlockIndent = null;
+    const disabledHeader = /^_(?:VOICE|FILTER|FX|CLOCK)\b/i.test(trimmedCode);
+    if (disabledHeader) disabledBlockIndent = indentation;
+    if (disabledHeader || (disabledBlockIndent !== null && (!trimmedCode || indentation > disabledBlockIndent))) {
+      row.classList.add('syntax-disabled-object');
+    }
     if (commentAt < 0) row.append(document.createTextNode(line || '\u200b'));
     else {
       row.append(document.createTextNode(line.slice(0, commentAt)));
@@ -1886,6 +2283,7 @@ function renderSyntaxLayer(): void {
     }
   });
 
+  renderLiveControls();
   updateEditorInlineScrollExtent();
   syncSyntaxLayer();
 }
@@ -1909,6 +2307,7 @@ function commentStart(line: string): number {
 
 function syncSyntaxLayer(): void {
   syntaxLayer.style.transform = `translate(${-editor.scrollLeft}px, ${-editor.scrollTop}px)`;
+  renderLiveControls();
 }
 
 function syncLineGutter(): void {
@@ -2226,9 +2625,87 @@ audioStartButton.addEventListener('click', () => {
   void startAudioFromOverlay();
 });
 
+type LiveDisableDescriptor = {
+  kind: 'voice' | 'filter' | 'fx' | 'clock';
+  name: string;
+  disabled: boolean;
+};
+
+let liveDisableSnapshot = new Map<string, boolean>();
+
+function liveDisableDescriptors(source: string): LiveDisableDescriptor[] {
+  const descriptors: LiveDisableDescriptor[] = [];
+  const scopes: Array<{ indent: number; kind: string; name: string }> = [];
+
+  for (const rawLine of source.split('\n')) {
+    const code = rawLine.slice(0, commentStart(rawLine) < 0 ? rawLine.length : commentStart(rawLine));
+    const trimmed = code.trim();
+    if (!trimmed) continue;
+    const indent = code.length - code.trimStart().length;
+    while (scopes.length > 0 && indent <= scopes[scopes.length - 1].indent) scopes.pop();
+
+    const master = trimmed.match(/^(_)?CLOCK\s+SET\b/i);
+    if (master) {
+      descriptors.push({ kind: 'clock', name: 'Clock', disabled: Boolean(master[1]) });
+      continue;
+    }
+    const namedClock = trimmed.match(/^(_)?CLOCK\s+([A-Za-z_][A-Za-z0-9_]*)\b/i);
+    if (namedClock && !/^set$/i.test(namedClock[2])) {
+      descriptors.push({ kind: 'clock', name: namedClock[2], disabled: Boolean(namedClock[1]) });
+      continue;
+    }
+    const voice = trimmed.match(/^(_)?VOICE\s+([A-Za-z_][A-Za-z0-9_]*)\s*:/i);
+    if (voice) {
+      descriptors.push({ kind: 'voice', name: voice[2], disabled: Boolean(voice[1]) });
+      scopes.push({ indent, kind: 'voice', name: voice[2] });
+      continue;
+    }
+    const fx = trimmed.match(/^(_)?FX\s+([A-Za-z_][A-Za-z0-9_]*)\s*:/i);
+    if (fx) {
+      descriptors.push({ kind: 'fx', name: fx[2], disabled: Boolean(fx[1]) });
+      scopes.push({ indent, kind: 'fx', name: fx[2] });
+      continue;
+    }
+    const filter = trimmed.match(/^(_)?FILTER\s+([A-Za-z_][A-Za-z0-9_]*)\s*:/i);
+    if (filter) {
+      const owner = [...scopes].reverse().find((scope) => scope.kind === 'voice');
+      const name = owner ? `__filter_${owner.name}_${filter[2]}` : filter[2];
+      descriptors.push({ kind: 'filter', name, disabled: Boolean(filter[1]) });
+      scopes.push({ indent, kind: 'filter', name });
+    }
+  }
+  return descriptors;
+}
+
+function syncLiveDisableSnapshot(source = sourceText()): void {
+  liveDisableSnapshot = new Map(
+    liveDisableDescriptors(source).map((descriptor) => [`${descriptor.kind}:${descriptor.name}`, descriptor.disabled]),
+  );
+}
+
+function applyImmediateLiveDisableEdits(): void {
+  if (!codeRunning) return;
+  const next = liveDisableDescriptors(sourceText());
+  const nextSnapshot = new Map<string, boolean>();
+  for (const descriptor of next) {
+    const key = `${descriptor.kind}:${descriptor.name}`;
+    nextSnapshot.set(key, descriptor.disabled);
+    const previous = liveDisableSnapshot.get(key);
+    if (previous === undefined || previous === descriptor.disabled) continue;
+    if (descriptor.kind === 'clock' && descriptor.name === 'Clock' && previous && !descriptor.disabled) {
+      runtime.restartMusicalEpoch();
+    }
+    audioEngine.setLiveObjectDisabled(descriptor.kind, descriptor.name, descriptor.disabled);
+  }
+  liveDisableSnapshot = nextSnapshot;
+}
+
 document.addEventListener('selectionchange', () => requestAnimationFrame(positionBlockCaret));
 editor.addEventListener('input', () => {
   normalizeLanguageCommandCase();
+  normalizeLiveControlSpacing();
+  applyImmediateLiveDisableEdits();
+  refreshInlineViewEditingPreview();
   renderSyntaxLayer();
   renderLineGutter();
   scheduleStoppedPreview();
@@ -2236,7 +2713,7 @@ editor.addEventListener('input', () => {
 });
 editor.addEventListener('keyup', () => requestAnimationFrame(positionBlockCaret));
 editor.addEventListener('pointerdown', () => leaveBlockCaretTrail());
-editor.addEventListener('pointerup', () => requestAnimationFrame(positionBlockCaret));
+editor.addEventListener('pointerup', () => requestAnimationFrame(() => { moveCaretAcrossLiveControlGap('nearest'); positionBlockCaret(); }));
 liveScreen.addEventListener('scroll', () => {
   clearDiagnostic();
   requestAnimationFrame(positionBlockCaret);
@@ -2254,12 +2731,29 @@ window.addEventListener('resize', () => {
 
 editor.addEventListener('beforeinput', (event) => {
   const input = event as InputEvent;
+  if (input.inputType.startsWith('insert') && editor.selectionStart === editor.selectionEnd) moveCaretAcrossLiveControlGap('forward');
   if (input.inputType === 'insertText' && input.data) flashAtCaret(input.data);
 });
 
 editor.addEventListener('keydown', (event) => {
   if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) {
     leaveBlockCaretTrail();
+  }
+
+  if (event.key === 'ArrowRight' && editor.selectionStart === editor.selectionEnd) {
+    const caret = editor.selectionStart;
+    const gap = liveControlGapRanges(editor.value).find((candidate) => candidate.start === caret);
+    if (gap) { event.preventDefault(); editor.setSelectionRange(gap.end, gap.end); requestAnimationFrame(positionBlockCaret); return; }
+  }
+  if (event.key === 'ArrowLeft' && editor.selectionStart === editor.selectionEnd) {
+    const caret = editor.selectionStart;
+    const gap = liveControlGapRanges(editor.value).find((candidate) => candidate.end === caret);
+    if (gap) { event.preventDefault(); editor.setSelectionRange(gap.start, gap.start); requestAnimationFrame(positionBlockCaret); return; }
+  }
+  if (event.key === 'Backspace' && editor.selectionStart === editor.selectionEnd) {
+    const caret = editor.selectionStart;
+    const gap = liveControlGapRanges(editor.value).find((candidate) => candidate.end === caret);
+    if (gap) editor.setSelectionRange(gap.start, gap.start);
   }
 
   if (event.key === 'Escape') {
@@ -2321,7 +2815,7 @@ editor.addEventListener('keydown', (event) => {
 
     let indentation = currentIndent;
     if (!trimmed) indentation = currentIndent.length >= 4 ? currentIndent.slice(0, -4) : '';
-    else if (/^(VOICE|FX|FILTER|MOD|SEQ)\b.*:\s*$/i.test(trimmed)) indentation = `${currentIndent}    `;
+    else if (/^_?(VOICE|FX|FILTER|MOD|SEQ|CLOCK)\b.*:\s*$/i.test(trimmed)) indentation = `${currentIndent}    `;
     else if (/^PLAY\b/i.test(trimmed) && !/\bthrough\b/i.test(trimmed)) indentation = `${currentIndent}    `;
     else if (currentIndent.length > 0 && /^(through|then)\b/i.test(trimmed)) indentation = currentIndent;
 

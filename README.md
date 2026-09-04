@@ -9,7 +9,7 @@ Sonus Umbrae is not built around one synthesizer family or one upstream hardware
 ## Current characteristics
 
 - Text-first modular live coding with hot reload quantized to the musical transport.
-- Shared beat/wall-clock scheduler for `every`, probability, clock derivation and generative events.
+- Shared beat/wall-clock scheduler for `every`, probability, named clock objects, clock-rate derivation and generative events.
 - Typed reusable values including scalar, time, note, frequency, scale and envelope specifications.
 - Stateful `SEQ` sources, including a Turing-style generative sequencer.
 - Stereo-aware routing, serial processing chains and explicit per-route levels.
@@ -21,6 +21,7 @@ Sonus Umbrae is not built around one synthesizer family or one upstream hardware
 - `mist.*` stereo effects derived from the permissively licensed SuperParasites/Clouds family.
 - `sky` ambient reverb based on Ghost Note Audio CloudSeedCore.
 - Multimode `svf` filtering based on Electrosmith DaisySP, with simultaneous `lp`/`hp`/`bp`/`np` outputs and low-pass as the default.
+- Performance-oriented source controls with `LIVE` parameters/notes and hot mute/bypass/pause declarations for voices, filters, effects and both master/named clocks.
 - Read-only Scheme topology view and optional live signal/parameter visualisation.
 - Plain-text `.sum` sessions.
 

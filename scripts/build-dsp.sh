@@ -194,7 +194,7 @@ em++ \
   -s ALLOW_MEMORY_GROWTH=0 \
   -s INITIAL_MEMORY=4194304 \
   -s FILESYSTEM=0 \
-  -s EXPORTED_FUNCTIONS='["_su_daisy_filters_create","_su_daisy_filters_destroy","_su_daisy_filters_set_sample_rate","_su_daisy_filters_set_cutoff","_su_daisy_filters_set_resonance","_su_daisy_filters_set_drive","_su_daisy_filters_in","_su_daisy_filters_low","_su_daisy_filters_high","_su_daisy_filters_band","_su_daisy_filters_notch","_su_daisy_filters_peak","_su_daisy_filters_process"]' \
+  -s EXPORTED_FUNCTIONS='["_su_daisy_filters_create","_su_daisy_filters_destroy","_su_daisy_filters_set_sample_rate","_su_daisy_filters_reset","_su_daisy_filters_set_cutoff","_su_daisy_filters_set_resonance","_su_daisy_filters_set_drive","_su_daisy_filters_in","_su_daisy_filters_low","_su_daisy_filters_high","_su_daisy_filters_band","_su_daisy_filters_notch","_su_daisy_filters_peak","_su_daisy_filters_process"]' \
   -Wl,--no-entry \
   -o "$DAISY_FILTERS_OUTPUT"
 

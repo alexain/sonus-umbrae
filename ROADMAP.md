@@ -85,6 +85,7 @@ Current direction:
 - `FX` processors backed by Mist / SuperParasites plus the MIT-licensed `sky` ambient reverb based on CloudSeedCore.
 - `FILTER` processors backed by modular permissively licensed DSP areas; the first implementation is DaisySP `svf` with simultaneous multimode outputs.
 - Additional DaisySP areas may be introduced as separate WASM modules rather than one monolithic library.
+- LIVE performance controls now cover scalar sliders and note piano views; future work can add direct note-list editing and scheduled mute/bypass state changes.
 - Additional permissively licensed DSP where appropriate.
 - [x] Consolidate the active DSP build around permissive licenses only.
 - Original Sonus Umbrae DSP modules.
@@ -100,8 +101,9 @@ The language should not depend on the identity of any one upstream hardware modu
 
 Planned directions include:
 
-- Master BPM with per-clock `jitter` and slow correlated `drift`.
-- Named hierarchical clock sources derived from `MASTER` or another clock, with ratios such as `/2`, `/4`, `*2`, and non-binary ratios.
+- [x] Master BPM with per-clock `jitter` and slow correlated `drifter` behaviour.
+- [x] Named clock objects with optional `RATE` relative to the master, local `JITTER`/`DRIFTER`, optional `WITH VIEW`, immediate live pause via `_CLOCK`, and master pause cascading through the full musical clock tree while wall-clock scheduling continues.
+- [x] Keep `SET` reserved for typed values: persistent clock objects are declared with `CLOCK`, with omitted `RATE` meaning master rate `*1`.
 - Meter information.
 - Phase offsets.
 - Swing.
