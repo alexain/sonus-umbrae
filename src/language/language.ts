@@ -1111,14 +1111,25 @@ function compileVoiceProperty(
       const { base, modifiers } = splitWith(split.base);
       const noteView = live || modifiers.some((modifier) => /^view$/i.test(modifier));
       const selectionModifiers = modifiers.filter((modifier) => !/^view$/i.test(modifier));
-      const noteTokens = parseList(base, line, 'note').map((token) => parseNoteSequenceToken(token, line));
-      const notes = noteTokens.map((token) => token.note);
-      const inlineFavor = noteTokens.flatMap((token) => token.favor ? [token.favor] : []);
-      const frequencies = notes.map((note) => {
-        const midi = midiFromNote(note);
-        if (midi === null) throw new LanguageError([{ line, message: `invalid note '${note}'` }]);
-        return midiToFrequency(midi);
-      });
+      const directSource = IDENTIFIER.test(base) ? sourceDefinitions.get(base) : undefined;
+      let frequencies: number[];
+      let inlineFavor: SequenceFavorEntry[] = [];
+      if (directSource) {
+        if (directSource.kind !== 'note' && directSource.kind !== 'scale') {
+          throw new LanguageError([{ line, message: `source '${base}' is ${directSource.kind}, expected note or scale source for note` }]);
+        }
+        frequencies = directSource.values;
+        if (directSource.kind === 'note') inlineFavor = directSource.favor;
+      } else {
+        const noteTokens = parseList(base, line, 'note').map((token) => parseNoteSequenceToken(token, line));
+        const notes = noteTokens.map((token) => token.note);
+        inlineFavor = noteTokens.flatMap((token) => token.favor ? [token.favor] : []);
+        frequencies = notes.map((note) => {
+          const midi = midiFromNote(note);
+          if (midi === null) throw new LanguageError([{ line, message: `invalid note '${note}'` }]);
+          return midiToFrequency(midi);
+        });
+      }
       const selection = parseSelectionMode(selectionModifiers, line, 'note');
       const favor = mergeFavor(inlineFavor, selection.favor);
       validateFavorForMode(favor, selection.mode, line, 'note');
@@ -1135,7 +1146,16 @@ function compileVoiceProperty(
       claimPitchProperty(voice, 'freq', line, 'VOICE');
       const split = splitEveryClause(value);
       const { base, modifiers } = splitWith(split.base);
-      const values = parseList(base, line, 'freq').map((item) => numberValue(item, line, 'freq'));
+      const directSource = IDENTIFIER.test(base) ? sourceDefinitions.get(base) : undefined;
+      let values: number[];
+      if (directSource) {
+        if (directSource.kind !== 'freq') {
+          throw new LanguageError([{ line, message: `source '${base}' is ${directSource.kind}, expected frequency source for freq` }]);
+        }
+        values = directSource.values;
+      } else {
+        values = parseList(base, line, 'freq').map((item) => numberValue(item, line, 'freq'));
+      }
       if (values.some((item) => item <= 0)) {
         throw new LanguageError([{ line, message: 'freq must be greater than 0' }]);
       }
@@ -1151,6 +1171,16 @@ function compileVoiceProperty(
     case 'scale': {
       claimPitchProperty(voice, 'scale', line, 'VOICE');
       const split = splitEveryClause(value);
+      const { base, modifiers } = splitWith(split.base);
+      const directSource = IDENTIFIER.test(base) ? sourceDefinitions.get(base) : undefined;
+      if (directSource) {
+        if (directSource.kind !== 'scale') {
+          throw new LanguageError([{ line, message: `source '${base}' is ${directSource.kind}, expected scale source for scale` }]);
+        }
+        const selection = parseSelectionMode(modifiers, line, 'scale');
+        const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
+        return `${sourceSequenceCode(voice.name, directSource.values, selection.mode, selection.amount, selection.favor, false, line)}${every}`;
+      }
       const parsed = parseScaleSpec(split.base, line, true);
       if (!parsed) {
         throw new LanguageError([{

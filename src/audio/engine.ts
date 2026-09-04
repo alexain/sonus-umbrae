@@ -27,6 +27,7 @@ export interface AudioProgram {
     lpg: boolean;
     level: number;
     frequency: number;
+    dynamicPitch?: boolean;
     harmo: number;
     timbre: number;
     morph: number;
@@ -35,6 +36,7 @@ export interface AudioProgram {
     name: string;
     enabled: boolean;
     note: number;
+    dynamicPitch?: boolean;
     level: number;
     drive: { kind: string; values: number[] } | null;
     bowLevel: number;
@@ -58,6 +60,7 @@ export interface AudioProgram {
     model: number;
     polyphony: 1 | 2 | 4;
     note: number;
+    dynamicPitch?: boolean;
     level: number;
     structure: number;
     brightness: number;
@@ -184,6 +187,21 @@ interface MatterVoice {
   auxGain: GainNode;
   note: number;
   level: number;
+  drive: { kind: string; values: number[] } | null;
+  bowLevel: number;
+  bowTimbre: number;
+  blowLevel: number;
+  blowMeta: number;
+  blowTimbre: number;
+  strikeLevel: number;
+  strikeMeta: number;
+  strikeTimbre: number;
+  signature: number;
+  geometry: number;
+  brightness: number;
+  damping: number;
+  position: number;
+  space: number;
 }
 
 interface ResonatorVoice {
@@ -195,6 +213,10 @@ interface ResonatorVoice {
   level: number;
   model: number;
   polyphony: 1 | 2 | 4;
+  structure: number;
+  brightness: number;
+  damping: number;
+  position: number;
 }
 
 interface SwellVoice {
@@ -466,7 +488,8 @@ export class AudioEngine {
     this.emit();
   }
 
-  applyProgram(program: AudioProgram): void {
+  applyProgram(program: AudioProgram, options: { hotReload?: boolean } = {}): void {
+    const hotReload = options.hotReload ?? false;
     if ((program.voices.length > 0 && !this.voiceWorkletLoaded) ||
         (program.matters.length > 0 && !this.matterWorkletLoaded) ||
         (program.resonators.length > 0 && !this.resonatorWorkletLoaded) ||
@@ -558,17 +581,17 @@ export class AudioEngine {
 
     for (const definition of program.voices) {
       this.createVoice(definition);
-      this.updateVoice(definition);
+      this.updateVoice(definition, hotReload);
     }
 
     for (const definition of program.matters) {
       this.createMatter(definition);
-      this.updateMatter(definition);
+      this.updateMatter(definition, hotReload);
     }
 
     for (const definition of program.resonators) {
       this.createResonator(definition);
-      this.updateResonator(definition);
+      this.updateResonator(definition, hotReload);
     }
 
     for (const definition of program.filters) {
@@ -679,17 +702,31 @@ export class AudioEngine {
     });
   }
 
-  private updateVoice(definition: AudioProgram['voices'][number]): void {
+  private updateVoice(definition: AudioProgram['voices'][number], hotReload = false): void {
     const voice = this.voices.get(definition.name);
     if (!voice) return;
+    const frequency = hotReload && definition.dynamicPitch ? voice.frequency : definition.frequency;
+    const unchanged = voice.enabled === definition.enabled
+      && voice.model === definition.model
+      && voice.lpg === definition.lpg
+      && voice.level === definition.level
+      && Math.abs(voice.frequency - frequency) < 0.0001
+      && voice.harmo === definition.harmo
+      && voice.timbre === definition.timbre
+      && voice.morph === definition.morph;
+    if (unchanged) return;
+
+    const context = this.ensureContext();
+    if (voice.enabled !== definition.enabled || voice.level !== definition.level) {
+      const level = definition.enabled ? Math.max(0, Math.min(1, definition.level / 100)) : 0;
+      voice.outGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
+      voice.auxGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
+    }
     voice.enabled = definition.enabled;
     voice.model = definition.model;
     voice.lpg = definition.lpg;
     voice.level = definition.level;
-    const level = definition.enabled ? Math.max(0, Math.min(1, definition.level / 100)) : 0;
-    voice.outGain.gain.setTargetAtTime(level, this.ensureContext().currentTime, 0.008);
-    voice.auxGain.gain.setTargetAtTime(level, this.ensureContext().currentTime, 0.008);
-    voice.frequency = definition.frequency;
+    voice.frequency = frequency;
     voice.harmo = definition.harmo;
     voice.timbre = definition.timbre;
     voice.morph = definition.morph;
@@ -697,7 +734,7 @@ export class AudioEngine {
       type: 'params',
       model: definition.model,
       lpg: definition.lpg,
-      frequency: definition.frequency,
+      frequency,
       harmo: definition.harmo / 100,
       timbre: definition.timbre / 100,
       morph: definition.morph / 100,
@@ -731,37 +768,71 @@ export class AudioEngine {
       auxGain,
       note: definition.note,
       level: definition.level,
+      drive: definition.drive,
+      bowLevel: definition.bowLevel,
+      bowTimbre: definition.bowTimbre,
+      blowLevel: definition.blowLevel,
+      blowMeta: definition.blowMeta,
+      blowTimbre: definition.blowTimbre,
+      strikeLevel: definition.strikeLevel,
+      strikeMeta: definition.strikeMeta,
+      strikeTimbre: definition.strikeTimbre,
+      signature: definition.signature,
+      geometry: definition.geometry,
+      brightness: definition.brightness,
+      damping: definition.damping,
+      position: definition.position,
+      space: definition.space,
     });
   }
 
-  private updateMatter(definition: AudioProgram['matters'][number]): void {
+  private updateMatter(definition: AudioProgram['matters'][number], hotReload = false): void {
     const matter = this.matters.get(definition.name);
     if (!matter) return;
-    matter.enabled = definition.enabled;
-    matter.note = definition.note;
-    matter.level = definition.level;
-    const level = definition.enabled ? Math.max(0, Math.min(1, definition.level / 100)) : 0;
+    const note = hotReload && definition.dynamicPitch ? matter.note : definition.note;
+    const sameDrive = JSON.stringify(matter.drive) === JSON.stringify(definition.drive);
+    const unchanged = matter.enabled === definition.enabled
+      && Math.abs(matter.note - note) < 0.0001
+      && matter.level === definition.level
+      && sameDrive
+      && matter.bowLevel === definition.bowLevel
+      && matter.bowTimbre === definition.bowTimbre
+      && matter.blowLevel === definition.blowLevel
+      && matter.blowMeta === definition.blowMeta
+      && matter.blowTimbre === definition.blowTimbre
+      && matter.strikeLevel === definition.strikeLevel
+      && matter.strikeMeta === definition.strikeMeta
+      && matter.strikeTimbre === definition.strikeTimbre
+      && matter.signature === definition.signature
+      && matter.geometry === definition.geometry
+      && matter.brightness === definition.brightness
+      && matter.damping === definition.damping
+      && matter.position === definition.position
+      && matter.space === definition.space;
+    if (unchanged) return;
+
     const context = this.ensureContext();
-    matter.mainGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
-    matter.auxGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
+    if (matter.enabled !== definition.enabled || matter.level !== definition.level) {
+      const level = definition.enabled ? Math.max(0, Math.min(1, definition.level / 100)) : 0;
+      matter.mainGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
+      matter.auxGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
+    }
+    Object.assign(matter, {
+      enabled: definition.enabled, note, level: definition.level, drive: definition.drive,
+      bowLevel: definition.bowLevel, bowTimbre: definition.bowTimbre,
+      blowLevel: definition.blowLevel, blowMeta: definition.blowMeta, blowTimbre: definition.blowTimbre,
+      strikeLevel: definition.strikeLevel, strikeMeta: definition.strikeMeta, strikeTimbre: definition.strikeTimbre,
+      signature: definition.signature, geometry: definition.geometry, brightness: definition.brightness,
+      damping: definition.damping, position: definition.position, space: definition.space,
+    });
     matter.node.port.postMessage({
-      type: 'params',
-      note: definition.note,
-      drive: definition.drive,
-      bowLevel: definition.bowLevel / 100,
-      bowTimbre: definition.bowTimbre / 100,
-      blowLevel: definition.blowLevel / 100,
-      blowMeta: definition.blowMeta / 100,
-      blowTimbre: definition.blowTimbre / 100,
-      strikeLevel: definition.strikeLevel / 100,
-      strikeMeta: definition.strikeMeta / 100,
-      strikeTimbre: definition.strikeTimbre / 100,
-      signature: definition.signature / 100,
-      geometry: definition.geometry / 100,
-      brightness: definition.brightness / 100,
-      damping: definition.damping / 100,
-      position: definition.position / 100,
-      space: definition.space / 100,
+      type: 'params', note, drive: definition.drive,
+      bowLevel: definition.bowLevel / 100, bowTimbre: definition.bowTimbre / 100,
+      blowLevel: definition.blowLevel / 100, blowMeta: definition.blowMeta / 100, blowTimbre: definition.blowTimbre / 100,
+      strikeLevel: definition.strikeLevel / 100, strikeMeta: definition.strikeMeta / 100, strikeTimbre: definition.strikeTimbre / 100,
+      signature: definition.signature / 100, geometry: definition.geometry / 100,
+      brightness: definition.brightness / 100, damping: definition.damping / 100,
+      position: definition.position / 100, space: definition.space / 100,
     });
   }
 
@@ -795,31 +866,44 @@ export class AudioEngine {
       enabled: definition.enabled,
       node, mainGain, auxGain, note: definition.note, level: definition.level,
       model: definition.model, polyphony: definition.polyphony,
+      structure: definition.structure,
+      brightness: definition.brightness,
+      damping: definition.damping,
+      position: definition.position,
     });
   }
 
-  private updateResonator(definition: AudioProgram['resonators'][number]): void {
+  private updateResonator(definition: AudioProgram['resonators'][number], hotReload = false): void {
     const resonator = this.resonators.get(definition.name);
     if (!resonator) return;
-    const noteChanged = Math.abs(resonator.note - definition.note) > 0.0001;
-    resonator.enabled = definition.enabled;
-    resonator.note = definition.note;
-    resonator.level = definition.level;
-    resonator.model = definition.model;
-    resonator.polyphony = definition.polyphony;
-    const level = definition.enabled ? Math.max(0, Math.min(1, definition.level / 100)) : 0;
+    const note = hotReload && definition.dynamicPitch ? resonator.note : definition.note;
+    const noteChanged = Math.abs(resonator.note - note) > 0.0001;
+    const unchanged = resonator.enabled === definition.enabled
+      && !noteChanged
+      && resonator.level === definition.level
+      && resonator.model === definition.model
+      && resonator.polyphony === definition.polyphony
+      && resonator.structure === definition.structure
+      && resonator.brightness === definition.brightness
+      && resonator.damping === definition.damping
+      && resonator.position === definition.position;
+    if (unchanged) return;
+
     const context = this.ensureContext();
-    resonator.mainGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
-    resonator.auxGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
+    if (resonator.enabled !== definition.enabled || resonator.level !== definition.level) {
+      const level = definition.enabled ? Math.max(0, Math.min(1, definition.level / 100)) : 0;
+      resonator.mainGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
+      resonator.auxGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
+    }
+    Object.assign(resonator, {
+      enabled: definition.enabled, note, level: definition.level, model: definition.model,
+      polyphony: definition.polyphony, structure: definition.structure,
+      brightness: definition.brightness, damping: definition.damping, position: definition.position,
+    });
     resonator.node.port.postMessage({
-      type: 'params',
-      model: definition.model,
-      polyphony: definition.polyphony,
-      note: definition.note,
-      structure: definition.structure / 100,
-      brightness: definition.brightness / 100,
-      damping: definition.damping / 100,
-      position: definition.position / 100,
+      type: 'params', model: definition.model, polyphony: definition.polyphony, note,
+      structure: definition.structure / 100, brightness: definition.brightness / 100,
+      damping: definition.damping / 100, position: definition.position / 100,
     });
     if (noteChanged) resonator.node.port.postMessage({ type: 'strum' });
   }
@@ -884,16 +968,17 @@ export class AudioEngine {
   private updateFilter(definition: AudioProgram['filters'][number]): void {
     const filter = this.filters.get(definition.name);
     if (!filter) return;
+    if (filter.bypassed === definition.bypassed
+      && Math.abs(filter.cutoff - definition.cutoff) < 0.0001
+      && filter.resonance === definition.resonance
+      && filter.drive === definition.drive) return;
     filter.bypassed = definition.bypassed;
     filter.cutoff = definition.cutoff;
     filter.resonance = definition.resonance;
     filter.drive = definition.drive;
     filter.node.port.postMessage({
-      type: 'params',
-      bypassed: definition.bypassed,
-      cutoff: definition.cutoff,
-      resonance: definition.resonance / 100,
-      drive: definition.drive / 100,
+      type: 'params', bypassed: definition.bypassed, cutoff: definition.cutoff,
+      resonance: definition.resonance / 100, drive: definition.drive / 100,
     });
   }
 
@@ -965,6 +1050,10 @@ export class AudioEngine {
   private updateSwell(definition: AudioProgram['swells'][number]): void {
     const swell = this.swells.get(definition.name);
     if (!swell) return;
+    if (swell.frequency === definition.frequency && swell.slope === definition.slope
+      && swell.shape === definition.shape && swell.smooth === definition.smooth
+      && swell.shift === definition.shift && swell.mode === definition.mode
+      && swell.outputMode === definition.outputMode && swell.range === definition.range) return;
     swell.frequency = definition.frequency;
     swell.slope = definition.slope;
     swell.shape = definition.shape;
@@ -1077,6 +1166,13 @@ export class AudioEngine {
   private updateMist(definition: AudioProgram['mists'][number]): void {
     const mist = this.mists.get(definition.name);
     if (!mist) return;
+    if (mist.bypassed === definition.bypassed && mist.position === definition.position
+      && mist.size === definition.size && mist.pitch === definition.pitch
+      && mist.density === definition.density && mist.texture === definition.texture
+      && mist.mix === definition.mix && mist.spread === definition.spread
+      && mist.feedback === definition.feedback && mist.reverb === definition.reverb
+      && mist.freeze === definition.freeze && mist.reverse === definition.reverse
+      && mist.mode === definition.mode) return;
     Object.assign(mist, definition);
 
     const context = this.ensureContext();
@@ -1141,6 +1237,10 @@ export class AudioEngine {
 
   private updateSky(definition: AudioProgram['skies'][number]): void {
     const sky=this.skies.get(definition.name); if(!sky) return;
+    if (sky.bypassed===definition.bypassed && sky.size===definition.size && sky.decay===definition.decay
+      && sky.damp===definition.damp && sky.bloom===definition.bloom && sky.predelay===definition.predelay
+      && sky.motion===definition.motion && sky.width===definition.width && sky.mix===definition.mix
+      && sky.freeze===definition.freeze) return;
     Object.assign(sky,definition);
     const context=this.ensureContext();
     const mix=Math.max(0,Math.min(1,definition.mix/100));
@@ -1211,6 +1311,7 @@ export class AudioEngine {
     const normalized = amount / 100;
 
     if (existing) {
+      if (existing.amount === amount) return;
       existing.amount = amount;
       existing.gain.gain.setTargetAtTime(normalized, context.currentTime, 0.008);
       if (emit) this.emit();

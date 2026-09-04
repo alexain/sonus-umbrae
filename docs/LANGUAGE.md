@@ -1563,3 +1563,17 @@ The Audio section reports the effective Web Audio sample rate and available late
 The Interface section includes the variable inspector, lightweight runtime metrics, the header DSP status, and the refresh rate used by `LIVE` controls. Preferences are stored locally by the browser.
 
 `>ABOUT` opens the project/version and runtime information screen. `>HELP` remains the command reference and `>SCHEME` remains the signal-graph view.
+
+### Direct typed SET values
+
+A compatible `SET` value can be used directly as a property value; `FROM` is no longer required for ordinary typed values. Name resolution checks local scope first and then global scope:
+
+```text
+VOICE bass:
+    SET notes: [C2 G1 C2 Bb1]
+    NOTE notes WITH ORDER EVERY 2 beat ON CLOCK bassclock
+```
+
+`FROM` remains meaningful for runtime-producing objects such as `SEQ` and `MOD` outputs, where the source is not a static typed value.
+
+During quantized hot reload, voices driven by a sequence keep their current pitch instead of jumping back to the first declared note. This avoids an unnecessary pitch/strum discontinuity when the same live program is reconciled.

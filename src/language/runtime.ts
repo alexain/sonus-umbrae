@@ -2698,6 +2698,7 @@ export class SonusRuntime {
           name,
           enabled: !definition.disabled,
           note: 69 + 12 * Math.log2(definition.frequency / 440),
+          dynamicPitch: languageSequences.has(name) || languageTuringVoiceSources.has(name),
           level: definition.level,
           drive: definition.drive,
           bowLevel: definition.bow,
@@ -2723,6 +2724,7 @@ export class SonusRuntime {
           model: definition.model,
           polyphony: definition.polyphony,
           note: 69 + 12 * Math.log2(definition.frequency / 440),
+          dynamicPitch: languageSequences.has(name) || languageTuringVoiceSources.has(name),
           level: definition.level,
           structure: definition.structure,
           brightness: definition.brightness,
@@ -2738,6 +2740,7 @@ export class SonusRuntime {
           lpg: definition.lpg,
           level: definition.level,
           frequency: definition.frequency,
+          dynamicPitch: languageSequences.has(name) || languageTuringVoiceSources.has(name),
           harmo: definition.harmo,
           timbre: definition.timbre,
           morph: definition.morph,
@@ -2963,7 +2966,7 @@ export class SonusRuntime {
     this.moduleViews = new Set(moduleViews);
     if (applyAudio) {
       this.stopSchedulers(hotReload);
-      this.audio.applyProgram(program);
+      this.audio.applyProgram(program, { hotReload });
 
     const envelopeTriggers = new Map<string, Array<() => void>>();
     const applyEnvelopeValue = (definition: LanguageEnvelopeDefinition, value: number): void => {
