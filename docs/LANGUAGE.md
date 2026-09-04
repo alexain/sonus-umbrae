@@ -982,27 +982,28 @@ The effect depends on the object's audio role: `_VOICE` mutes the voice output w
 
 The underscore is a live-performance state change. While the program is running, adding or removing `_` takes effect immediately without `Cmd+Enter`; the disabled-object colour follows the same runtime state, so a yellow block is already muted, bypassed or paused. A later normal compile preserves the source declaration as the source of truth. Timed mute/bypass scheduling is not part of this version yet.
 
-## Command mode
+## Quick menu and command prompt
 
-Press `Esc` from the editor to enter command mode.
+Press `Esc` from the editor to open the compact quick menu. The menu is keyboard-driven: `C` opens Configuration, `A` opens About, `S` saves, `L` loads, `R` restarts the audio engine/runtime using the current program, and `N` creates a new empty project.
 
-Current useful commands include:
+Press `>` from the live editor to enter the terminal-style command prompt. The prompt uses `>` rather than `:`. Current useful commands include:
 
 ```text
-:scheme
-:config
-:help
-:save
-:load
-:new
-:clear
-:run
-:run stop
-:start
-:stop
-:test 440
-:test stop
-:panic
+>scheme
+>config
+>help
+>about
+>save
+>load
+>new
+>clear
+>run
+>run stop
+>start
+>stop
+>test 440
+>test stop
+>panic
 ```
 
 `:start` controls the Web Audio engine lifecycle.
@@ -1478,3 +1479,27 @@ VOICE lead:
 ```
 
 The older `NOTE ... WITH VIEW` form remains accepted for compatibility, but `LIVE NOTE ...` is the preferred spelling. The piano is display-only in this version; direct key editing of the source note/list is reserved for a later iteration. Other typed or derived values such as `FREQ`, `SCALE`, `FROM` and envelopes are not yet `LIVE`-editable. The qualifier is UI metadata; it does not introduce a second scheduler or hidden parameter value.
+
+## USE directive
+
+`USE` is the program capability directive. It is optional, may appear only once, and must be the first effective instruction in the source (blank lines and comments may precede it). Capability names are comma-separated:
+
+```text
+USE visual, midi
+```
+
+The currently reserved capability names are `visual`, `midi`, `audioin`, and `osc`. In the 0.2.x runtime they establish the capability lifecycle and restart contract; individual optional backends can be attached to that lifecycle as they are implemented.
+
+`USE` is structural rather than a live parameter. If its normalized capability set changes while code is running, Sonus does not hot-reconcile the edit. It asks for confirmation because the runtime must be stopped and rebuilt. Cancelling restores the previous `USE` directive in the editor. Accepting performs a runtime restart and rebuilds the program using the new capability set. Reordering the same capabilities does not require a restart.
+
+`USE` is intentionally not used for editor-only facilities such as the variable inspector, diagnostics, or live-control refresh rate. Those belong to the environment configuration.
+
+## Environment screens
+
+`>CONFIG` opens environment preferences. These settings are not part of the Sonus program and therefore do not alter program semantics. The screen is keyboard-first: `Up/Down` selects a row, `Left/Right` changes a value, and `Enter` toggles or advances the selected value. The selected row is shown in reverse video.
+
+The Audio section reports the effective Web Audio sample rate and available latency information. `SAMPLE RATE` can use the device default or request 44.1, 48, 88.2 or 96 kHz. Where the browser supports Audio Output Devices, `OUTPUT DEVICE` enumerates and selects available audio outputs; unsupported browsers keep that row browser-controlled. Device and sample-rate changes are structural: Sonus asks for confirmation, restarts the audio engine, reloads its AudioWorklets/WASM, and then rebuilds the current program. Cancelling restores the previous configuration. Browser APIs do not expose reliable hardware bit depth, so Sonus does not invent a bit-depth readout.
+
+The Interface section includes the variable inspector, lightweight runtime metrics, the header DSP status, and the refresh rate used by `LIVE` controls. Preferences are stored locally by the browser.
+
+`>ABOUT` opens the project/version and runtime information screen. `>HELP` remains the command reference and `>SCHEME` remains the signal-graph view.

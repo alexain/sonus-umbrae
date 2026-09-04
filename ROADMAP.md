@@ -392,3 +392,14 @@ Sonus Umbrae should continue to follow these principles:
 - [x] Treat MAIN/AUX as a logical stereo output (MAIN -> L, AUX -> R) while allowing explicit `.main` / `.aux` mono routing.
 - [x] Expose the original mono audio input so a Resonator VOICE can also process another source in `PLAY ... THROUGH resonator THEN ...` chains.
 - [ ] Evaluate explicit strum/pitch decoupling only after the initial note-driven workflow has been tested musically.
+
+### Capability-gated runtime
+
+The language now reserves a single top-of-file `USE` directive for optional live capabilities (`visual`, `midi`, `audioin`, `osc`). Capability-set changes have an explicit confirmed runtime-restart lifecycle so future heavy subsystems can be dynamically loaded only when requested. Editor/debug facilities remain environment configuration rather than program capabilities.
+
+
+### Keyboard-first environment controls
+
+The 0.2.x environment now treats `Esc` as a compact live-performance menu and `>` as the explicit command prompt. Configuration navigation is keyboard-first and includes browser-supported audio-output selection, requested Web Audio sample rate, effective rate/latency reporting, and a confirmed audio-engine restart lifecycle for structural audio changes. Hardware bit depth is intentionally not reported because Web Audio does not expose it reliably.
+
+- CONFIG audio settings now include output device, requested sample rate and LATENCY MODE (`INTERACTIVE`, `BALANCED`, `PLAYBACK`), with effective latency readout and restart confirmation.

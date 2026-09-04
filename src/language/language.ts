@@ -13,6 +13,60 @@ export class LanguageError extends Error {
   }
 }
 
+
+export type ProgramCapability = 'visual' | 'midi' | 'audioin' | 'osc';
+
+export type ProgramCapabilitySet = {
+  capabilities: ReadonlySet<ProgramCapability>;
+  directiveLine: number | null;
+  directiveText: string | null;
+};
+
+const PROGRAM_CAPABILITIES = new Set<ProgramCapability>(['visual', 'midi', 'audioin', 'osc']);
+
+export function parseProgramCapabilities(source: string): ProgramCapabilitySet {
+  const lines = source.replace(/\r\n/g, '\n').split('\n');
+  let directiveLine: number | null = null;
+  let directiveText: string | null = null;
+  const capabilities = new Set<ProgramCapability>();
+  let firstStatementLine: number | null = null;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const trimmed = stripComment(lines[index]).trim();
+    if (!trimmed) continue;
+    if (firstStatementLine === null) firstStatementLine = index + 1;
+    if (!/^USE\b/i.test(trimmed)) continue;
+
+    if (directiveLine !== null) {
+      throw new LanguageError([{ line: index + 1, message: 'USE directive can only be declared once' }]);
+    }
+    directiveLine = index + 1;
+    directiveText = trimmed;
+    if (directiveLine != firstStatementLine) {
+      throw new LanguageError([{ line: directiveLine, message: 'USE must be the first instruction in the script' }]);
+    }
+
+    const body = trimmed.replace(/^USE\b/i, '').trim();
+    if (!body) throw new LanguageError([{ line: directiveLine, message: 'USE expects one or more capabilities separated by commas' }]);
+    const items = body.split(',').map((item) => item.trim().toLowerCase()).filter(Boolean);
+    if (items.length == 0) throw new LanguageError([{ line: directiveLine, message: 'USE expects one or more capabilities separated by commas' }]);
+    for (const item of items) {
+      if (!/^[a-z][a-z0-9_-]*$/i.test(item)) {
+        throw new LanguageError([{ line: directiveLine, message: `invalid USE capability '${item}'` }]);
+      }
+      if (!PROGRAM_CAPABILITIES.has(item as ProgramCapability)) {
+        throw new LanguageError([{ line: directiveLine, message: `unknown USE capability '${item}'` }]);
+      }
+      if (capabilities.has(item as ProgramCapability)) {
+        throw new LanguageError([{ line: directiveLine, message: `duplicate USE capability '${item}'` }]);
+      }
+      capabilities.add(item as ProgramCapability);
+    }
+  }
+
+  return { capabilities, directiveLine, directiveText };
+}
+
 type SourceKind = 'voice' | 'note' | 'freq' | 'time' | 'clock' | 'trigger' | 'scalar' | 'scale' | 'seq' | 'envelope';
 
 type SourceDefinition =
@@ -2391,6 +2445,7 @@ function validateLiveFilterProperty(property: string, line: number): void {
 }
 
 export function compileLanguageSource(source: string): string {
+  const capabilitySet = parseProgramCapabilities(source);
   const lines = source.replace(/\r\n/g, '\n').split('\n');
 
   // PLAY continuations are physical lines beginning with indented THROUGH/THEN.
@@ -2437,6 +2492,11 @@ export function compileLanguageSource(source: string): string {
     const trimmed = withoutComment.trim();
 
     if (!trimmed) {
+      output[index] = '';
+      continue;
+    }
+
+    if (capabilitySet.directiveLine === lineNumber) {
       output[index] = '';
       continue;
     }

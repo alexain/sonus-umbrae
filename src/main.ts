@@ -1,9 +1,9 @@
 import './style.css';
-import { AudioEngine } from './audio/engine';
+import { AudioEngine, type AudioLatencyMode } from './audio/engine';
 import { SonusEvaluationError, SonusRuntime, type InlineViewState, type ParameterViewState, type TuringViewState, type SchemeConnection, type SchemeModel, type SchemeNode } from './language/runtime';
-import { compileLanguageSource, LanguageError } from './language/language';
+import { compileLanguageSource, LanguageError, parseProgramCapabilities, type ProgramCapability } from './language/language';
 
-type Screen = 'live' | 'config' | 'help' | 'scheme';
+type Screen = 'live' | 'config' | 'help' | 'about' | 'scheme';
 
 const VERSION = '0.2.0';
 
@@ -34,7 +34,39 @@ app.innerHTML = `
       <div id="config-screen" class="screen system-screen hidden" aria-hidden="true">
         <div class="system-title">CONFIGURATION</div>
         <div class="rule"></div>
-        <div class="system-copy">NO CONFIGURABLE PARAMETERS IN ${VERSION}</div>
+        <div class="system-subtitle">AUDIO</div>
+        <div class="config-grid" id="config-grid">
+          <label class="config-row" data-config-key="output"><span>OUTPUT DEVICE</span><select id="config-output"><option value="">SYSTEM DEFAULT</option></select></label>
+          <label class="config-row" data-config-key="sampleRate"><span>SAMPLE RATE</span><select id="config-sample-rate"><option value="0">DEVICE DEFAULT</option><option value="44100">44100 HZ</option><option value="48000">48000 HZ</option><option value="88200">88200 HZ</option><option value="96000">96000 HZ</option></select></label>
+          <label class="config-row" data-config-key="latencyMode"><span>LATENCY MODE</span><select id="config-latency-mode"><option value="interactive">INTERACTIVE</option><option value="balanced">BALANCED</option><option value="playback">PLAYBACK</option></select></label>
+          <div class="config-info-row"><span>ACTIVE FORMAT</span><span id="config-audio-format">--</span></div>
+          <div class="config-info-row"><span>LATENCY</span><span id="config-audio-latency">--</span></div>
+        </div>
+        <div class="system-subtitle">INTERFACE</div>
+        <div class="config-grid">
+          <label class="config-row" data-config-key="vars"><span>VARIABLE INSPECTOR</span><input id="config-vars" type="checkbox" /></label>
+          <label class="config-row" data-config-key="metrics"><span>METRICS PANEL</span><input id="config-metrics" type="checkbox" /></label>
+          <label class="config-row" data-config-key="dsp"><span>DSP STATUS</span><input id="config-dsp" type="checkbox" /></label>
+          <label class="config-row" data-config-key="liveRate"><span>LIVE CONTROL RATE</span><select id="config-live-rate"><option value="60">60 HZ</option><option value="30">30 HZ</option><option value="20">20 HZ</option><option value="15">15 HZ</option></select></label>
+        </div>
+        <div class="system-copy muted">↑ ↓ SELECT &nbsp; ← → CHANGE &nbsp; ENTER TOGGLE / SELECT</div>
+        <div class="system-copy muted">AUDIO DEVICE, SAMPLE RATE OR LATENCY MODE CHANGES REQUIRE ENGINE RESTART</div>
+        <div class="system-copy muted">ESC  RETURN TO CODE</div>
+      </div>
+
+      <div id="about-screen" class="screen system-screen hidden" aria-hidden="true">
+        <div class="system-title">ABOUT SONUS UMBRAE</div>
+        <div class="rule"></div>
+        <div class="about-copy">A WEB-BASED LIVE CODING ENVIRONMENT FOR GENERATIVE AUDIO, MODULATION, ROUTING AND PERFORMANCE-ORIENTED CONTROL.</div>
+        <div class="about-grid">
+          <span>VERSION</span><span>${VERSION}</span>
+          <span>RUNTIME</span><span>TYPESCRIPT · WEB AUDIO · AUDIOWORKLET · WASM</span>
+          <span>DSP</span><span>MULTIPLE PERMISSIVELY-LICENSED ENGINES AND NATIVE SONUS COMPONENTS</span>
+          <span>LICENSES</span><span>SEE THIRD_PARTY_LICENSES.md AND THIRD_PARTY_NOTICES.md</span>
+          <span>LANGUAGE</span><span>SEE docs/LANGUAGE.md</span>
+          <span>COPYRIGHT</span><span>(C) 2026 Alessandro Capano</span>
+          <span>GITHUB</span><span><a class="about-link" href="https://github.com/alexain/sonus-umbrae" target="_blank" rel="noreferrer">github.com/alexain/sonus-umbrae</a></span>
+        </div>
         <div class="system-copy muted">ESC  RETURN TO CODE</div>
       </div>
 
@@ -42,23 +74,26 @@ app.innerHTML = `
         <div class="system-title">COMMANDS</div>
         <div class="rule"></div>
         <div class="help-grid">
-          <span>:CONFIG</span><span>OPEN CONFIGURATION</span>
-          <span>:HELP</span><span>SHOW THIS SCREEN</span>
-          <span>:SCHEME</span><span>SHOW READ-ONLY SIGNAL SCHEME</span>
+          <span>&gt;CONFIG</span><span>OPEN CONFIGURATION</span>
+          <span>&gt;HELP</span><span>SHOW THIS SCREEN</span>
+          <span>&gt;ABOUT</span><span>ABOUT SONUS UMBRAE</span>
+          <span>&gt;SCHEME</span><span>SHOW READ-ONLY SIGNAL SCHEME</span>
+          <span>ESC</span><span>OPEN QUICK MENU</span>
+          <span>&gt;</span><span>OPEN COMMAND PROMPT</span>
           <span>TAB</span><span>TOGGLE LIVE / SCHEME</span>
-          <span>:SAVE</span><span>SAVE SOURCE FILE</span>
-          <span>:LOAD</span><span>LOAD SOURCE FILE</span>
-          <span>:NEW</span><span>CLEAR SOURCE</span>
-          <span>:CLEAR</span><span>CLEAR SOURCE</span>
-          <span>:START</span><span>START / RESUME AUDIO ENGINE</span>
-          <span>:STOP</span><span>SUSPEND AUDIO ENGINE</span>
-          <span>:RUN</span><span>START / RELOAD LIVE CODE</span>
-          <span>:RUN STOP</span><span>STOP TRANSPORT / KEEP FX TAILS</span>
-          <span>:TEST 440</span><span>PLAY DIAGNOSTIC SINE TONE</span>
-          <span>:TEST STOP</span><span>STOP DIAGNOSTIC TONE</span>
-          <span>:CLOCK START</span><span>START MASTER CLOCK TRANSPORT</span>
-          <span>:CLOCK STOP</span><span>STOP MASTER CLOCK TRANSPORT</span>
-          <span>:PANIC</span><span>STOP CURRENT AUDIO IMMEDIATELY</span>
+          <span>&gt;SAVE</span><span>SAVE SOURCE FILE</span>
+          <span>&gt;LOAD</span><span>LOAD SOURCE FILE</span>
+          <span>&gt;NEW</span><span>CLEAR SOURCE</span>
+          <span>&gt;CLEAR</span><span>CLEAR SOURCE</span>
+          <span>&gt;START</span><span>START / RESUME AUDIO ENGINE</span>
+          <span>&gt;STOP</span><span>SUSPEND AUDIO ENGINE</span>
+          <span>&gt;RUN</span><span>START / RELOAD LIVE CODE</span>
+          <span>&gt;RUN STOP</span><span>STOP TRANSPORT / KEEP FX TAILS</span>
+          <span>&gt;TEST 440</span><span>PLAY DIAGNOSTIC SINE TONE</span>
+          <span>&gt;TEST STOP</span><span>STOP DIAGNOSTIC TONE</span>
+          <span>&gt;CLOCK START</span><span>START MASTER CLOCK TRANSPORT</span>
+          <span>&gt;CLOCK STOP</span><span>STOP MASTER CLOCK TRANSPORT</span>
+          <span>&gt;PANIC</span><span>STOP CURRENT AUDIO IMMEDIATELY</span>
           <span>ENTER</span><span>INSERT NEW LINE</span>
           <span>CMD/CTRL+ENTER</span><span>RECOMPILE / START LIVE CODE</span>
           <span>CMD/CTRL+BACKSPACE</span><span>STOP TRANSPORT / KEEP FX TAILS</span>
@@ -87,6 +122,42 @@ app.innerHTML = `
         </div>
       </div>
 
+      <div id="capability-restart-overlay" class="capability-restart-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="capability-restart-title">
+        <div class="capability-restart-card">
+          <div id="capability-restart-title" class="audio-start-title">RUNTIME CAPABILITIES CHANGED</div>
+          <div class="rule"></div>
+          <div class="system-copy">CHANGING USE RESTARTS THE SONUS RUNTIME AND MAY INTERRUPT AUDIO BRIEFLY.</div>
+          <div class="capability-diff"><span>CURRENT</span><code id="capability-current">NONE</code><span>NEW</span><code id="capability-next">NONE</code></div>
+          <div class="capability-actions"><button id="capability-cancel" class="audio-start-button" type="button">CANCEL</button><button id="capability-apply" class="audio-start-button" type="button">RESTART AND APPLY</button></div>
+        </div>
+      </div>
+
+      <div id="quick-menu-overlay" class="quick-menu-overlay hidden" role="dialog" aria-modal="true" aria-label="Quick menu">
+        <div class="quick-menu-card">
+          <div class="audio-start-title">QUICK MENU</div>
+          <div class="rule"></div>
+          <div class="quick-menu-grid">
+            <span>C</span><span>CONFIG</span>
+            <span>A</span><span>ABOUT</span>
+            <span>S</span><span>SAVE SCRIPT / PROJECT</span>
+            <span>L</span><span>LOAD SCRIPT / PROJECT</span>
+            <span>R</span><span>RESTART ENGINE</span>
+            <span>N</span><span>NEW PROJECT</span>
+          </div>
+          <div class="system-copy muted">ESC  CLOSE &nbsp;&nbsp; &gt;  COMMAND PROMPT</div>
+        </div>
+      </div>
+
+      <div id="audio-config-restart-overlay" class="capability-restart-overlay hidden" role="dialog" aria-modal="true" aria-label="Restart audio engine">
+        <div class="capability-restart-card">
+          <div class="audio-start-title">AUDIO CONFIGURATION CHANGED</div>
+          <div class="rule"></div>
+          <div class="system-copy">OUTPUT DEVICE, SAMPLE RATE OR LATENCY MODE CHANGES REQUIRE RESTARTING THE AUDIO ENGINE.</div>
+          <div class="capability-diff"><span>CURRENT</span><code id="audio-config-current">--</code><span>NEW</span><code id="audio-config-next">--</code></div>
+          <div class="capability-actions"><button id="audio-config-cancel" class="audio-start-button" type="button">CANCEL</button><button id="audio-config-apply" class="audio-start-button" type="button">RESTART AND APPLY</button></div>
+        </div>
+      </div>
+
       <div id="phosphor-layer" class="phosphor-layer" aria-hidden="true">
         <span id="error-overlays" class="error-overlays"></span>
         <span id="block-caret" class="block-caret hidden"></span>
@@ -96,7 +167,7 @@ app.innerHTML = `
     </section>
 
     <footer id="commandbar" class="commandbar hidden">
-      <span class="prompt">:</span>
+      <span class="prompt">&gt;</span>
       <input id="command" class="command" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Command" />
     </footer>
   </main>
@@ -267,6 +338,7 @@ const command = must<HTMLInputElement>('command');
 const liveScreen = must<HTMLElement>('live-screen');
 const configScreen = must<HTMLElement>('config-screen');
 const helpScreen = must<HTMLElement>('help-screen');
+const aboutScreen = must<HTMLElement>('about-screen');
 const schemeScreen = must<HTMLElement>('scheme-screen');
 const schemeViewport = must<HTMLElement>('scheme-viewport');
 const schemeWorld = must<HTMLElement>('scheme-world');
@@ -286,6 +358,26 @@ const liveDot = must<HTMLElement>('live-dot');
 const codeStatus = must<HTMLElement>('code-status');
 const dspStatus = must<HTMLElement>('dsp-status');
 const clockStatus = must<HTMLElement>('clock-status');
+const configVars = must<HTMLInputElement>('config-vars');
+const configMetrics = must<HTMLInputElement>('config-metrics');
+const configDsp = must<HTMLInputElement>('config-dsp');
+const configLiveRate = must<HTMLSelectElement>('config-live-rate');
+const configOutput = must<HTMLSelectElement>('config-output');
+const configSampleRate = must<HTMLSelectElement>('config-sample-rate');
+const configLatencyMode = must<HTMLSelectElement>('config-latency-mode');
+const configAudioFormat = must<HTMLElement>('config-audio-format');
+const configAudioLatency = must<HTMLElement>('config-audio-latency');
+const quickMenuOverlay = must<HTMLElement>('quick-menu-overlay');
+const audioConfigRestartOverlay = must<HTMLElement>('audio-config-restart-overlay');
+const audioConfigCurrent = must<HTMLElement>('audio-config-current');
+const audioConfigNext = must<HTMLElement>('audio-config-next');
+const audioConfigCancel = must<HTMLButtonElement>('audio-config-cancel');
+const audioConfigApply = must<HTMLButtonElement>('audio-config-apply');
+const capabilityRestartOverlay = must<HTMLElement>('capability-restart-overlay');
+const capabilityCurrent = must<HTMLElement>('capability-current');
+const capabilityNext = must<HTMLElement>('capability-next');
+const capabilityCancel = must<HTMLButtonElement>('capability-cancel');
+const capabilityApply = must<HTMLButtonElement>('capability-apply');
 
 const audioEngine = new AudioEngine();
 const runtime = new SonusRuntime(audioEngine);
@@ -297,7 +389,7 @@ let previewTimer = 0;
 let scopeFrame = 0;
 let inlineViewFrame = 0;
 let inlineViewLastPaint = 0;
-const LIVE_CONTROL_REFRESH_MS = 16;
+let liveControlRefreshMs = 16;
 let liveControlCommitTimer = 0;
 let liveControlRuntimeTimer = 0;
 let pendingLiveControlRuntimeUpdate: { kind: string; name: string; property: string; value: number } | null = null;
@@ -308,6 +400,32 @@ let editingInlineViews: InlineViewState[] | null = null;
 let pendingLiveUpdate: { compiled: string; hasMasterClock: boolean } | null = null;
 let pendingLiveUpdateUnsubscribe: (() => void) | null = null;
 let diagnosticLines = new Set<number>();
+const CONFIG_STATE_KEY = 'sonus-umbrae.config';
+type SampleRateChoice = 0 | 44100 | 48000 | 88200 | 96000;
+type AppConfig = {
+  showVariables: boolean;
+  showMetrics: boolean;
+  showDspStatus: boolean;
+  liveControlHz: 60 | 30 | 20 | 15;
+  sampleRate: SampleRateChoice;
+  outputDeviceId: string;
+  latencyMode: AudioLatencyMode;
+};
+let appConfig: AppConfig = {
+  showVariables: true,
+  showMetrics: false,
+  showDspStatus: true,
+  liveControlHz: 60,
+  sampleRate: 0,
+  outputDeviceId: '',
+  latencyMode: 'interactive',
+};
+let configSelectionIndex = 0;
+let pendingAudioConfig: { sampleRate: SampleRateChoice; outputDeviceId: string; latencyMode: AudioLatencyMode } | null = null;
+let activeCapabilities = new Set<ProgramCapability>();
+let activeUseDirective: string | null = null;
+let pendingCapabilityRestart: { source: string; capabilities: Set<ProgramCapability>; directive: string | null } | null = null;
+
 const PANEL_STATE_KEY = 'sonus-umbrae.monitor-panels';
 const panelCollapsed = new Map<string, boolean>();
 const panelExplicitState = new Set<string>();
@@ -317,6 +435,311 @@ let clockWasActive = false;
 let lastCaretTrailPosition: { left: number; top: number } | null = null;
 
 loadPanelState();
+loadAppConfig();
+audioEngine.setPreferredAudioConfiguration({
+  sampleRate: appConfig.sampleRate === 0 ? null : appConfig.sampleRate,
+  outputDeviceId: appConfig.outputDeviceId || null,
+  latencyMode: appConfig.latencyMode,
+});
+applyAppConfig();
+
+
+function loadAppConfig(): void {
+  try {
+    const raw = localStorage.getItem(CONFIG_STATE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as Partial<AppConfig>;
+    const hz = parsed.liveControlHz;
+    appConfig = {
+      showVariables: parsed.showVariables ?? true,
+      showMetrics: parsed.showMetrics ?? false,
+      showDspStatus: parsed.showDspStatus ?? true,
+      liveControlHz: hz === 30 || hz === 20 || hz === 15 ? hz : 60,
+      sampleRate: parsed.sampleRate === 44100 || parsed.sampleRate === 48000 || parsed.sampleRate === 88200 || parsed.sampleRate === 96000 ? parsed.sampleRate : 0,
+      outputDeviceId: typeof parsed.outputDeviceId === 'string' ? parsed.outputDeviceId : '',
+      latencyMode: parsed.latencyMode === 'balanced' || parsed.latencyMode === 'playback' ? parsed.latencyMode : 'interactive',
+    };
+  } catch {
+    appConfig = { showVariables: true, showMetrics: false, showDspStatus: true, liveControlHz: 60, sampleRate: 0, outputDeviceId: '', latencyMode: 'interactive' };
+  }
+}
+
+function saveAppConfig(): void {
+  localStorage.setItem(CONFIG_STATE_KEY, JSON.stringify(appConfig));
+}
+
+function applyAppConfig(): void {
+  configVars.checked = appConfig.showVariables;
+  configMetrics.checked = appConfig.showMetrics;
+  configDsp.checked = appConfig.showDspStatus;
+  configLiveRate.value = String(appConfig.liveControlHz);
+  configSampleRate.value = String(appConfig.sampleRate);
+  configOutput.value = appConfig.outputDeviceId;
+  configLatencyMode.value = appConfig.latencyMode;
+  dspStatus.closest('.status-item')?.classList.toggle('hidden', !appConfig.showDspStatus);
+  liveControlRefreshMs = Math.round(1000 / appConfig.liveControlHz);
+  syncViews();
+}
+
+function configRows(): HTMLElement[] {
+  return [...configScreen.querySelectorAll<HTMLElement>('.config-row[data-config-key]')];
+}
+
+function updateConfigSelection(): void {
+  const rows = configRows();
+  if (rows.length === 0) return;
+  configSelectionIndex = Math.max(0, Math.min(rows.length - 1, configSelectionIndex));
+  rows.forEach((row, index) => row.classList.toggle('selected', index === configSelectionIndex));
+  rows[configSelectionIndex].scrollIntoView({ block: 'nearest' });
+}
+
+function cycleSelect(select: HTMLSelectElement, direction: -1 | 1): void {
+  if (select.options.length === 0 || select.disabled) return;
+  const index = Math.max(0, select.selectedIndex);
+  const next = (index + direction + select.options.length) % select.options.length;
+  select.selectedIndex = next;
+  select.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function activateConfigRow(direction: -1 | 0 | 1): void {
+  const row = configRows()[configSelectionIndex];
+  if (!row) return;
+  const control = row.querySelector<HTMLInputElement | HTMLSelectElement>('input, select');
+  if (!control || control.disabled) return;
+  if (control instanceof HTMLInputElement && control.type === 'checkbox') {
+    control.checked = direction === 0 ? !control.checked : direction > 0;
+    control.dispatchEvent(new Event('change', { bubbles: true }));
+  } else if (control instanceof HTMLSelectElement) {
+    cycleSelect(control, direction === 0 ? 1 : direction);
+  }
+}
+
+async function refreshAudioConfigUi(): Promise<void> {
+  const snapshot = audioEngine.getAudioConfiguration();
+  const effective = snapshot.effectiveSampleRate;
+  configAudioFormat.textContent = effective ? `${effective} HZ · WEB AUDIO FLOAT` : 'ENGINE NOT STARTED';
+  const latencies = [
+    snapshot.baseLatencyMs === null ? null : `BASE ${snapshot.baseLatencyMs.toFixed(1)} MS`,
+    snapshot.outputLatencyMs === null ? null : `OUTPUT ${snapshot.outputLatencyMs.toFixed(1)} MS`,
+  ].filter(Boolean);
+  configAudioLatency.textContent = latencies.length > 0 ? latencies.join(' · ') : '--';
+
+  const previous = configOutput.value || appConfig.outputDeviceId;
+  configOutput.replaceChildren(new Option('SYSTEM DEFAULT', ''));
+  try {
+    const devices = await audioEngine.listOutputDevices();
+    for (const device of devices) configOutput.add(new Option(device.label, device.deviceId));
+    const known = [...configOutput.options].some((option) => option.value === previous);
+    configOutput.value = known ? previous : '';
+  } catch {
+    configOutput.value = '';
+  }
+  const selectable = audioEngine.supportsOutputDeviceSelection();
+  configOutput.disabled = !selectable;
+  if (!selectable) configOutput.options[0].text = 'SYSTEM DEFAULT · BROWSER CONTROLLED';
+  updateConfigSelection();
+}
+
+function formatAudioConfig(config: { sampleRate: SampleRateChoice; outputDeviceId: string; latencyMode: AudioLatencyMode }): string {
+  const device = [...configOutput.options].find((option) => option.value === config.outputDeviceId)?.text ?? 'SYSTEM DEFAULT';
+  const rate = config.sampleRate === 0 ? 'DEVICE DEFAULT' : `${config.sampleRate} HZ`;
+  return `${device} · ${rate} · ${config.latencyMode.toUpperCase()}`;
+}
+
+function requestAudioConfigRestart(next: { sampleRate: SampleRateChoice; outputDeviceId: string; latencyMode: AudioLatencyMode }): void {
+  if (next.sampleRate === appConfig.sampleRate && next.outputDeviceId === appConfig.outputDeviceId && next.latencyMode === appConfig.latencyMode) return;
+  pendingAudioConfig = next;
+  audioConfigCurrent.textContent = formatAudioConfig(appConfig);
+  audioConfigNext.textContent = formatAudioConfig(next);
+  audioConfigRestartOverlay.classList.remove('hidden');
+  audioConfigApply.focus();
+}
+
+function cancelAudioConfigRestart(): void {
+  pendingAudioConfig = null;
+  configSampleRate.value = String(appConfig.sampleRate);
+  configOutput.value = appConfig.outputDeviceId;
+  configLatencyMode.value = appConfig.latencyMode;
+  audioConfigRestartOverlay.classList.add('hidden');
+  notify('audio configuration unchanged');
+}
+
+async function restartEngineWithConfig(next = { sampleRate: appConfig.sampleRate, outputDeviceId: appConfig.outputDeviceId, latencyMode: appConfig.latencyMode }): Promise<void> {
+  const source = sourceText();
+  const shouldRun = codeRunning;
+  const compiled = source.trim() ? compileLanguageSource(source) : '';
+  runtime.stopExecution({ preserveTails: false });
+  audioEngine.setClockTransport(false);
+  setCodeRunning(false);
+  await audioEngine.restartAudioConfiguration({
+    sampleRate: next.sampleRate === 0 ? null : next.sampleRate,
+    outputDeviceId: next.outputDeviceId || null,
+    latencyMode: next.latencyMode,
+  });
+  await audioEngine.start();
+  if (source.trim()) {
+    const hasMasterClock = /^\s*_?CLOCK\s+SET\b/im.test(source);
+    audioEngine.setClockTransport(hasMasterClock);
+    runtime.evaluate(compiled, shouldRun ? undefined : { applyAudio: false });
+  } else runtime.evaluate('');
+  if (shouldRun) setCodeRunning(true);
+  syncViews();
+  await refreshAudioConfigUi();
+}
+
+async function applyAudioConfigRestart(): Promise<void> {
+  const next = pendingAudioConfig;
+  if (!next) return;
+  audioConfigApply.disabled = true;
+  audioConfigCancel.disabled = true;
+  try {
+    await restartEngineWithConfig(next);
+    appConfig.sampleRate = next.sampleRate;
+    appConfig.outputDeviceId = next.outputDeviceId;
+    appConfig.latencyMode = next.latencyMode;
+    saveAppConfig();
+    pendingAudioConfig = null;
+    audioConfigRestartOverlay.classList.add('hidden');
+    notify('audio engine restarted');
+  } catch (error) {
+    notify(error instanceof Error ? error.message : 'audio restart failed');
+    configSampleRate.value = String(appConfig.sampleRate);
+    configOutput.value = appConfig.outputDeviceId;
+    configLatencyMode.value = appConfig.latencyMode;
+  } finally {
+    audioConfigApply.disabled = false;
+    audioConfigCancel.disabled = false;
+  }
+}
+
+function openQuickMenu(): void {
+  if (screen !== 'live' || commandMode) return;
+  quickMenuOverlay.classList.remove('hidden');
+}
+
+function closeQuickMenu(): void {
+  quickMenuOverlay.classList.add('hidden');
+  editor.focus();
+  requestAnimationFrame(positionBlockCaret);
+}
+
+async function runQuickMenuAction(key: string): Promise<void> {
+  closeQuickMenu();
+  switch (key.toLowerCase()) {
+    case 'c': showScreen('config'); await refreshAudioConfigUi(); return;
+    case 'a': showScreen('about'); return;
+    case 's': await saveSource(); return;
+    case 'l': await loadSource(); return;
+    case 'r':
+      try { await restartEngineWithConfig(); notify('audio engine restarted'); }
+      catch (error) { notify(error instanceof Error ? error.message : 'audio restart failed'); }
+      return;
+    case 'n':
+      setSourceText('');
+      runtime.evaluate('');
+      setCodeRunning(false);
+      syncViews();
+      notify('new project');
+      return;
+  }
+}
+
+function capabilityKey(capabilities: ReadonlySet<ProgramCapability>): string {
+  return [...capabilities].sort().join(',');
+}
+
+function formatCapabilities(capabilities: ReadonlySet<ProgramCapability>): string {
+  const names = [...capabilities].sort();
+  return names.length > 0 ? `USE ${names.join(', ')}` : 'NO USE';
+}
+
+function capabilitySetChanged(next: ReadonlySet<ProgramCapability>): boolean {
+  return capabilityKey(next) !== capabilityKey(activeCapabilities);
+}
+
+function rememberActiveCapabilities(source: string): void {
+  const parsed = parseProgramCapabilities(source);
+  activeCapabilities = new Set(parsed.capabilities);
+  activeUseDirective = parsed.directiveText;
+}
+
+function requestCapabilityRestart(source: string): boolean {
+  const parsed = parseProgramCapabilities(source);
+  if (!codeRunning || !capabilitySetChanged(parsed.capabilities)) return false;
+  pendingCapabilityRestart = {
+    source,
+    capabilities: new Set(parsed.capabilities),
+    directive: parsed.directiveText,
+  };
+  capabilityCurrent.textContent = formatCapabilities(activeCapabilities);
+  capabilityNext.textContent = formatCapabilities(parsed.capabilities);
+  capabilityRestartOverlay.classList.remove('hidden');
+  capabilityApply.focus();
+  return true;
+}
+
+function replaceUseDirective(source: string, directive: string | null): string {
+  const lines = source.replace(/\r\n/g, '\n').split('\n');
+  const useIndex = lines.findIndex((line) => /^\s*USE\b/i.test(line.replace(/\/\/.*$/, '').trim()));
+  if (useIndex >= 0) {
+    if (directive) lines[useIndex] = directive;
+    else lines.splice(useIndex, 1);
+    return lines.join('\n');
+  }
+  if (!directive) return lines.join('\n');
+  let insertAt = 0;
+  while (insertAt < lines.length) {
+    const trimmed = lines[insertAt].trim();
+    if (!trimmed || trimmed.startsWith('//')) { insertAt += 1; continue; }
+    break;
+  }
+  lines.splice(insertAt, 0, directive);
+  return lines.join('\n');
+}
+
+function cancelCapabilityRestart(): void {
+  if (!pendingCapabilityRestart) return;
+  const restored = replaceUseDirective(editor.value, activeUseDirective);
+  setSourceText(restored);
+  pendingCapabilityRestart = null;
+  capabilityRestartOverlay.classList.add('hidden');
+  notify('capability change cancelled');
+}
+
+async function applyCapabilityRestart(): Promise<void> {
+  const pending = pendingCapabilityRestart;
+  if (!pending) return;
+  capabilityApply.disabled = true;
+  capabilityCancel.disabled = true;
+  try {
+    clearDiagnostic();
+    const compiled = pending.source.trim() ? compileLanguageSource(pending.source) : '';
+    runtime.stopExecution({ preserveTails: false });
+    audioEngine.setClockTransport(false);
+    setCodeRunning(false);
+
+    // Capability modules are intentionally a no-op in 0.2.x. This is the
+    // lifecycle hook where future USE backends (visual, MIDI, audio input,
+    // OSC) are dynamically loaded/unloaded before the program is rebuilt.
+    await Promise.resolve();
+
+    const hasMasterClock = /^\s*_?CLOCK\s+SET\b/im.test(pending.source);
+    audioEngine.setClockTransport(hasMasterClock);
+    runtime.evaluate(compiled);
+    rememberActiveCapabilities(pending.source);
+    setCodeRunning(true);
+    syncViews();
+    notify('runtime restarted · capabilities applied');
+    pendingCapabilityRestart = null;
+    capabilityRestartOverlay.classList.add('hidden');
+  } catch (error) {
+    if (error instanceof LanguageError || error instanceof SonusEvaluationError) showDiagnostics(error.diagnostics);
+    else notify(error instanceof Error ? error.message : 'runtime restart failed');
+  } finally {
+    capabilityApply.disabled = false;
+    capabilityCancel.disabled = false;
+  }
+}
 
 async function tryAutoStartAudio(): Promise<void> {
   if (!audioAutoStartPending) return;
@@ -391,12 +814,15 @@ function showScreen(next: Screen): void {
   liveScreen.classList.toggle('hidden', next !== 'live');
   configScreen.classList.toggle('hidden', next !== 'config');
   helpScreen.classList.toggle('hidden', next !== 'help');
+  aboutScreen.classList.toggle('hidden', next !== 'about');
   schemeScreen.classList.toggle('hidden', next !== 'scheme');
   liveScreen.setAttribute('aria-hidden', String(next !== 'live'));
   configScreen.setAttribute('aria-hidden', String(next !== 'config'));
   helpScreen.setAttribute('aria-hidden', String(next !== 'help'));
+  aboutScreen.setAttribute('aria-hidden', String(next !== 'about'));
   schemeScreen.setAttribute('aria-hidden', String(next !== 'scheme'));
   if (next === 'scheme') renderScheme();
+  if (next === 'config') { configSelectionIndex = 0; updateConfigSelection(); void refreshAudioConfigUi(); }
   if (next === 'live') editor.focus();
   requestAnimationFrame(positionBlockCaret);
 }
@@ -454,7 +880,7 @@ function notify(text: string): void {
 function normalizeLanguageCommandCase(): void {
   const normalized = editor.value
     .replace(
-      /^(\s*)(voice|fx|filter|seq|play|set|clock|main)(?=\s|$)/gim,
+      /^(\s*)(use|voice|fx|filter|seq|play|set|clock|main)(?=\s|$)/gim,
       (_match, indentation: string, commandName: string) => `${indentation}${commandName.toUpperCase()}`,
     )
     .replace(
@@ -613,7 +1039,11 @@ function queueLiveUpdate(): boolean {
 function recompileLiveCode(): boolean {
   window.clearTimeout(previewTimer);
   previewTimer = 0;
-  if (codeRunning) return queueLiveUpdate();
+  if (codeRunning) {
+    try { if (requestCapabilityRestart(sourceText())) return false; }
+    catch (error) { if (error instanceof LanguageError) showDiagnostics(error.diagnostics); return false; }
+    return queueLiveUpdate();
+  }
   const applied = evaluateLiveSource();
   if (applied) {
     setCodeRunning(true);
@@ -628,15 +1058,18 @@ function evaluateLiveSource(): boolean {
     const source = sourceText();
     if (!source.trim()) {
       runtime.evaluate('');
+      rememberActiveCapabilities(source);
       syncViews();
       notify('ok');
       return true;
     }
 
+    if (requestCapabilityRestart(source)) return false;
     const compiled = compileLanguageSource(source);
     const hasMasterClock = /^\s*_?CLOCK\s+SET\b/im.test(source);
     audioEngine.setClockTransport(hasMasterClock);
     const results = runtime.evaluate(compiled);
+    rememberActiveCapabilities(source);
     editingInlineViews = null;
     syncLiveDisableSnapshot(source);
     const last = results.at(-1);
@@ -896,7 +1329,8 @@ function syncViews(): void {
   const nodes = new Map(scheme.nodes.map((node) => [node.id, node]));
   const panels: HTMLElement[] = [];
 
-  panels.push(buildVariablesPanel(variables));
+  if (appConfig.showVariables) panels.push(buildVariablesPanel(variables));
+  if (appConfig.showMetrics) panels.push(buildMetricsPanel(scheme, variables.length));
   for (const view of turingViews) panels.push(buildTuringPanel(view));
 
   const audio = nodes.get('Audio');
@@ -979,6 +1413,37 @@ function syncViews(): void {
 
   if (scopeFrame === 0) scopeFrame = requestAnimationFrame(drawScopes);
   requestAnimationFrame(positionBlockCaret);
+}
+
+
+function buildMetricsPanel(scheme: SchemeModel, variableCount: number): HTMLElement {
+  const card = createMonitorCard('Metrics', 'METRICS', false);
+  const body = card.querySelector<HTMLElement>('.monitor-body');
+  if (!body) return card;
+  const rows = document.createElement('div');
+  rows.className = 'variables-readout';
+  const activeNodes = scheme.nodes.filter((node) => node.id !== 'Audio' && node.id !== 'Clock').length;
+  const routes = scheme.connections.filter((connection) => connection.type !== 'view').length;
+  const values: Array<[string, string]> = [
+    ['OBJECTS', String(activeNodes)],
+    ['ROUTES', String(routes)],
+    ['VARIABLES', String(variableCount)],
+    ['SAMPLE RATE', audioEngine.snapshot().sampleRate ? `${Math.round(audioEngine.snapshot().sampleRate!)} HZ` : '--'],
+  ];
+  for (const [label, value] of values) {
+    const row = document.createElement('div');
+    row.className = 'variable-row';
+    const name = document.createElement('span');
+    name.className = 'variable-name';
+    name.textContent = label;
+    const readout = document.createElement('span');
+    readout.className = 'variable-value';
+    readout.textContent = value;
+    row.append(name, readout);
+    rows.append(row);
+  }
+  body.append(rows);
+  return card;
 }
 
 function buildVariablesPanel(variables: Array<{ name: string; value: string }>): HTMLElement {
@@ -2131,7 +2596,7 @@ function scheduleLiveControlRuntimeUpdate(kind: string, name: string, property: 
     const pending = pendingLiveControlRuntimeUpdate;
     pendingLiveControlRuntimeUpdate = null;
     if (pending) applyLiveControlRuntime(pending.kind, pending.name, pending.property, pending.value);
-  }, LIVE_CONTROL_REFRESH_MS);
+  }, liveControlRefreshMs);
 }
 
 function commitLiveControlSource(): void {
@@ -2476,6 +2941,10 @@ async function runCommand(raw: string): Promise<void> {
       leaveCommandMode();
       showScreen('help');
       return;
+    case 'about':
+      leaveCommandMode();
+      showScreen('about');
+      return;
     case 'scheme':
       leaveCommandMode();
       showScreen('scheme');
@@ -2485,6 +2954,8 @@ async function runCommand(raw: string): Promise<void> {
       setSourceText('');
       runtime.evaluate('');
       setCodeRunning(false);
+      activeCapabilities = new Set();
+      activeUseDirective = null;
       syncViews();
       leaveCommandMode();
       notify('source cleared');
@@ -2508,7 +2979,7 @@ async function runCommand(raw: string): Promise<void> {
         notify('usage: :run | :run stop');
         return;
       }
-      const applied = evaluateLiveSource();
+      const applied = codeRunning ? recompileLiveCode() : evaluateLiveSource();
       if (applied) {
         setCodeRunning(true);
         notify('live code running');
@@ -2758,6 +3229,12 @@ editor.addEventListener('keydown', (event) => {
 
   if (event.key === 'Escape') {
     event.preventDefault();
+    openQuickMenu();
+    return;
+  }
+
+  if (event.key === '>' && !event.metaKey && !event.ctrlKey && !event.altKey) {
+    event.preventDefault();
     enterCommandMode();
     return;
   }
@@ -2839,6 +3316,51 @@ editor.addEventListener('keydown', (event) => {
   }
 });
 
+
+configVars.addEventListener('change', () => {
+  appConfig.showVariables = configVars.checked;
+  saveAppConfig();
+  applyAppConfig();
+});
+configMetrics.addEventListener('change', () => {
+  appConfig.showMetrics = configMetrics.checked;
+  saveAppConfig();
+  applyAppConfig();
+});
+configDsp.addEventListener('change', () => {
+  appConfig.showDspStatus = configDsp.checked;
+  saveAppConfig();
+  applyAppConfig();
+});
+configLiveRate.addEventListener('change', () => {
+  const hz = Number(configLiveRate.value);
+  appConfig.liveControlHz = hz === 30 || hz === 20 || hz === 15 ? hz : 60;
+  saveAppConfig();
+  applyAppConfig();
+});
+configSampleRate.addEventListener('change', () => {
+  const value = Number(configSampleRate.value);
+  const sampleRate: SampleRateChoice = value === 44100 || value === 48000 || value === 88200 || value === 96000 ? value : 0;
+  requestAudioConfigRestart({ sampleRate, outputDeviceId: configOutput.value, latencyMode: configLatencyMode.value as AudioLatencyMode });
+});
+configOutput.addEventListener('change', () => {
+  requestAudioConfigRestart({ sampleRate: Number(configSampleRate.value) as SampleRateChoice, outputDeviceId: configOutput.value, latencyMode: configLatencyMode.value as AudioLatencyMode });
+});
+configLatencyMode.addEventListener('change', () => {
+  requestAudioConfigRestart({ sampleRate: Number(configSampleRate.value) as SampleRateChoice, outputDeviceId: configOutput.value, latencyMode: configLatencyMode.value as AudioLatencyMode });
+});
+audioConfigCancel.addEventListener('click', cancelAudioConfigRestart);
+audioConfigApply.addEventListener('click', () => { void applyAudioConfigRestart(); });
+configScreen.addEventListener('pointerdown', (event) => {
+  const row = (event.target as Element).closest<HTMLElement>('.config-row[data-config-key]');
+  if (!row) return;
+  const rows = configRows();
+  const index = rows.indexOf(row);
+  if (index >= 0) { configSelectionIndex = index; updateConfigSelection(); }
+});
+capabilityCancel.addEventListener('click', cancelCapabilityRestart);
+capabilityApply.addEventListener('click', () => { void applyCapabilityRestart(); });
+
 command.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
     event.preventDefault();
@@ -2853,6 +3375,27 @@ command.addEventListener('keydown', (event) => {
 });
 
 document.addEventListener('keydown', (event) => {
+  if (!audioConfigRestartOverlay.classList.contains('hidden')) {
+    if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); cancelAudioConfigRestart(); }
+    else if (event.key === 'Enter') { event.preventDefault(); event.stopImmediatePropagation(); void applyAudioConfigRestart(); }
+    return;
+  }
+
+  if (!quickMenuOverlay.classList.contains('hidden')) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (event.key === 'Escape') closeQuickMenu();
+    else if (event.key === '>') { closeQuickMenu(); enterCommandMode(); }
+    else if (/^[caslrn]$/i.test(event.key)) void runQuickMenuAction(event.key);
+    return;
+  }
+
+  if (!capabilityRestartOverlay.classList.contains('hidden')) {
+    if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); cancelCapabilityRestart(); }
+    else if (event.key === 'Enter') { event.preventDefault(); event.stopImmediatePropagation(); void applyCapabilityRestart(); }
+    return;
+  }
+
   if (!audioStartOverlay.classList.contains('hidden')) {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
@@ -2865,7 +3408,35 @@ document.addEventListener('keydown', (event) => {
     return;
   }
 
+  if (screen === 'config') {
+    if (event.key === 'Escape') { event.preventDefault(); showScreen('live'); return; }
+    if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+      event.preventDefault();
+      const rows = configRows();
+      if (rows.length > 0) configSelectionIndex = (configSelectionIndex + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
+      updateConfigSelection();
+      return;
+    }
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      event.preventDefault();
+      activateConfigRow(event.key === 'ArrowRight' ? 1 : -1);
+      return;
+    }
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      activateConfigRow(0);
+      return;
+    }
+  }
+
   if (commandMode) return;
+
+  if (screen === 'live' && event.key === '>' && document.activeElement !== command) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    enterCommandMode();
+    return;
+  }
 
   if (event.key === 'Tab' && !event.shiftKey) {
     if (screen === 'live' || screen === 'scheme') {
@@ -2876,7 +3447,12 @@ document.addEventListener('keydown', (event) => {
     }
   }
 
-  if (event.key === 'Escape' && (screen === 'config' || screen === 'help' || screen === 'scheme')) {
+  if (event.key === 'Escape' && screen === 'live') {
+    event.preventDefault();
+    openQuickMenu();
+    return;
+  }
+  if (event.key === 'Escape' && (screen === 'help' || screen === 'about' || screen === 'scheme')) {
     event.preventDefault();
     showScreen('live');
   }

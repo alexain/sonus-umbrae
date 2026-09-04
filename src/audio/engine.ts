@@ -134,6 +134,19 @@ export interface AudioProgram {
 }
 
 export type AudioEngineListener = (snapshot: AudioEngineSnapshot) => void;
+export type AudioOutputDevice = { deviceId: string; label: string };
+
+export type AudioLatencyMode = 'interactive' | 'balanced' | 'playback';
+
+export type AudioEngineConfiguration = {
+  requestedSampleRate: number | null;
+  requestedOutputDeviceId: string | null;
+  requestedLatencyMode: AudioLatencyMode;
+  effectiveSampleRate: number | null;
+  baseLatencyMs: number | null;
+  outputLatencyMs: number | null;
+};
+
 
 interface OscillatorVoice {
   oscillator: OscillatorNode;
@@ -309,6 +322,9 @@ interface AudioRoute {
 
 export class AudioEngine {
   private context: AudioContext | null = null;
+  private requestedSampleRate: number | null = null;
+  private requestedOutputDeviceId: string | null = null;
+  private requestedLatencyMode: AudioLatencyMode = 'interactive';
   private master: GainNode | null = null;
   private audioOutL: GainNode | null = null;
   private audioOutR: GainNode | null = null;
@@ -374,6 +390,7 @@ export class AudioEngine {
 
   async start(): Promise<void> {
     const context = this.ensureContext();
+    await this.applyRequestedOutputDevice(context);
     await this.ensureVoiceRuntime();
     await this.ensureMatterRuntime();
     await this.ensureResonatorRuntime();
@@ -395,6 +412,56 @@ export class AudioEngine {
     if (!this.context) return;
     this.stopTestTone();
     if (this.context.state === 'running') await this.context.suspend();
+    this.emit();
+  }
+
+  setPreferredAudioConfiguration(options: { sampleRate: number | null; outputDeviceId: string | null; latencyMode?: AudioLatencyMode }): void {
+    if (this.context) return;
+    this.requestedSampleRate = options.sampleRate;
+    this.requestedOutputDeviceId = options.outputDeviceId;
+    this.requestedLatencyMode = options.latencyMode ?? this.requestedLatencyMode;
+  }
+
+  getAudioConfiguration(): AudioEngineConfiguration {
+    const context = this.context;
+    const outputLatency = context && 'outputLatency' in context
+      ? Number((context as AudioContext & { outputLatency?: number }).outputLatency ?? NaN)
+      : NaN;
+    return {
+      requestedSampleRate: this.requestedSampleRate,
+      requestedOutputDeviceId: this.requestedOutputDeviceId,
+      requestedLatencyMode: this.requestedLatencyMode,
+      effectiveSampleRate: context?.sampleRate ?? null,
+      baseLatencyMs: context ? context.baseLatency * 1000 : null,
+      outputLatencyMs: Number.isFinite(outputLatency) ? outputLatency * 1000 : null,
+    };
+  }
+
+  async listOutputDevices(): Promise<AudioOutputDevice[]> {
+    if (!navigator.mediaDevices?.enumerateDevices) return [];
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    return devices
+      .filter((device) => device.kind === 'audiooutput')
+      .map((device, index) => ({
+        deviceId: device.deviceId,
+        label: device.label || `Audio output ${index + 1}`,
+      }));
+  }
+
+  supportsOutputDeviceSelection(): boolean {
+    if (typeof AudioContext === 'undefined') return false;
+    return 'setSinkId' in AudioContext.prototype;
+  }
+
+  async restartAudioConfiguration(options: { sampleRate: number | null; outputDeviceId: string | null; latencyMode?: AudioLatencyMode }): Promise<void> {
+    const wasRunning = this.context?.state === 'running';
+    this.requestedSampleRate = options.sampleRate;
+    this.requestedOutputDeviceId = options.outputDeviceId;
+    this.requestedLatencyMode = options.latencyMode ?? this.requestedLatencyMode;
+    await this.disposeAudioContext();
+    const context = this.ensureContext();
+    await this.applyRequestedOutputDevice(context);
+    if (wasRunning && context.state !== 'running') await context.resume();
     this.emit();
   }
 
@@ -2176,6 +2243,55 @@ export class AudioEngine {
     this.voiceWorkletLoaded = true;
   }
 
+  private async applyRequestedOutputDevice(context: AudioContext): Promise<void> {
+    if (!this.requestedOutputDeviceId) return;
+    const selectable = context as AudioContext & { setSinkId?: (sinkId: string) => Promise<void> };
+    if (typeof selectable.setSinkId !== 'function') return;
+    await selectable.setSinkId(this.requestedOutputDeviceId);
+  }
+
+  private async disposeAudioContext(): Promise<void> {
+    const context = this.context;
+    if (!context) return;
+
+    this.stopTestTone();
+    for (const key of [...this.routes.keys()]) this.removeRoute(key);
+    for (const name of [...this.clocks.keys()]) this.removeClock(name);
+    for (const name of [...this.filters.keys()]) this.removeFilter(name);
+    for (const name of [...this.skies.keys()]) this.removeSky(name);
+    for (const name of [...this.mists.keys()]) this.removeMist(name);
+    for (const name of [...this.swells.keys()]) this.removeSwell(name);
+    for (const name of [...this.resonators.keys()]) this.removeResonator(name);
+    for (const name of [...this.matters.keys()]) this.removeMatter(name);
+    for (const name of [...this.voices.keys()]) this.removeVoice(name);
+    for (const name of [...this.oscillators.keys()]) this.removeOscillator(name);
+    for (const name of [...this.gains.keys()]) this.removeGain(name);
+    for (const signal of [...this.views.keys()]) this.removeView(signal);
+    for (const monitor of this.controlMonitors.values()) { try { monitor.disconnect(); } catch {} }
+    this.controlMonitors.clear();
+
+    for (const node of [this.audioOutL, this.audioOutR, this.audioMerger, this.master, this.hardwareGain]) {
+      try { node?.disconnect(); } catch {}
+    }
+    this.audioOutL = null;
+    this.audioOutR = null;
+    this.audioMerger = null;
+    this.master = null;
+    this.hardwareGain = null;
+    this.context = null;
+    this.pendingProgram = null;
+    this.voiceWorkletLoaded = false;
+    this.matterWorkletLoaded = false;
+    this.resonatorWorkletLoaded = false;
+    this.swellWorkletLoaded = false;
+    this.mistWorkletLoaded = false;
+    this.skyWorkletLoaded = false;
+    this.daisyFiltersWorkletLoaded = false;
+    this.clockWorkletLoaded = false;
+    this.slowScopeHistory.clear();
+    if (context.state !== 'closed') await context.close();
+  }
+
   private ensureContext(): AudioContext {
     if (
       this.context &&
@@ -2186,7 +2302,10 @@ export class AudioEngine {
       this.hardwareGain
     ) return this.context;
 
-    const context = new AudioContext({ latencyHint: 'interactive' });
+    const context = new AudioContext({
+      latencyHint: this.requestedLatencyMode,
+      ...(this.requestedSampleRate ? { sampleRate: this.requestedSampleRate } : {}),
+    });
 
     // Logical stereo main bus. L/R stay independent until the final merger.
     const audioOutL = context.createGain();
