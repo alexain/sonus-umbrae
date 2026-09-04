@@ -304,6 +304,7 @@ interface ClockSource {
   jitter: number;
   drift: number;
   lastTriggerTime: number | null;
+  lastPeriodMs: number | null;
   triggerCount: number;
   visualEvents: TriggerVisualEvent[];
 }
@@ -1790,6 +1791,18 @@ export class AudioEngine {
     return { bpm: this.masterClockBpm, running: this.clockTransportRunning && this.masterClockEnabled && this.masterClockBpm > 0 };
   }
 
+  getClockTiming(name = 'Clock'): { beatDurationMs: number; running: boolean } {
+    const clock = this.clocks.get(name);
+    const rate = clock?.rate ?? (name === 'Clock' ? 1 : 0);
+    const enabled = clock?.enabled ?? (name === 'Clock' ? this.masterClockEnabled : false);
+    const effectiveBpm = this.masterClockBpm * rate;
+    const nominal = effectiveBpm > 0 ? 60000 / effectiveBpm : Infinity;
+    return {
+      beatDurationMs: clock?.lastPeriodMs && clock.lastPeriodMs > 0 ? clock.lastPeriodMs : nominal,
+      running: this.clockTransportRunning && this.masterClockEnabled && enabled && effectiveBpm > 0,
+    };
+  }
+
   getTriggerViewEvents(signal: string): Array<{ progress: number; age: number }> {
     const name = signal === 'Clock.out' ? 'Clock' : signal.match(/^([A-Za-z_]\w*)\.out$/)?.[1];
     if (!name || !this.context) return [];
@@ -1818,7 +1831,7 @@ export class AudioEngine {
         outputChannelCount: [1],
         processorOptions: { bpm: this.masterClockBpm, rate, jitter, drift },
       });
-      clock = { enabled, node, rate, jitter, drift, lastTriggerTime: null, triggerCount: 0, visualEvents: [] };
+      clock = { enabled, node, rate, jitter, drift, lastTriggerTime: null, lastPeriodMs: null, triggerCount: 0, visualEvents: [] };
       node.port.onmessage = (event) => {
         const message = event.data;
         if (!message || message.type !== 'trigger' || !Number.isFinite(message.frame)) return;
@@ -1831,6 +1844,7 @@ export class AudioEngine {
         const periodAtEmission = Number.isFinite(message.periodSamples) && message.periodSamples > 0
           ? message.periodSamples / this.context.sampleRate
           : (this.masterClockBpm * current.rate > 0 ? 60 / (this.masterClockBpm * current.rate) : 0);
+        current.lastPeriodMs = periodAtEmission > 0 ? periodAtEmission * 1000 : null;
         if (periodAtEmission > 0) {
           current.visualEvents.push({ emittedAt, travelDuration: Math.max(0.05, periodAtEmission * 4) });
           if (current.visualEvents.length > 128) current.visualEvents.splice(0, current.visualEvents.length - 128);

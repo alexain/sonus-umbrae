@@ -46,6 +46,9 @@ const RESERVED_IDENTIFIERS = new Set([
   'cycle',
   'from',
   'with',
+  'on',
+  'envelope',
+  'type',
   'walk',
   'chaos',
   'seed',
@@ -410,6 +413,32 @@ interface LanguageFxModulationDefinition {
 }
 
 
+
+type LanguageEnvelopeCurve = 'lin' | 'log';
+type LanguageEnvelopeUnit = 'ms' | 'sec' | 'beat';
+type LanguageEnvelopeStage = { amount: number; unit: LanguageEnvelopeUnit; curve: LanguageEnvelopeCurve };
+type LanguageEnvelopeSpec = {
+  delay: LanguageEnvelopeStage | null;
+  attack: LanguageEnvelopeStage | null;
+  hold: LanguageEnvelopeStage | null;
+  decay: LanguageEnvelopeStage | null;
+  sustain: number | null;
+  release: LanguageEnvelopeStage | null;
+  range: [number, number];
+};
+type LanguageEnvelopeDefinition = {
+  ownerKind: 'voice' | 'fx' | 'filter';
+  owner: string;
+  parameter: string;
+  spec: LanguageEnvelopeSpec;
+  line: number;
+  interval: number;
+  unit: 'ms' | 'sec' | 'beat';
+  chance: number;
+  drift: boolean;
+  loose: boolean;
+  clockSource: string;
+};
 
 type LanguageGenerativeMode = 'wander' | 'trend' | 'scatter' | 'flutter';
 
@@ -816,6 +845,7 @@ export class SonusRuntime {
     const languageGenerativeCycles: LanguageGenerativeCycleDefinition[] = [];
     const languageInlinePianos: LanguageInlinePianoDefinition[] = [];
     const languageInlineScalars: LanguageInlineScalarDefinition[] = [];
+    const languageEnvelopes: LanguageEnvelopeDefinition[] = [];
     const languageFilterSequences: LanguageFilterSequenceDefinition[] = [];
     const languageObjectEvery = new Map<string, LanguageObjectEveryDefinition>();
     const languageDriveEvery = new Map<string, LanguageObjectEveryDefinition>();
@@ -861,6 +891,12 @@ export class SonusRuntime {
       const inlineScalar = parseLanguageInlineScalarDirective(line);
       if (inlineScalar) {
         languageInlineScalars.push(inlineScalar);
+        continue;
+      }
+
+      const envelope = parseLanguageEnvelopeDirective(line, lineNumber);
+      if (envelope) {
+        languageEnvelopes.push(envelope);
         continue;
       }
 
@@ -1442,7 +1478,7 @@ export class SonusRuntime {
     // source order. All module declarations already exist, so references between
     // modules are still independent from declaration order.
     for (const { source: line, line: lineNumber } of lines) {
-      if (parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageTuringModel(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageFxMetadata(line) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
+      if (parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageTuringModel(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageEnvelopeDirective(line, lineNumber) || parseLanguageFxMetadata(line) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
 
       const oscillatorDeclaration = parseOscillatorDeclaration(line);
       if (oscillatorDeclaration) {
@@ -1503,7 +1539,7 @@ export class SonusRuntime {
       const setterAssignment = line.match(/^([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*)\.(freq|note|level|model|harmo|timbre|morph|bpm)\(\s*(.+)\s*\)$/);
       if (setterAssignment) {
         const [, variableName, objectName, parameter, rawValue] = setterAssignment;
-        const reservationError = identifierReservationError(variableName);
+        const reservationError = variableName.startsWith('__set_') ? null : identifierReservationError(variableName);
         if (reservationError) {
           diagnostics.push({ line: lineNumber, message: reservationError });
           continue;
@@ -1615,7 +1651,7 @@ export class SonusRuntime {
       const scalarAssignment = line.match(/^([A-Za-z_]\w*)\s*=\s*(.+)$/);
       if (scalarAssignment) {
         const [, name, expression] = scalarAssignment;
-        const reservationError = identifierReservationError(name);
+        const reservationError = name.startsWith('__set_') ? null : identifierReservationError(name);
         if (reservationError) {
           diagnostics.push({ line: lineNumber, message: reservationError });
           continue;
@@ -2928,9 +2964,118 @@ export class SonusRuntime {
     if (applyAudio) {
       this.stopSchedulers(hotReload);
       this.audio.applyProgram(program);
+
+    const envelopeTriggers = new Map<string, Array<() => void>>();
+    const applyEnvelopeValue = (definition: LanguageEnvelopeDefinition, value: number): void => {
+      const [min, max] = definition.spec.range;
+      const checked = Math.max(min, Math.min(max, value));
+      if (definition.ownerKind === 'voice') {
+        const parameter = definition.parameter as VoiceParameterName;
+        const voice = voices.get(definition.owner);
+        if (!voice || !(parameter in voice)) return;
+        (voice as unknown as Record<string, unknown>)[parameter] = checked;
+        this.audio.setVoiceParameter(definition.owner, parameter, checked);
+      } else if (definition.ownerKind === 'fx') {
+        const parameter = definition.parameter as LanguageFxParameter;
+        const fx = mists.get(definition.owner);
+        if (!fx) return;
+        (fx as unknown as Record<string, unknown>)[parameter] = checked;
+        this.audio.setMistParameter(definition.owner, parameter, checked);
+      } else {
+        const filter = filters.get(definition.owner);
+        if (!filter) return;
+        if (definition.parameter === 'cutoff') {
+          const percent = Math.max(0, Math.min(100, checked));
+          filter.cutoffPercent = percent;
+          const cutoff = 20 * (1000 ** (percent / 100));
+          filter.cutoff = cutoff;
+          this.audio.setFilterCutoff(definition.owner, cutoff);
+        } else if (definition.parameter === 'resonance') {
+          filter.resonance = checked;
+          this.audio.setFilterResonance(definition.owner, checked);
+        } else if (definition.parameter === 'drive') {
+          filter.drive = checked;
+          this.audio.setFilterDrive(definition.owner, checked);
+        }
+      }
+      updateInlineScalar(definition.ownerKind, definition.owner, definition.parameter, checked);
+    };
+
+    for (const definition of languageEnvelopes) {
+      const spec = definition.spec;
+      const low = spec.range[0], high = spec.range[1];
+      const sustainValue = spec.sustain === null ? low : low + (high - low) * spec.sustain;
+      let active = false;
+      let stage = 0;
+      let stageElapsed = 0;
+      let stageStart = low;
+      let lastAt = performance.now();
+      const stages: Array<{ kind: string; time: LanguageEnvelopeStage | null; target: number }> = [];
+      if (spec.delay) stages.push({ kind: 'delay', time: spec.delay, target: low });
+      if (spec.attack) stages.push({ kind: 'attack', time: spec.attack, target: high });
+      if (spec.hold) stages.push({ kind: 'hold', time: spec.hold, target: high });
+      if (spec.decay) stages.push({ kind: 'decay', time: spec.decay, target: spec.sustain === null ? low : sustainValue });
+      if (spec.sustain !== null) stages.push({ kind: 'sustain', time: null, target: sustainValue });
+      else if (spec.release) stages.push({ kind: 'release', time: spec.release, target: low });
+
+      const trigger = (): void => {
+        if (definition.chance < 100 && random() * 100 >= definition.chance) return;
+        active = true; stage = 0; stageElapsed = 0; stageStart = low; lastAt = performance.now();
+        applyEnvelopeValue(definition, low);
+      };
+      const key = definition.ownerKind === 'voice' ? definition.owner : `${definition.ownerKind}:${definition.owner}`;
+      const list = envelopeTriggers.get(key) ?? [];
+      list.push(trigger); envelopeTriggers.set(key, list);
+
+      this.scheduler.addWallJob(`envelope-run:${definition.ownerKind}:${definition.owner}:${definition.parameter}:${definition.line}`, 10, () => {
+        if (!active || stages.length === 0) return;
+        const now = performance.now();
+        const deltaMs = Math.max(0, now - lastAt); lastAt = now;
+        const current = stages[stage];
+        if (!current) { active = false; applyEnvelopeValue(definition, low); return; }
+        if (current.kind === 'sustain') { applyEnvelopeValue(definition, current.target); return; }
+        const time = current.time!;
+        let deltaProgress = 0;
+        if (time.unit === 'beat') {
+          const timing = this.audio.getClockTiming(definition.clockSource);
+          if (!timing.running || !Number.isFinite(timing.beatDurationMs)) return;
+          deltaProgress = deltaMs / (timing.beatDurationMs * time.amount);
+        } else {
+          const durationMs = time.unit === 'sec' ? time.amount * 1000 : time.amount;
+          deltaProgress = durationMs > 0 ? deltaMs / durationMs : 1;
+        }
+        stageElapsed += deltaProgress;
+        const p = Math.max(0, Math.min(1, stageElapsed));
+        const curved = time.curve === 'log' ? Math.log1p(9 * p) / Math.log(10) : p;
+        const value = current.kind === 'delay' || current.kind === 'hold'
+          ? current.target
+          : stageStart + (current.target - stageStart) * curved;
+        applyEnvelopeValue(definition, value);
+        if (stageElapsed >= 1) {
+          applyEnvelopeValue(definition, current.target);
+          stageStart = current.target; stage += 1; stageElapsed = 0;
+          if (stage >= stages.length) active = false;
+        }
+      });
+
+      if (definition.interval > 0) {
+        if (definition.unit === 'beat') this.scheduler.addBeatJob(`envelope-trigger:${definition.ownerKind}:${definition.owner}:${definition.parameter}:${definition.line}`, definition.interval, trigger, definition.loose, definition.clockSource);
+        else {
+          const baseMs = definition.unit === 'sec' ? definition.interval * 1000 : definition.interval;
+          this.scheduler.addWallJob(`envelope-trigger:${definition.ownerKind}:${definition.owner}:${definition.parameter}:${definition.line}`, baseMs, trigger);
+        }
+      }
+    }
+
+    const triggerVoiceEvent = (name: string): void => {
+      for (const trigger of envelopeTriggers.get(name) ?? []) trigger();
+      const voice = voices.get(name);
+      if (voice && (voice.lpg || voice.engine === 'resonator' || (voice.engine === 'matter' && !languageDriveEvery.has(name)))) this.audio.triggerVoice(name);
+    };
+
     if (!hotReload) {
       for (const [name, voice] of voices) {
-        if (voice.lpg || voice.engine === 'resonator' || (voice.engine === 'matter' && !languageDriveEvery.has(name))) this.audio.triggerVoice(name);
+        triggerVoiceEvent(name);
       }
     }
 
@@ -3506,7 +3651,7 @@ export class SonusRuntime {
         voice.frequency = frequency;
         this.audio.setVoiceParameter(name, 'freq', frequency);
         updateInlinePiano('voice', name, frequency);
-        if (voice.lpg || voice.engine === 'resonator' || (voice.engine === 'matter' && !languageDriveEvery.has(name))) this.audio.triggerVoice(name);
+        triggerVoiceEvent(name);
 
         const retrig = sequence
           ? sequenceFavorForValue(frequency, sequence.favor, 'frequency')
@@ -3518,7 +3663,7 @@ export class SonusRuntime {
             ? Math.max(1, 60000 / Math.max(1, this.audio.getClockStatus().bpm) * cycle.amount)
             : cycle.unit === 'sec' ? cycle.amount * 1000 : cycle.amount;
           for (let retrigIndex = 1; retrigIndex < count; retrigIndex += 1) {
-            window.setTimeout(() => this.audio.triggerVoice(name), stepMs * retrigIndex / count);
+            window.setTimeout(() => triggerVoiceEvent(name), stepMs * retrigIndex / count);
           }
         }
       };
@@ -4063,6 +4208,32 @@ function parseLanguageMasterClockDirective(line: string, lineNumber: number): La
     timingDrift: Number(match[6]),
     disabled: match[7] === 'true',
     line: lineNumber,
+  };
+}
+
+function parseLanguageEnvelopeDirective(line: string, lineNumber: number): LanguageEnvelopeDefinition | null {
+  const match = line.match(/^__envelopeparam\("(voice|fx|filter)","([A-Za-z_]\w*)","([A-Za-z_]\w*)","((?:[^"\\]|\\.)*)",(\d+),(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/);
+  if (!match) return null;
+  let raw: string;
+  let spec: LanguageEnvelopeSpec;
+  try {
+    raw = JSON.parse(`"${match[4]}"`) as string;
+    spec = JSON.parse(raw) as LanguageEnvelopeSpec;
+  } catch {
+    return null;
+  }
+  return {
+    ownerKind: match[1] as LanguageEnvelopeDefinition['ownerKind'],
+    owner: match[2],
+    parameter: match[3],
+    spec,
+    line: Number(match[5]) || lineNumber,
+    interval: Number(match[6]),
+    unit: match[7] as LanguageEnvelopeDefinition['unit'],
+    chance: Number(match[8]),
+    drift: match[9] === 'true',
+    loose: match[10] === 'true',
+    clockSource: match[11],
   };
 }
 

@@ -108,6 +108,10 @@ Scale:
 SET harmony: C minor
 ```
 
+`SET` declarations can be local to `VOICE`, `FX`, or `FILTER` scopes. A local
+name shadows a global name only inside its owning object. This is useful for
+notes, scalar values, timing values, and structured envelopes.
+
 A typed time variable can be reused by `every`:
 
 ```text
@@ -201,19 +205,34 @@ Only that clock stops emitting ticks; the master and other clocks continue.
 There is deliberately no `_SET` form because `SET` can hold non-clock typed
 values and disabling it would invalidate unrelated dependencies.
 
+Named clocks may also be local to an object when several parameters need to
+share the same derived clock without publishing it globally:
+
+```text
+VOICE lead:
+    CLOCK clockvoice RATE /2 WITH JITTER 5
+    TIMBRE 60 EVERY 1 beat ON CLOCK clockvoice
+    MORPH 40 EVERY 2 beat ON CLOCK clockvoice
+```
+
+The local clock is the same kind of master-derived clock as an anonymous
+`ON CLOCK /2` expression; naming it simply makes the same timeline reusable
+inside that object. `CLOCK SET` remains global and is not valid inside an
+object.
+
 Use named clocks from beat-based `EVERY` clauses:
 
 ```text
 VOICE bass:
     SOUND macro.analog
-    NOTE [C2 Eb2 G2] WITH WALK EVERY 1 beat WITH CLOCK slow
+    NOTE [C2 Eb2 G2] WITH WALK EVERY 1 beat on CLOCK slow
 ```
 
 or use an anonymous master-derived rate directly when no persistent clock
 object is needed:
 
 ```text
-MORPH 50 EVERY 2 beats WITH CLOCK /4
+MORPH 50 EVERY 2 beats on CLOCK /4
 ```
 
 The `EVERY` count is measured in ticks of the selected clock.
@@ -291,53 +310,94 @@ processor without changing its declaration category.
 
 #### Envelope values
 
-Envelope shapes are typed values. Structured envelope lists use commas because
-time values consist of a number plus a unit:
+`ENVELOPE` is a structured, lightweight value for shaping compatible scalar
+parameters. The public language does not require the user to choose between
+AD/AR/ASR/ADSR names: the shape is inferred from the properties that are
+present.
+
+Inline envelopes stay on the parameter line and use comma-separated named
+properties:
 
 ```text
-AD      [250 ms, 1.2 sec]
-ADR     [4 sec, 300 ms, 1.2 sec]
-ASR     [800 ms, 75, 2 sec]
-ADSR    [20 ms, 300 ms, 70, 1.5 sec]
-DAHDSR  [100 ms, 400 ms, 250 ms, 800 ms, 65, 2 sec]
+TIMBRE ENVELOPE [att log 20 ms, dec 1/2 beat, sus 60, rel 2 beat, range 30 to 90]
 ```
 
-The arity and value types are strict. Time stages require `ms` or `sec`; sustain
-values use `0..100`. For example an ADSR always requires exactly four values and
-its third value must be the sustain level.
-
-Envelopes can be stored in `SET` and consumed only by compatible parameters:
+The canonical property names and their compact aliases are:
 
 ```text
-SET env1: ADR [4 sec, 300 ms, 1.2 sec]
-
-VOICE body:
-    sound matter
-    strike 70
-    drive from env1
+ATTACK   / ATT
+DECAY    / DEC
+SUSTAIN  / SUS
+RELEASE  / REL
+DELAY    / DEL
+HOLD
+RANGE
 ```
 
-`DRIVE` controls the common Elements excitation/performance signal. Without an
-explicit `EVERY`, it is retriggered by the VOICE note event (including each new
-note produced by a note/scale/SEQ source). Retriggering starts from the current
-envelope level rather than forcing a discontinuity to zero.
+`ATTACK`, `DECAY`, and `RELEASE` are linear by default. `LOG` may be written
+before their duration to select a logarithmic curve; `LIN` is accepted when an
+explicit linear label is preferred. `DELAY` and `HOLD` are durations and do not
+have a curve. `SUSTAIN` is a level in `0..100`. `RANGE min TO max` maps the
+normalized envelope to the target parameter domain and defaults to `0 TO 100`.
 
-`DRIVE` may instead use the normal global timing grammar:
+Time stages accept `ms`, `sec`, or `beat`, including fractional beat values:
 
 ```text
-DRIVE AD [1 sec, 1 sec] EVERY 2 beat
-DRIVE FROM env1 EVERY 4 beat WITH CHANCE 70
-DRIVE FROM env1 EVERY 2 beat WITH CLOCK pulse, LOOSE
+TIMBRE ENVELOPE [att 20 ms, hold 1/4 beat, rel log 2 beat]
 ```
 
-This does not create a local scheduler. The trigger is registered as another job
-on the single runtime scheduler used by all `EVERY` events. When `DRIVE` has its
-own `EVERY`, note changes update pitch but do not also retrigger DRIVE.
+Beat-based stages inherit the musical clock of the parameter. Therefore:
 
-The envelope itself runs inside the Matter AudioWorklet at DSP rate. Its current
-level drives Elements performance strength continuously; the gate stays active
-while the envelope has non-zero energy, allowing bow/blow excitation to evolve
-through the envelope while strike responds to the gate edge.
+```text
+TIMBRE ENVELOPE [att 1/2 beat, rel 1 beat] EVERY 4 beat ON CLOCK human
+```
+
+is triggered every four `human` ticks and its beat-based envelope stages are
+measured against that same named clock. Without `ON CLOCK`, the master clock is
+used. `ms`/`sec` stages remain wall-clock based.
+
+Reusable envelopes use the multiline typed `SET` form:
+
+```text
+SET motion TYPE ENVELOPE:
+    ATTACK LOG 20 ms
+    DECAY 1/2 beat
+    SUSTAIN 60
+    RELEASE 2 beat
+    RANGE 30 TO 90
+```
+
+and can then be used as the value of a compatible parameter:
+
+```text
+VOICE lead:
+    SOUND macro.fm
+    TIMBRE motion
+```
+
+`SET` can also be declared inside an object. Local values use lexical scope and
+do not leak into other objects:
+
+```text
+VOICE lead:
+    SET notes: [C3 Eb3 G3]
+    SET motion TYPE ENVELOPE:
+        ATTACK 20 ms
+        RELEASE 1 beat
+
+    NOTE notes EVERY 1 beat
+    TIMBRE motion
+```
+
+An envelope without `SUSTAIN` is one-shot. A sustained envelope is gated and,
+in the current implementation, follows the containing VOICE trigger/gate rather
+than declaring its own independent `EVERY`. This keeps release semantics
+explicit and avoids inventing a hidden gate duration.
+
+Matter `DRIVE` accepts the new `ENVELOPE` spelling but currently keeps the
+existing DSP-rate backend restrictions: linear, full-range `ms`/`sec` shapes
+without `DELAY`/`HOLD`. Generic scalar parameter envelopes run through the host
+control-rate envelope runtime.
 
 ### LPG
 
@@ -424,17 +484,17 @@ scale C minor with walk every 2 beats
 Timing modifiers belong to the `every` clause:
 
 ```text
-morph rnd(20,80) every 3 sec with drift
+morph rnd(20,80) every 3 sec on drift
 ```
 
 ```text
-scale C minor with random every 2 beats with loose, chance 80
+scale C minor with random every 2 beats on loose, chance 80
 ```
 
 The canonical order is:
 
 ```text
-property value [with property modifiers] every time [with timing modifiers]
+property value [with property modifiers] every time [on timing modifiers]
 ```
 
 `every` stays at the end of the property expression.
@@ -1145,12 +1205,12 @@ CLOCK slow RATE /2
 
 VOICE lead:
     sound macro.fm
-    scale C minor with range C3 C5, walk 2 every 2 beats with clock slow
-    morph 50 with trend 20 every 1 beat with clock /4
+    scale C minor with range C3 C5, walk 2 every 2 beats on clock slow
+    morph 50 with trend 20 every 1 beat on clock /4
 ```
 
 The generator determines **how** the value changes. `every` determines **when**
-it changes. `with clock ...` determines which clock provides those beat steps.
+it changes. `ON CLOCK ...` determines which clock provides those beat steps.
 
 
 
@@ -1235,8 +1295,8 @@ Turing register itself determines the generated selection.
 and probability modifiers:
 
 ```text
-every 1 beat with clock /4
-every 2 beats with coin
+every 1 beat on clock /4
+every 2 beats on coin
 ```
 
 A SEQ source controls its own generation, so consumers do not add list

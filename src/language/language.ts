@@ -70,29 +70,32 @@ export function parseProgramCapabilities(source: string): ProgramCapabilitySet {
 type SourceKind = 'voice' | 'note' | 'freq' | 'time' | 'clock' | 'trigger' | 'scalar' | 'scale' | 'seq' | 'envelope';
 
 type SourceDefinition =
-  | { kind: 'scalar' }
-  | { kind: 'time'; amount: number; unit: 'ms' | 'sec' | 'beat'; display: string }
+  | { kind: 'scalar'; internalName?: string }
+  | { kind: 'time'; amount: number; unit: 'ms' | 'sec' | 'beat'; display: string; internalName?: string }
   | { kind: 'clock'; internalName: string; rateLabel: string; display: string }
-  | { kind: 'freq'; values: number[]; display: string }
-  | { kind: 'note'; values: number[]; display: string; favor: SequenceFavorEntry[] }
-  | { kind: 'scale'; values: number[]; display: string }
-  | { kind: 'seq'; values: number[]; display: string }
-  | { kind: 'envelope'; spec: EnvelopeSpec; display: string };
+  | { kind: 'freq'; values: number[]; display: string; internalName?: string }
+  | { kind: 'note'; values: number[]; display: string; favor: SequenceFavorEntry[]; internalName?: string }
+  | { kind: 'scale'; values: number[]; display: string; internalName?: string }
+  | { kind: 'seq'; values: number[]; display: string; internalName?: string }
+  | { kind: 'envelope'; spec: EnvelopeSpec; display: string; internalName?: string };
 
 
-type EnvelopeKind = 'AD' | 'ADR' | 'ASR' | 'ADSR' | 'DAHDSR';
-type EnvelopeSpec = {
-  kind: EnvelopeKind;
-  values: number[]; // times are stored in seconds; sustain is normalized 0..1
-  display: string;
+type EnvelopeCurve = 'lin' | 'log';
+type EnvelopeTimeUnit = 'ms' | 'sec' | 'beat';
+type EnvelopeTimeStage = {
+  amount: number;
+  unit: EnvelopeTimeUnit;
+  curve: EnvelopeCurve;
 };
-
-const ENVELOPE_LAYOUTS: Record<EnvelopeKind, readonly ('time' | 'level')[]> = {
-  AD: ['time', 'time'],
-  ADR: ['time', 'time', 'time'],
-  ASR: ['time', 'level', 'time'],
-  ADSR: ['time', 'time', 'level', 'time'],
-  DAHDSR: ['time', 'time', 'time', 'time', 'level', 'time'],
+type EnvelopeSpec = {
+  delay: EnvelopeTimeStage | null;
+  attack: EnvelopeTimeStage | null;
+  hold: EnvelopeTimeStage | null;
+  decay: EnvelopeTimeStage | null;
+  sustain: number | null; // normalized 0..1
+  release: EnvelopeTimeStage | null;
+  range: [number, number];
+  display: string;
 };
 
 type VoiceState = {
@@ -862,6 +865,21 @@ function claimPitchProperty(
   owner.pitchProperty = property;
 }
 
+function scalarExpressionFromSource(value: string, sourceDefinitions: Map<string, SourceDefinition>): string {
+  if (!IDENTIFIER.test(value)) return value;
+  const definition = sourceDefinitions.get(value);
+  if (definition?.kind !== 'scalar') return value;
+  return definition.internalName ?? value;
+}
+
+function envelopeFromValue(value: string, line: number, sourceDefinitions: Map<string, SourceDefinition>): EnvelopeSpec | null {
+  const inline = parseEnvelopeSpec(value, line);
+  if (inline) return inline;
+  if (!IDENTIFIER.test(value)) return null;
+  const definition = sourceDefinitions.get(value);
+  return definition?.kind === 'envelope' ? definition.spec : null;
+}
+
 function compileVoiceProperty(
   voice: VoiceState,
   property: string,
@@ -873,7 +891,16 @@ function compileVoiceProperty(
   live = false,
 ): string {
   const key = property.toLowerCase();
-  const value = rawValue.trim();
+  let value = rawValue.trim();
+  if (key === 'note' || key === 'freq' || key === 'scale' || key === 'cycle') {
+    const direct = splitEveryClause(value);
+    const definition = IDENTIFIER.test(direct.base) ? sourceDefinitions.get(direct.base) : undefined;
+    const compatible = key === 'note' ? definition?.kind === 'note' || definition?.kind === 'scale' || definition?.kind === 'seq'
+      : key === 'freq' ? definition?.kind === 'freq'
+      : key === 'scale' ? definition?.kind === 'scale'
+      : definition?.kind === 'time';
+    if (compatible) value = `from ${direct.base}${direct.every ? ` every ${direct.every}` : ''}`;
+  }
   const soundParameter = voice.soundId ? SOUND_ENGINE_REGISTRY[voice.soundId]?.parameters[key] : undefined;
   if (SOUND_PARAMETER_NAMES.has(key)) {
     if (!voice.soundId) {
@@ -881,6 +908,15 @@ function compileVoiceProperty(
     }
     if (!soundParameter) {
       throw new LanguageError([{ line, message: `${key} is not available for ${voice.soundId}` }]);
+    }
+  }
+
+  if (soundParameter) {
+    const envelopeSplit = splitEveryClause(value);
+    const envelope = envelopeFromValue(envelopeSplit.base, line, sourceDefinitions);
+    if (envelope) {
+      const timing = envelopeSplit.every ? parseEverySpec(envelopeSplit.every, line, sourceDefinitions) : null;
+      return envelopeParamDirective('voice', voice.name, key, envelope, line, timing);
     }
   }
 
@@ -974,18 +1010,9 @@ function compileVoiceProperty(
   if (key === 'drive') {
     if (voice.soundId !== 'matter') throw new LanguageError([{ line, message: 'drive is available only for sound matter' }]);
     const split = splitEveryClause(value);
-    let spec: EnvelopeSpec | null = null;
-    const from = split.base.match(/^from\s+([A-Za-z_][A-Za-z0-9_]*)$/i);
-    if (from) {
-      const definition = sourceDefinitions.get(from[1]);
-      if (!definition) throw new LanguageError([{ line, message: `unknown source '${from[1]}'` }]);
-      if (definition.kind !== 'envelope') throw new LanguageError([{ line, message: `source '${from[1]}' is ${definition.kind}, expected envelope source for drive` }]);
-      spec = definition.spec;
-    } else {
-      spec = parseEnvelopeSpec(split.base, line);
-      if (!spec) throw new LanguageError([{ line, message: 'drive expects AD/ADR/ASR/ADSR/DAHDSR [...] or FROM an envelope SET' }]);
-    }
-    const base = `${voice.name}.drive(${envelopeLiteral(spec)});`;
+    let spec: EnvelopeSpec | null = envelopeFromValue(split.base.replace(/^from\s+/i, ''), line, sourceDefinitions);
+    if (!spec) throw new LanguageError([{ line, message: 'drive expects ENVELOPE [...] or an ENVELOPE SET value' }]);
+    const base = `${voice.name}.drive(${envelopeLegacyLiteral(spec, line)});`;
     if (!split.every) return base;
     const timing = parseEverySpec(split.every, line, sourceDefinitions);
     const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
@@ -1011,7 +1038,7 @@ function compileVoiceProperty(
   if (soundParameter) {
     const split = splitEveryClause(value);
     const generative = parseGenerativeValue(split.base, line);
-    const expression = generative.base;
+    const expression = scalarExpressionFromSource(generative.base, sourceDefinitions);
     if (!expression) {
       throw new LanguageError([{ line, message: `${key} expects a numeric expression` }]);
     }
@@ -1174,12 +1201,37 @@ function splitEveryClause(value: string): { base: string; every: string | null }
   return { base: match[1].trim(), every: match[2].trim() };
 }
 
+function splitEveryModifiers(value: string): { base: string; modifiers: string[] } {
+  const match = value.match(/^(.*?)\s+(?:on|with)\s+(.+)$/i);
+  if (!match) return { base: value.trim(), modifiers: [] };
+  return {
+    base: match[1].trim(),
+    modifiers: match[2].split(',').map((item) => item.trim()).filter(Boolean),
+  };
+}
+
+function parsePositiveAmount(raw: string, line: number, label: string): number {
+  const fraction = raw.match(/^(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)$/);
+  if (fraction) {
+    const denominator = Number(fraction[2]);
+    if (!Number.isFinite(denominator) || denominator <= 0) {
+      throw new LanguageError([{ line, message: `${label} denominator must be greater than 0` }]);
+    }
+    const value = Number(fraction[1]) / denominator;
+    if (!Number.isFinite(value) || value <= 0) throw new LanguageError([{ line, message: `${label} must be greater than 0` }]);
+    return value;
+  }
+  const value = numberValue(raw, line, label);
+  if (value <= 0) throw new LanguageError([{ line, message: `${label} must be greater than 0` }]);
+  return value;
+}
+
 function parseEverySpec(
   raw: string,
   line: number,
   sourceDefinitions: Map<string, SourceDefinition>,
 ): EverySpec {
-  const { base, modifiers } = splitWith(raw.trim());
+  const { base, modifiers } = splitEveryModifiers(raw.trim());
 
   let amount: number;
   let unit: 'ms' | 'sec' | 'beat';
@@ -1216,7 +1268,7 @@ function parseEverySpec(
       continue;
     }
     if (unit !== 'beat') {
-      throw new LanguageError([{ line, message: 'with clock is available only for beat-based every clauses' }]);
+      throw new LanguageError([{ line, message: 'ON CLOCK is available only for beat-based EVERY clauses' }]);
     }
     const clockValue = clock[1].trim();
     const rate = clockValue.match(/^([/*])\s*(\d+(?:\.\d+)?)$/);
@@ -1316,32 +1368,139 @@ function compileSeqProperty(
   throw new LanguageError([{ line, message: `unknown SEQ property '${property}'` }]);
 }
 
-function parseEnvelopeSpec(value: string, line: number): EnvelopeSpec | null {
-  const match = value.trim().match(/^(AD|ADR|ASR|ADSR|DAHDSR)\s*\[([^\]]*)\]$/i);
-  if (!match) return null;
-  const kind = match[1].toUpperCase() as EnvelopeKind;
-  const layout = ENVELOPE_LAYOUTS[kind];
-  const parts = match[2].split(',').map((item) => item.trim()).filter(Boolean);
-  if (parts.length !== layout.length) {
-    throw new LanguageError([{ line, message: `${kind} expects exactly ${layout.length} values, got ${parts.length}` }]);
+function parseEnvelopeTimeStage(raw: string, line: number, label: string, allowCurve = true): EnvelopeTimeStage {
+  const match = raw.trim().match(/^(?:(lin|log)\s+)?((?:\d+(?:\.\d+)?)|(?:\d+(?:\.\d+)?\s*\/\s*\d+(?:\.\d+)?))\s*(ms|sec|secs|second|seconds|beat|beats)$/i);
+  if (!match) {
+    throw new LanguageError([{ line, message: `${label} expects [LIN|LOG] <time> using ms, sec, or beat` }]);
   }
-  const values = parts.map((part, index) => {
-    if (layout[index] === 'level') {
-      const level = numberValue(part, line, `${kind} sustain`);
-      if (level < 0 || level > 100) throw new LanguageError([{ line, message: `${kind} sustain expects 0..100` }]);
-      return level / 100;
+  if (!allowCurve && match[1]) {
+    throw new LanguageError([{ line, message: `${label} does not use a curve` }]);
+  }
+  const amount = parsePositiveAmount(match[2].replace(/\s+/g, ''), line, label);
+  return {
+    amount,
+    unit: normalizeCycleUnit(match[3], line),
+    curve: (match[1]?.toLowerCase() ?? 'lin') as EnvelopeCurve,
+  };
+}
+
+function parseEnvelopeSpec(value: string, line: number): EnvelopeSpec | null {
+  const match = value.trim().match(/^ENVELOPE\s*\[([^\]]*)\]$/i);
+  if (!match) return null;
+  const parts = match[1].split(',').map((item) => item.trim()).filter(Boolean);
+  if (parts.length === 0) throw new LanguageError([{ line, message: 'ENVELOPE cannot be empty' }]);
+
+  const spec: EnvelopeSpec = {
+    delay: null,
+    attack: null,
+    hold: null,
+    decay: null,
+    sustain: null,
+    release: null,
+    range: [0, 100],
+    display: '',
+  };
+  const seen = new Set<string>();
+
+  for (const part of parts) {
+    const property = part.match(/^([A-Za-z]+)\s+(.+)$/);
+    if (!property) throw new LanguageError([{ line, message: `invalid ENVELOPE property '${part}'` }]);
+    const rawKey = property[1].toLowerCase();
+    const key = ({ att: 'attack', dec: 'decay', sus: 'sustain', rel: 'release', del: 'delay' } as Record<string, string>)[rawKey] ?? rawKey;
+    if (!['delay', 'attack', 'hold', 'decay', 'sustain', 'release', 'range'].includes(key)) {
+      throw new LanguageError([{ line, message: `unknown ENVELOPE property '${property[1]}'` }]);
     }
-    const time = part.match(/^(\d+(?:\.\d+)?)\s*(ms|sec|secs|second|seconds)$/i);
-    if (!time) throw new LanguageError([{ line, message: `${kind} stage ${index + 1} expects a time with ms or sec` }]);
-    const amount = numberValue(time[1], line, `${kind} time`);
-    if (amount < 0) throw new LanguageError([{ line, message: `${kind} times cannot be negative` }]);
-    return /^ms$/i.test(time[2]) ? amount / 1000 : amount;
-  });
-  return { kind, values, display: `${kind} [${parts.join(', ')}]` };
+    if (seen.has(key)) throw new LanguageError([{ line, message: `ENVELOPE '${key}' can be declared only once` }]);
+    seen.add(key);
+    const raw = property[2].trim();
+
+    if (key === 'sustain') {
+      const level = numberValue(raw, line, 'ENVELOPE sustain');
+      if (level < 0 || level > 100) throw new LanguageError([{ line, message: 'ENVELOPE sustain expects 0..100' }]);
+      spec.sustain = level / 100;
+      continue;
+    }
+    if (key === 'range') {
+      const range = raw.match(/^(-?\d+(?:\.\d+)?)\s+to\s+(-?\d+(?:\.\d+)?)$/i);
+      if (!range) throw new LanguageError([{ line, message: 'ENVELOPE range expects <min> TO <max>' }]);
+      const min = numberValue(range[1], line, 'ENVELOPE range');
+      const max = numberValue(range[2], line, 'ENVELOPE range');
+      if (max < min) throw new LanguageError([{ line, message: 'ENVELOPE range expects min <= max' }]);
+      spec.range = [min, max];
+      continue;
+    }
+
+    const stage = parseEnvelopeTimeStage(raw, line, `ENVELOPE ${key}`, key === 'attack' || key === 'decay' || key === 'release');
+    (spec as unknown as Record<string, unknown>)[key] = stage;
+  }
+
+  if (!spec.attack && !spec.decay && !spec.release) {
+    throw new LanguageError([{ line, message: 'ENVELOPE requires at least ATTACK, DECAY, or RELEASE' }]);
+  }
+  if (spec.sustain !== null && !spec.release) {
+    throw new LanguageError([{ line, message: 'a sustained ENVELOPE requires RELEASE' }]);
+  }
+  spec.display = `ENVELOPE [${parts.join(', ')}]`;
+  return spec;
 }
 
 function envelopeLiteral(spec: EnvelopeSpec): string {
-  return JSON.stringify(JSON.stringify({ kind: spec.kind, values: spec.values }));
+  return JSON.stringify(JSON.stringify({
+    delay: spec.delay,
+    attack: spec.attack,
+    hold: spec.hold,
+    decay: spec.decay,
+    sustain: spec.sustain,
+    release: spec.release,
+    range: spec.range,
+  }));
+}
+
+function envelopeLegacyLiteral(spec: EnvelopeSpec, line: number): string {
+  const stages = [spec.delay, spec.attack, spec.hold, spec.decay, spec.release].filter(Boolean) as EnvelopeTimeStage[];
+  if (stages.some((stage) => stage.unit === 'beat')) {
+    throw new LanguageError([{ line, message: 'Matter DRIVE currently accepts ENVELOPE stages in ms/sec only' }]);
+  }
+  if (stages.some((stage) => stage.curve !== 'lin') || spec.range[0] !== 0 || spec.range[1] !== 100 || spec.delay || spec.hold) {
+    throw new LanguageError([{ line, message: 'Matter DRIVE currently uses linear full-range ENVELOPE without DELAY/HOLD' }]);
+  }
+  const seconds = (stage: EnvelopeTimeStage | null): number => !stage ? 0 : stage.unit === 'ms' ? stage.amount / 1000 : stage.amount;
+  let kind: string;
+  let values: number[];
+  if (spec.sustain !== null) {
+    if (spec.decay) { kind = 'ADSR'; values = [seconds(spec.attack), seconds(spec.decay), spec.sustain, seconds(spec.release)]; }
+    else { kind = 'ASR'; values = [seconds(spec.attack), spec.sustain, seconds(spec.release)]; }
+  } else if (spec.attack && spec.decay && !spec.release) {
+    kind = 'AD'; values = [seconds(spec.attack), seconds(spec.decay)];
+  } else if (spec.attack && spec.release && !spec.decay) {
+    // The legacy Matter backend has no AR descriptor; ASR with a full sustain
+    // level preserves the intended gated attack/release shape.
+    kind = 'ASR'; values = [seconds(spec.attack), 1, seconds(spec.release)];
+  } else {
+    throw new LanguageError([{ line, message: 'Matter DRIVE ENVELOPE currently supports AD, AR/ASR, or ADSR shapes' }]);
+  }
+  return JSON.stringify(JSON.stringify({ kind, values }));
+}
+
+function envelopeParamDirective(
+  ownerKind: 'voice' | 'fx' | 'filter',
+  owner: string,
+  parameter: string,
+  spec: EnvelopeSpec,
+  line: number,
+  timing: EverySpec | null,
+): string {
+  if (ownerKind !== 'voice' && !timing) {
+    throw new LanguageError([{ line, message: 'ENVELOPE on FILTER/FX requires EVERY because those objects have no implicit note trigger' }]);
+  }
+  if (spec.sustain !== null && timing) {
+    throw new LanguageError([{ line, message: 'a sustained ENVELOPE follows its VOICE gate and cannot currently declare its own EVERY' }]);
+  }
+  const serialized = envelopeLiteral(spec);
+  const base = `__envelopeparam(${JSON.stringify(ownerKind)},${JSON.stringify(owner)},${JSON.stringify(parameter)},${serialized},${line}`;
+  if (!timing) return `${base},0,"ms",100,false,false,"Clock");`;
+  const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+  return `${prefix}${base},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
 }
 
 function compileSet(
@@ -1351,6 +1510,7 @@ function compileSet(
   sourceDefinitions: Map<string, SourceDefinition>,
   scalarNames: Set<string>,
   voiceNames: Set<string>,
+  internalName?: string,
 ): string {
   const match = lineText.match(/^SET\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+)$/i);
   if (!match) {
@@ -1358,6 +1518,7 @@ function compileSet(
   }
 
   const name = match[1];
+  const runtimeName = internalName ?? name;
   if (voiceNames.has(name) || scalarNames.has(name)) {
     throw new LanguageError([{ line, message: `duplicate object or variable: ${name}` }]);
   }
@@ -1368,8 +1529,8 @@ function compileSet(
   if (envelope) {
     scalarNames.add(name);
     sourceKinds.set(name, 'envelope');
-    sourceDefinitions.set(name, { kind: 'envelope', spec: envelope, display: envelope.display });
-    return `${name} = ${JSON.stringify(envelope.display)};`;
+    sourceDefinitions.set(name, { kind: 'envelope', spec: envelope, display: envelope.display, internalName: runtimeName });
+    return `${runtimeName} = ${JSON.stringify(envelope.display)};`;
   }
 
   // CLOCK is a runtime object and must be declared with the CLOCK keyword, not SET.
@@ -1381,8 +1542,8 @@ function compileSet(
   if (scale) {
     scalarNames.add(name);
     sourceKinds.set(name, 'scale');
-    sourceDefinitions.set(name, { kind: 'scale', values: scale.values, display: scale.display });
-    return `${name} = ${JSON.stringify(scale.display)};`;
+    sourceDefinitions.set(name, { kind: 'scale', values: scale.values, display: scale.display, internalName: runtimeName });
+    return `${runtimeName} = ${JSON.stringify(scale.display)};`;
   }
 
   const noteList = body.match(/^\[([^\]]+)\]$/);
@@ -1395,8 +1556,8 @@ function compileSet(
         const favor = parsed.flatMap((item) => item.favor ? [item.favor] : []);
         scalarNames.add(name);
         sourceKinds.set(name, 'note');
-        sourceDefinitions.set(name, { kind: 'note', values, display: `[${items.join(' ')}]`, favor });
-        return `${name} = ${JSON.stringify(`[${items.join(' ')}]`)};`;
+        sourceDefinitions.set(name, { kind: 'note', values, display: `[${items.join(' ')}]`, favor, internalName: runtimeName });
+        return `${runtimeName} = ${JSON.stringify(`[${items.join(' ')}]`)};`;
       }
     }
   }
@@ -1410,8 +1571,8 @@ function compileSet(
     }
     scalarNames.add(name);
     sourceKinds.set(name, 'freq');
-    sourceDefinitions.set(name, { kind: 'freq', values, display: `[${items.join(' ')}] hz` });
-    return `${name} = ${JSON.stringify(`[${items.join(' ')}] hz`)};`;
+    sourceDefinitions.set(name, { kind: 'freq', values, display: `[${items.join(' ')}] hz`, internalName: runtimeName });
+    return `${runtimeName} = ${JSON.stringify(`[${items.join(' ')}] hz`)};`;
   }
 
   const note = body.match(/^([A-Ga-g][#b]?-?\d+)$/);
@@ -1421,8 +1582,8 @@ function compileSet(
     const frequency = midiToFrequency(midi);
     scalarNames.add(name);
     sourceKinds.set(name, 'note');
-    sourceDefinitions.set(name, { kind: 'note', values: [frequency], display: note[1], favor: [] });
-    return `${name} = ${JSON.stringify(note[1])};`;
+    sourceDefinitions.set(name, { kind: 'note', values: [frequency], display: note[1], favor: [], internalName: runtimeName });
+    return `${runtimeName} = ${JSON.stringify(note[1])};`;
   }
 
   const frequency = body.match(/^(\d+(?:\.\d+)?)\s+hz$/i);
@@ -1431,8 +1592,8 @@ function compileSet(
     if (value <= 0) throw new LanguageError([{ line, message: 'frequency must be greater than 0' }]);
     scalarNames.add(name);
     sourceKinds.set(name, 'freq');
-    sourceDefinitions.set(name, { kind: 'freq', values: [value], display: `${formatSourceNumber(value)} hz` });
-    return `${name} = ${value};`;
+    sourceDefinitions.set(name, { kind: 'freq', values: [value], display: `${formatSourceNumber(value)} hz`, internalName: runtimeName });
+    return `${runtimeName} = ${value};`;
   }
 
   const time = body.match(/^(\d+(?:\.\d+)?)\s+(ms|sec|secs|second|seconds|beat|beats)$/i);
@@ -1447,8 +1608,8 @@ function compileSet(
     const display = `${formatSourceNumber(amount)} ${unitDisplay}`;
     scalarNames.add(name);
     sourceKinds.set(name, 'time');
-    sourceDefinitions.set(name, { kind: 'time', amount, unit, display });
-    return `${name} = ${JSON.stringify(display)};`;
+    sourceDefinitions.set(name, { kind: 'time', amount, unit, display, internalName: runtimeName });
+    return `${runtimeName} = ${JSON.stringify(display)};`;
   }
 
   const cycleMatch = body.match(
@@ -1462,9 +1623,9 @@ function compileSet(
 
   scalarNames.add(name);
   sourceKinds.set(name, 'scalar');
-  sourceDefinitions.set(name, { kind: 'scalar' });
+  sourceDefinitions.set(name, { kind: 'scalar', internalName: runtimeName });
 
-  if (!cycleMatch) return `${name} = ${expression};`;
+  if (!cycleMatch) return `${runtimeName} = ${expression};`;
 
   const amount = numberValue(cycleMatch[2], line, 'cycle');
   if (amount <= 0) {
@@ -1482,7 +1643,7 @@ function compileSet(
     .filter(Boolean);
   const timing = parseTimingModifiers(modifiers, line, unit);
 
-  return `${name} = ${expression}; __setcycle(${JSON.stringify(name)},${amount},${JSON.stringify(unit)},${timing.chance},${timing.drift},${timing.loose});`;
+  return `${runtimeName} = ${expression}; __setcycle(${JSON.stringify(runtimeName)},${amount},${JSON.stringify(unit)},${timing.chance},${timing.drift},${timing.loose});`;
 }
 
 
@@ -1961,12 +2122,18 @@ function compileFxProperty(
   }
 
   const parameter = effectiveKey as FxParameter;
+  const envelopeSplit = splitEveryClause(value);
+  const envelope = envelopeFromValue(envelopeSplit.base, line, sourceDefinitions);
+  if (envelope) {
+    const timing = envelopeSplit.every ? parseEverySpec(envelopeSplit.every, line, sourceDefinitions) : null;
+    return envelopeParamDirective('fx', fx.name, parameter, envelope, line, timing);
+  }
   const modulation = /^from\s+/i.test(value) ? compileFxModulation(fx, parameter, value, line, modSources) : null;
   if (modulation) return modulation;
 
   const split = splitEveryClause(value);
   const generative = parseGenerativeValue(split.base, line);
-  const expression = generative.base;
+  const expression = scalarExpressionFromSource(generative.base, sourceDefinitions);
   if (!expression) throw new LanguageError([{ line, message: `${parameter} expects a value` }]);
 
   if (parameter === 'pitch') {
@@ -2256,10 +2423,19 @@ function compileFilterProperty(
   }
   if (!filter.hasModel) throw new LanguageError([{ line, message: `FILTER '${filter.name}' requires model before parameters` }]);
 
+  if (key === 'resonance' || key === 'drive' || key === 'cutoff') {
+    const envelopeSplit = splitEveryClause(value);
+    const envelope = envelopeFromValue(envelopeSplit.base, line, sourceDefinitions);
+    if (envelope) {
+      const timing = envelopeSplit.every ? parseEverySpec(envelopeSplit.every, line, sourceDefinitions) : null;
+      return envelopeParamDirective('filter', filter.internalName, key, envelope, line, timing);
+    }
+  }
+
   if (key === 'resonance') {
     const split = splitEveryClause(value);
     const generative = parseGenerativeValue(split.base, line);
-    const expression = generative.base;
+    const expression = scalarExpressionFromSource(generative.base, sourceDefinitions);
     const literal = Number(expression);
     if (Number.isFinite(literal) && (literal < 0 || literal > 100)) {
       throw new LanguageError([{ line, message: 'resonance expects 0..100' }]);
@@ -2281,7 +2457,7 @@ function compileFilterProperty(
   if (key === 'drive') {
     const split = splitEveryClause(value);
     const generative = parseGenerativeValue(split.base, line);
-    const expression = generative.base;
+    const expression = scalarExpressionFromSource(generative.base, sourceDefinitions);
     const literal = Number(expression);
     if (Number.isFinite(literal) && (literal < 0 || literal > 100)) {
       throw new LanguageError([{ line, message: 'drive expects 0..100' }]);
@@ -2363,7 +2539,7 @@ function compileFilterProperty(
   }
 
   const generative = parseGenerativeValue(split.base, line);
-  const expression = generative.base;
+  const expression = scalarExpressionFromSource(generative.base, sourceDefinitions);
   const literal = Number(expression);
   if (Number.isFinite(literal) && (literal < 0 || literal > 100)) {
     throw new LanguageError([{ line, message: 'cutoff expects 0..100, or cutoff freq/note/scale' }]);
@@ -2448,6 +2624,33 @@ export function compileLanguageSource(source: string): string {
   const capabilitySet = parseProgramCapabilities(source);
   const lines = source.replace(/\r\n/g, '\n').split('\n');
 
+  // Multiline structured SET values are collapsed to a single synthetic line
+  // before the normal statement pass. The physical child lines remain empty so
+  // diagnostics and editor line numbering stay stable.
+  for (let index = 0; index < lines.length; index += 1) {
+    const raw = stripComment(lines[index]);
+    const trimmed = raw.trim();
+    const declaration = trimmed.match(/^SET\s+([A-Za-z_][A-Za-z0-9_]*)\s+TYPE\s+ENVELOPE\s*:\s*$/i);
+    if (!declaration) continue;
+    const indentation = raw.length - raw.trimStart().length;
+    const properties: string[] = [];
+    let next = index + 1;
+    while (next < lines.length) {
+      const childRaw = stripComment(lines[next]);
+      const childTrimmed = childRaw.trim();
+      if (!childTrimmed) { lines[next] = ''; next += 1; continue; }
+      const childIndentation = childRaw.length - childRaw.trimStart().length;
+      if (childIndentation <= indentation) break;
+      properties.push(childTrimmed);
+      lines[next] = '';
+      next += 1;
+    }
+    if (properties.length === 0) {
+      throw new LanguageError([{ line: index + 1, message: 'SET <name> TYPE ENVELOPE requires one or more indented properties' }]);
+    }
+    lines[index] = `${' '.repeat(indentation)}SET ${declaration[1]}: ENVELOPE [${properties.join(', ')}]`;
+  }
+
   // PLAY continuations are physical lines beginning with indented THROUGH/THEN.
   // Collapse them onto the first line for parsing while preserving output line count.
   for (let index = 0; index < lines.length; index += 1) {
@@ -2476,7 +2679,36 @@ export function compileLanguageSource(source: string): string {
   const scalarNames = new Set<string>();
   const sourceKinds = new Map<string, SourceKind>();
   const sourceDefinitions = new Map<string, SourceDefinition>();
+  const localSourceDefinitions = new Map<string, Map<string, SourceDefinition>>();
+  const localSourceKinds = new Map<string, Map<string, SourceKind>>();
   const modSources = new Map<string, ModSourceDefinition>();
+
+  const scopedDefinitions = (scope: string | null, parentScope: string | null = null): Map<string, SourceDefinition> => {
+    const result = new Map(sourceDefinitions);
+    if (parentScope) for (const [name, definition] of localSourceDefinitions.get(parentScope) ?? []) result.set(name, definition);
+    if (scope) for (const [name, definition] of localSourceDefinitions.get(scope) ?? []) result.set(name, definition);
+    return result;
+  };
+  const scopedKinds = (scope: string | null, parentScope: string | null = null): Map<string, SourceKind> => {
+    const result = new Map(sourceKinds);
+    if (parentScope) for (const [name, kind] of localSourceKinds.get(parentScope) ?? []) result.set(name, kind);
+    if (scope) for (const [name, kind] of localSourceKinds.get(scope) ?? []) result.set(name, kind);
+    return result;
+  };
+  const localDefinitionMap = (scope: string): Map<string, SourceDefinition> => {
+    const existing = localSourceDefinitions.get(scope);
+    if (existing) return existing;
+    const created = new Map<string, SourceDefinition>();
+    localSourceDefinitions.set(scope, created);
+    return created;
+  };
+  const localKindMap = (scope: string): Map<string, SourceKind> => {
+    const existing = localSourceKinds.get(scope);
+    if (existing) return existing;
+    const created = new Map<string, SourceKind>();
+    localSourceKinds.set(scope, created);
+    return created;
+  };
   const seqs = new Set<string>();
   let currentSeq: SeqState | null = null;
   let currentClock: ClockState | null = null;
@@ -2664,6 +2896,33 @@ export function compileLanguageSource(source: string): string {
       }
 
       if (/^_?CLOCK\b/i.test(trimmed)) {
+        const localOwner = indentation > 0
+          ? (currentFilter ? `filter:${currentFilter.internalName}` : currentVoice ? `voice:${currentVoice.name}` : currentFx ? `fx:${currentFx.name}` : null)
+          : null;
+        const parentScope = currentFilter?.ownerVoice ? `voice:${currentFilter.ownerVoice}` : null;
+        if (localOwner) {
+          if (/^_?CLOCK\s+SET\b/i.test(trimmed)) {
+            throw new LanguageError([{ line: lineNumber, message: 'CLOCK SET is global; local scopes can declare only named clocks' }]);
+          }
+          const definitions = scopedDefinitions(localOwner, parentScope);
+          const localDefs = localDefinitionMap(localOwner);
+          const localKinds = localKindMap(localOwner);
+          const localMatch = trimmed.match(/^(_)?CLOCK\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+RATE\s+([/*])\s*(\d+(?:\.\d+)?))?(?:\s+WITH\s+(.+))?$/i);
+          if (!localMatch) throw new LanguageError([{ line: lineNumber, message: 'local CLOCK expects CLOCK <name> [RATE /n|*n] [WITH ...]' }]);
+          const publicName = localMatch[2];
+          if (localDefs.has(publicName)) throw new LanguageError([{ line: lineNumber, message: `CLOCK '${publicName}' is already defined in this scope` }]);
+          const internalName = `__clock_${localOwner.replace(/[^A-Za-z0-9_]/g, '_')}_${publicName}`;
+          const synthetic = `${localMatch[1] ?? ''}CLOCK ${internalName}${localMatch[3] ? ` RATE ${localMatch[3]}${localMatch[4]}` : ''}${localMatch[5] ? ` WITH ${localMatch[5]}` : ''}`;
+          const namedClock = compileNamedClock(synthetic, lineNumber, definitions, new Set());
+          if (!namedClock) throw new LanguageError([{ line: lineNumber, message: 'invalid local CLOCK declaration' }]);
+          const definition = definitions.get(internalName);
+          if (!definition || definition.kind !== 'clock') throw new LanguageError([{ line: lineNumber, message: 'failed to create local CLOCK' }]);
+          localDefs.set(publicName, { ...definition, internalName });
+          localKinds.set(publicName, 'clock');
+          output[index] = namedClock.output;
+          continue;
+        }
+
         requireVoiceSound(currentVoice, diagnostics);
         requireFxModel(currentFx, diagnostics);
         requireSeqReady(currentSeq, diagnostics);
@@ -2681,6 +2940,30 @@ export function compileLanguageSource(source: string): string {
       }
 
       if (/^SET\b/i.test(trimmed)) {
+        const localOwner = indentation > 0
+          ? (currentFilter ? `filter:${currentFilter.internalName}` : currentVoice ? `voice:${currentVoice.name}` : currentFx ? `fx:${currentFx.name}` : null)
+          : null;
+        const parentScope = currentFilter?.ownerVoice ? `voice:${currentFilter.ownerVoice}` : null;
+        if (localOwner) {
+          const localDefs = localDefinitionMap(localOwner);
+          const localKinds = localKindMap(localOwner);
+          const nameMatch = trimmed.match(/^SET\s+([A-Za-z_][A-Za-z0-9_]*)\s*:/i);
+          if (!nameMatch) throw new LanguageError([{ line: lineNumber, message: 'SET expects a name, colon, and value' }]);
+          const publicName = nameMatch[1];
+          if (localDefs.has(publicName)) throw new LanguageError([{ line: lineNumber, message: `SET '${publicName}' is already defined in this scope` }]);
+          const internalName = `__set_${localOwner.replace(/[^A-Za-z0-9_]/g, '_')}_${publicName}`;
+          const tempKinds = scopedKinds(localOwner, parentScope);
+          const tempDefs = scopedDefinitions(localOwner, parentScope);
+          output[index] = compileSet(trimmed, lineNumber, tempKinds, tempDefs, new Set(), new Set(), internalName);
+          const definition = tempDefs.get(publicName);
+          const kind = tempKinds.get(publicName);
+          if (definition && kind) {
+            localDefs.set(publicName, definition);
+            localKinds.set(publicName, kind);
+          }
+          continue;
+        }
+
         requireVoiceSound(currentVoice, diagnostics);
         requireFxModel(currentFx, diagnostics);
         currentVoice = null;
@@ -2721,21 +3004,21 @@ export function compileLanguageSource(source: string): string {
       if (currentFilter && indentation > currentFilter.indentation) {
         const statement = parseBlockPropertyStatement(trimmed, lineNumber, 'FILTER');
         if (statement.live) validateLiveFilterProperty(statement.property, lineNumber);
-        output[index] = compileFilterProperty(currentFilter, statement.property, statement.value, lineNumber, sourceDefinitions);
+        output[index] = compileFilterProperty(currentFilter, statement.property, statement.value, lineNumber, scopedDefinitions(`filter:${currentFilter.internalName}`, currentFilter.ownerVoice ? `voice:${currentFilter.ownerVoice}` : null));
         continue;
       }
 
       if (indentation > 0 && currentFx) {
         const statement = parseBlockPropertyStatement(trimmed, lineNumber, 'FX');
         if (statement.live) validateLiveFxProperty(currentFx, statement.property, lineNumber);
-        output[index] = compileFxProperty(currentFx, statement.property, statement.value, lineNumber, sourceDefinitions, modSources);
+        output[index] = compileFxProperty(currentFx, statement.property, statement.value, lineNumber, scopedDefinitions(`fx:${currentFx.name}`), modSources);
         continue;
       }
 
       if (indentation > 0 && currentVoice) {
         const statement = parseBlockPropertyStatement(trimmed, lineNumber, 'VOICE');
         if (statement.live) validateLiveVoiceProperty(currentVoice, statement.property, lineNumber);
-        output[index] = compileVoiceProperty(currentVoice, statement.property, statement.value, lineNumber, sourceKinds, sourceDefinitions, modSources, statement.live);
+        output[index] = compileVoiceProperty(currentVoice, statement.property, statement.value, lineNumber, scopedKinds(`voice:${currentVoice.name}`), scopedDefinitions(`voice:${currentVoice.name}`), modSources, statement.live);
         if (statement.property.toLowerCase() === 'sound') {
           currentVoice.hasSound = true;
           if (currentVoice.soundId) voiceSoundIds.set(currentVoice.name, currentVoice.soundId);
