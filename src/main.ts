@@ -5,7 +5,7 @@ import { compileLanguageSource, LanguageError } from './language/language';
 
 type Screen = 'live' | 'config' | 'help' | 'scheme';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Missing #app');
