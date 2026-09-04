@@ -850,3 +850,63 @@ button, input, textarea { font: inherit; }
   opacity: 0.55;
   cursor: wait;
 }
+
+/* Turing SEQ monitor */
+.turing-monitor-card .monitor-body {
+  display: grid;
+  gap: 9px;
+}
+
+.turing-meta,
+.turing-readout {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  color: var(--phosphor-dim);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.turing-note-value {
+  color: var(--phosphor-hot);
+}
+
+.turing-register {
+  display: grid;
+  grid-template-columns: repeat(var(--turing-length), 17px);
+  gap: 5px;
+  min-height: 22px;
+  padding: 10px 9px;
+  overflow-x: auto;
+  border-left: 1px solid rgba(215, 169, 46, 0.18);
+  border-bottom: 1px solid rgba(215, 169, 46, 0.10);
+  background: rgba(5, 6, 5, 0.48);
+}
+
+.turing-bit {
+  display: block;
+  width: 17px;
+  height: 17px;
+  border: 1px solid rgba(215, 169, 46, 0.52);
+  background: rgba(215, 169, 46, 0.025);
+  box-shadow: inset 0 0 4px rgba(215, 169, 46, 0.06);
+}
+
+.turing-bit.on {
+  border-color: var(--phosphor-hot);
+  background: rgba(255, 231, 131, 0.78);
+  box-shadow: 0 0 7px rgba(215, 169, 46, 0.42), inset 0 0 3px rgba(255,255,255,0.25);
+}
+
+.turing-bit-shift {
+  animation: turing-shift 140ms ease-out;
+}
+
+@keyframes turing-shift {
+  from { transform: translateX(22px); opacity: 0.48; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .turing-bit-shift { animation: none; }
+}

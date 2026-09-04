@@ -1,0 +1,3 @@
+[submodule "vendor/superparasites"]
+    path = vendor/superparasites
+    url = https://github.com/patrickdowling/superparasites.git

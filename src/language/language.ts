@@ -13,20 +13,42 @@ export class LanguageError extends Error {
   }
 }
 
-type SourceKind = 'voice' | 'note' | 'freq' | 'time' | 'trigger' | 'scalar' | 'scale';
+type SourceKind = 'voice' | 'note' | 'freq' | 'time' | 'clock' | 'trigger' | 'scalar' | 'scale' | 'seq' | 'envelope';
 
 type SourceDefinition =
   | { kind: 'scalar' }
   | { kind: 'time'; amount: number; unit: 'ms' | 'sec' | 'beat'; display: string }
+  | { kind: 'clock'; internalName: string; rateLabel: string; display: string }
   | { kind: 'freq'; values: number[]; display: string }
-  | { kind: 'note'; values: number[]; display: string }
-  | { kind: 'scale'; values: number[]; display: string };
+  | { kind: 'note'; values: number[]; display: string; favor: SequenceFavorEntry[] }
+  | { kind: 'scale'; values: number[]; display: string }
+  | { kind: 'seq'; values: number[]; display: string }
+  | { kind: 'envelope'; spec: EnvelopeSpec; display: string };
+
+
+type EnvelopeKind = 'AD' | 'ADR' | 'ASR' | 'ADSR' | 'DAHDSR';
+type EnvelopeSpec = {
+  kind: EnvelopeKind;
+  values: number[]; // times are stored in seconds; sustain is normalized 0..1
+  display: string;
+};
+
+const ENVELOPE_LAYOUTS: Record<EnvelopeKind, readonly ('time' | 'level')[]> = {
+  AD: ['time', 'time'],
+  ADR: ['time', 'time', 'time'],
+  ASR: ['time', 'level', 'time'],
+  ADSR: ['time', 'time', 'level', 'time'],
+  DAHDSR: ['time', 'time', 'time', 'time', 'level', 'time'],
+};
 
 type VoiceState = {
   name: string;
   line: number;
+  indentation: number;
   hasSound: boolean;
   soundId: string | null;
+  pitchProperty: 'note' | 'scale' | 'freq' | null;
+  embeddedFilter: string | null;
 };
 
 type FxState = {
@@ -35,7 +57,40 @@ type FxState = {
   indentation: number;
   hasModel: boolean;
   modelId: string | null;
+  pitchProperty: 'note' | 'scale' | 'freq' | null;
 };
+type FilterState = {
+  name: string;
+  internalName: string;
+  line: number;
+  indentation: number;
+  ownerVoice: string | null;
+  hasModel: boolean;
+};
+
+type SeqState = {
+  name: string;
+  line: number;
+  indentation: number;
+  modelId: 'turing' | null;
+  length: number;
+  change: number;
+  values: number[];
+  material: 'notes' | 'scale' | null;
+};
+
+type ClockState = {
+  name: string;
+  line: number;
+  indentation: number;
+  parent: string | null;
+  rate: number;
+  rateLabel: string;
+  jitter: number;
+  drift: number;
+};
+
+
 
 type FxParameter = 'position' | 'size' | 'pitch' | 'density' | 'texture' | 'mix' | 'spread' | 'feedback' | 'reverb';
 
@@ -59,7 +114,19 @@ type ModSourceDefinition = {
 };
 
 
-type SelectionMode = 'order' | 'random' | 'walk' | 'shuffle' | 'reverse';
+type SelectionMode = 'order' | 'random' | 'walk' | 'shuffle' | 'reverse' | 'pendulum';
+
+type SequenceFavorEntry = {
+  target: string;
+  operator: 'weight' | 'repeat' | 'retrig';
+  amount: number;
+};
+
+type SelectionSpec = {
+  mode: SelectionMode;
+  amount: number;
+  favor: SequenceFavorEntry[];
+};
 
 type TimingModifiers = {
   chance: number;
@@ -103,6 +170,21 @@ const MACRO_PARAMETERS: Record<string, SoundParameterSchema> = {
   morph: { min: 0, max: 100, modulatable: true },
 };
 
+const MATTER_PARAMETERS: Record<string, SoundParameterSchema> = {
+  geometry: { min: 0, max: 100, modulatable: false },
+  brightness: { min: 0, max: 100, modulatable: false },
+  damping: { min: 0, max: 100, modulatable: false },
+  position: { min: 0, max: 100, modulatable: false },
+  space: { min: 0, max: 100, modulatable: false },
+};
+
+const RESONATOR_PARAMETERS: Record<string, SoundParameterSchema> = {
+  structure: { min: 0, max: 100, modulatable: false },
+  brightness: { min: 0, max: 100, modulatable: false },
+  damping: { min: 0, max: 100, modulatable: false },
+  position: { min: 0, max: 100, modulatable: false },
+};
+
 const SOUND_ENGINE_REGISTRY: Record<string, SoundEngineSchema> = {
   'macro.analog': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
   'macro.waves': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
@@ -121,10 +203,23 @@ const SOUND_ENGINE_REGISTRY: Record<string, SoundEngineSchema> = {
   'macro.terrain': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
   'macro.strings': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
   'macro.chiptune': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
+  'matter': { parameters: MATTER_PARAMETERS, options: new Set() },
+  'resonator.modal': { parameters: RESONATOR_PARAMETERS, options: new Set() },
+  'resonator.sympathetic': { parameters: RESONATOR_PARAMETERS, options: new Set() },
+  'resonator.strings': { parameters: RESONATOR_PARAMETERS, options: new Set() },
+  'resonator.string': { parameters: RESONATOR_PARAMETERS, options: new Set() },
 };
+
+const SOUND_PARAMETER_NAMES = new Set(
+  Object.values(SOUND_ENGINE_REGISTRY).flatMap((engine) => Object.keys(engine.parameters)),
+);
 
 const MIST_PARAMETERS = new Set<FxParameter>([
   'position', 'size', 'pitch', 'density', 'texture', 'mix', 'spread', 'feedback', 'reverb',
+]);
+
+const SKY_PARAMETERS = new Set<FxParameter>([
+  'position', 'size', 'density', 'texture', 'mix', 'spread', 'feedback', 'reverb',
 ]);
 
 const FX_MODEL_REGISTRY: Record<string, FxModelSchema> = {
@@ -136,6 +231,7 @@ const FX_MODEL_REGISTRY: Record<string, FxModelSchema> = {
   'mist.resonator': { lowLevelMode: 'resonestor',      parameters: MIST_PARAMETERS, musicalPitch: true },
   'mist.repeat':    { lowLevelMode: 'beat_repeat',     parameters: MIST_PARAMETERS, musicalPitch: true },
   'mist.smear':     { lowLevelMode: 'spectral_clouds', parameters: MIST_PARAMETERS, musicalPitch: true },
+  'sky':            { lowLevelMode: 'sky',             parameters: SKY_PARAMETERS, musicalPitch: false },
 };
 
 
@@ -259,7 +355,7 @@ function parseScaleSpec(
   value: string,
   line: number,
   allowSelection: boolean,
-): { values: number[]; display: string; mode: SelectionMode } | null {
+): { values: number[]; display: string; mode: SelectionMode; amount: number; favor: SequenceFavorEntry[]; view: boolean } | null {
   const head = value.match(/^([A-Ga-g][#b]?)\s+([A-Za-z]+)(?:\s+with\s+(.+))?$/i);
   if (!head) return null;
   if (!MODE_INTERVALS[head[2].toLowerCase()]) return null;
@@ -267,6 +363,9 @@ function parseScaleSpec(
   let rangeStart: string | null = null;
   let rangeEnd: string | null = null;
   let mode: SelectionMode = 'order';
+  let amount = 0;
+  let favor: SequenceFavorEntry[] = [];
+  let view = false;
   let selectionSeen = false;
 
   const modifiers = (head[3] ?? '')
@@ -285,27 +384,35 @@ function parseScaleSpec(
       continue;
     }
 
-    const normalized = modifier.toLowerCase();
-    if (['random', 'walk', 'shuffle', 'reverse'].includes(normalized)) {
+    if (/^view$/i.test(modifier)) {
+      view = true;
+      continue;
+    }
+
+    const selection = parseSelectionMode([modifier], line, 'scale');
+    if (selection.mode !== 'order' || selection.favor.length > 0 || /^order$/i.test(modifier)) {
       if (!allowSelection) {
         throw new LanguageError([{
           line,
           message: `SET scale does not store sequencing modifier '${modifier}'; apply it where the scale is used`,
         }]);
       }
-      if (selectionSeen) {
-        throw new LanguageError([{ line, message: 'scale accepts only one sequencing modifier' }]);
+      if (selection.mode !== 'order' || /^order$/i.test(modifier)) {
+        if (selectionSeen) {
+          throw new LanguageError([{ line, message: 'scale accepts only one sequencing modifier' }]);
+        }
+        mode = selection.mode;
+        amount = selection.amount;
+        selectionSeen = true;
       }
-      mode = normalized as SelectionMode;
-      selectionSeen = true;
+      if (selection.favor.length > 0) favor = selection.favor;
       continue;
     }
-
-    throw new LanguageError([{ line, message: `scale does not support modifier '${modifier}'` }]);
   }
 
+  validateFavorForMode(favor, mode, line, 'scale');
   const scale = scaleValues(head[1], head[2], rangeStart, rangeEnd, line);
-  return { ...scale, mode };
+  return { ...scale, mode, amount, favor, view };
 }
 
 function parseScaleSource(value: string, line: number): { values: number[]; display: string } | null {
@@ -313,9 +420,38 @@ function parseScaleSource(value: string, line: number): { values: number[]; disp
   return parsed ? { values: parsed.values, display: parsed.display } : null;
 }
 
-function sourceSequenceCode(voiceName: string, values: number[], mode: SelectionMode = 'order'): string {
-  const directive = values.length > 1 ? ` ${sequenceDirective(voiceName, values, mode)}` : '';
-  return `${voiceName}.freq(${values[0]});${directive}`;
+function inlinePianoDirective(
+  ownerKind: 'voice' | 'fx' | 'filter',
+  owner: string,
+  property: 'note' | 'scale',
+  line: number,
+  values: number[],
+): string {
+  return `__inlinepiano(${JSON.stringify(ownerKind)},${JSON.stringify(owner)},${JSON.stringify(property)},${line},${JSON.stringify(values.join('|'))});`;
+}
+
+function inlineScalarDirective(
+  ownerKind: 'voice' | 'fx' | 'filter',
+  owner: string,
+  property: string,
+  line: number,
+  base: string,
+): string {
+  return `__inlinescalar(${JSON.stringify(ownerKind)},${JSON.stringify(owner)},${JSON.stringify(property)},${line},${JSON.stringify(base)});`;
+}
+
+function sourceSequenceCode(
+  voiceName: string,
+  values: number[],
+  mode: SelectionMode = 'order',
+  amount = 0,
+  favor: SequenceFavorEntry[] = [],
+  view = false,
+  line = 0,
+): string {
+  const directive = values.length > 1 ? ` ${sequenceDirective(voiceName, values, mode, amount, favor)}` : '';
+  const piano = view ? ` ${inlinePianoDirective('voice', voiceName, 'scale', line, values)}` : '';
+  return `${voiceName}.freq(${values[0]});${directive}${piano}`;
 }
 
 function parseList(value: string, line: number, property: string): string[] {
@@ -327,6 +463,51 @@ function parseList(value: string, line: number, property: string): string[] {
     throw new LanguageError([{ line, message: `${property} list cannot be empty` }]);
   }
   return content.split(/\s+/);
+}
+
+function parseNoteSequenceToken(
+  token: string,
+  line: number,
+): { note: string; favor: SequenceFavorEntry | null } {
+  const weighted = token.match(/^([A-Ga-g][#b]?-?\d+)!(\d+(?:\.\d+)?)$/);
+  if (weighted) {
+    const amount = numberValue(weighted[2], line, 'note weight');
+    if (amount < 0 || amount > 100) {
+      throw new LanguageError([{ line, message: 'note weights must be between 0 and 100' }]);
+    }
+    return { note: weighted[1], favor: { target: weighted[1], operator: 'weight', amount } };
+  }
+
+  const retrig = token.match(/^([A-Ga-g][#b]?-?\d+)\*\*(\d+)$/);
+  if (retrig) {
+    const amount = numberValue(retrig[2], line, 'retrig');
+    if (!Number.isInteger(amount) || amount < 2) {
+      throw new LanguageError([{ line, message: 'retrig count must be an integer >= 2' }]);
+    }
+    return { note: retrig[1], favor: { target: retrig[1], operator: 'retrig', amount } };
+  }
+
+  const repeated = token.match(/^([A-Ga-g][#b]?-?\d+)\*(\d+)$/);
+  if (repeated) {
+    const amount = numberValue(repeated[2], line, 'repeat');
+    if (!Number.isInteger(amount) || amount < 2) {
+      throw new LanguageError([{ line, message: 'repeat count must be an integer >= 2' }]);
+    }
+    return { note: repeated[1], favor: { target: repeated[1], operator: 'repeat', amount } };
+  }
+
+  return { note: token, favor: null };
+}
+
+function mergeFavor(
+  inlineFavor: SequenceFavorEntry[],
+  modifierFavor: SequenceFavorEntry[],
+): SequenceFavorEntry[] {
+  const merged = new Map<string, SequenceFavorEntry>();
+  for (const entry of [...inlineFavor, ...modifierFavor]) {
+    merged.set(`${entry.target.toLowerCase()}:${entry.operator}`, entry);
+  }
+  return [...merged.values()];
 }
 
 function numberValue(value: string, line: number, label: string): number {
@@ -354,39 +535,149 @@ function splitWith(value: string): { base: string; modifiers: string[] } {
   };
 }
 
-function parseSelectionMode(modifiers: string[], line: number, property: string): SelectionMode {
+function parseFavorEntries(
+  modifier: string,
+  line: number,
+  property: string,
+): SequenceFavorEntry[] {
+  const match = modifier.match(/^favor\s+\[(.*)\]$/i);
+  if (!match) return [];
+
+  const content = match[1].trim();
+  if (!content) throw new LanguageError([{ line, message: `${property} favor list cannot be empty` }]);
+
+  return content.split(/\s+/).map((token) => {
+    const weighted = token.match(/^([A-Ga-g][#b]?-?\d*)!(\d+(?:\.\d+)?)$/);
+    if (weighted) {
+      const amount = numberValue(weighted[2], line, 'favor weight');
+      if (amount < 0 || amount > 100) {
+        throw new LanguageError([{ line, message: 'favor weights must be between 0 and 100' }]);
+      }
+      return { target: weighted[1], operator: 'weight' as const, amount };
+    }
+
+    const retrig = token.match(/^([A-Ga-g][#b]?-?\d*)\*\*(\d+)$/);
+    if (retrig) {
+      const amount = numberValue(retrig[2], line, 'retrig');
+      if (!Number.isInteger(amount) || amount < 2) {
+        throw new LanguageError([{ line, message: 'retrig count must be an integer >= 2' }]);
+      }
+      return { target: retrig[1], operator: 'retrig' as const, amount };
+    }
+
+    const repeated = token.match(/^([A-Ga-g][#b]?-?\d*)\*(\d+)$/);
+    if (repeated) {
+      const amount = numberValue(repeated[2], line, 'repeat');
+      if (!Number.isInteger(amount) || amount < 2) {
+        throw new LanguageError([{ line, message: 'repeat count must be an integer >= 2' }]);
+      }
+      return { target: repeated[1], operator: 'repeat' as const, amount };
+    }
+
+    throw new LanguageError([{ line, message: `invalid favor entry '${token}'` }]);
+  });
+}
+
+function validateFavorForMode(
+  favor: SequenceFavorEntry[],
+  mode: SelectionMode,
+  line: number,
+  property: string,
+): void {
+  if (favor.length === 0) return;
+
+  if (mode === 'random') {
+    if (favor.some((entry) => entry.operator !== 'weight')) {
+      throw new LanguageError([{ line, message: `${property} random favor accepts only ! weights` }]);
+    }
+    return;
+  }
+
+  if (mode === 'order' || mode === 'reverse' || mode === 'pendulum') {
+    if (favor.some((entry) => entry.operator === 'weight')) {
+      throw new LanguageError([{ line, message: `${property} ${mode} favor accepts only * repeats and ** retrigs` }]);
+    }
+    return;
+  }
+
+  throw new LanguageError([{ line, message: `${property} favor is not available with ${mode}` }]);
+}
+
+function parseSelectionMode(modifiers: string[], line: number, property: string): SelectionSpec {
   let mode: SelectionMode = 'order';
+  let amount = 0;
   let explicit = false;
+  let favor: SequenceFavorEntry[] = [];
 
   for (const modifier of modifiers) {
     const normalized = modifier.toLowerCase();
-    if (!['random', 'walk', 'shuffle', 'reverse'].includes(normalized)) {
-      throw new LanguageError([{ line, message: `${property} does not support modifier '${modifier}'` }]);
+
+    if (/^favor\s+\[/i.test(modifier)) {
+      if (favor.length > 0) {
+        throw new LanguageError([{ line, message: `${property} accepts only one favor modifier` }]);
+      }
+      favor = parseFavorEntries(modifier, line, property);
+      continue;
     }
-    if (explicit) {
-      throw new LanguageError([{ line, message: `${property} accepts only one selection modifier` }]);
+
+    if (['random', 'shuffle', 'reverse', 'pendulum', 'order'].includes(normalized)) {
+      if (explicit) {
+        throw new LanguageError([{ line, message: `${property} accepts only one selection modifier` }]);
+      }
+      mode = normalized as SelectionMode;
+      explicit = true;
+      continue;
     }
-    mode = normalized as SelectionMode;
-    explicit = true;
+
+    const walk = modifier.match(/^walk(?:\s+(\d+(?:\.\d+)?))?$/i);
+    if (walk) {
+      if (explicit) {
+        throw new LanguageError([{ line, message: `${property} accepts only one selection modifier` }]);
+      }
+      amount = walk[1] === undefined ? 1 : numberValue(walk[1], line, 'walk');
+      if (amount <= 0) {
+        throw new LanguageError([{ line, message: 'walk amount must be greater than 0' }]);
+      }
+      mode = 'walk';
+      explicit = true;
+      continue;
+    }
+
+    throw new LanguageError([{ line, message: `${property} does not support modifier '${modifier}'` }]);
   }
-  return mode;
+
+  validateFavorForMode(favor, mode, line, property);
+  return { mode, amount, favor };
 }
 
 function parseTimingModifiers(modifiers: string[], line: number, unit: string): TimingModifiers {
   const result: TimingModifiers = { chance: 100, drift: false, loose: false };
+  let probabilityModifier: 'chance' | 'coin' | null = null;
 
   for (const modifier of modifiers) {
     const chance = modifier.match(/^chance\s+(.+)$/i);
     if (chance) {
+      if (probabilityModifier) {
+        throw new LanguageError([{ line, message: `timing cannot combine ${probabilityModifier} with chance` }]);
+      }
       const value = numberValue(chance[1], line, 'chance');
       if (value < 0 || value > 100) {
         throw new LanguageError([{ line, message: 'chance must be between 0 and 100' }]);
       }
       result.chance = value;
+      probabilityModifier = 'chance';
       continue;
     }
 
     const normalized = modifier.toLowerCase();
+    if (normalized === 'coin') {
+      if (probabilityModifier) {
+        throw new LanguageError([{ line, message: `timing cannot combine ${probabilityModifier} with coin` }]);
+      }
+      result.chance = 50;
+      probabilityModifier = 'coin';
+      continue;
+    }
     if (normalized === 'drift') {
       if (unit === 'beat') {
         throw new LanguageError([{ line, message: 'drift is available only for sec/ms timing; beat timing stays locked to the master clock' }]);
@@ -404,8 +695,14 @@ function parseTimingModifiers(modifiers: string[], line: number, unit: string): 
   return result;
 }
 
-function sequenceDirective(name: string, values: number[], mode: SelectionMode): string {
-  return `__sequence(${JSON.stringify(name)},${JSON.stringify(values.join('|'))},${JSON.stringify(mode)});`;
+function sequenceDirective(
+  name: string,
+  values: number[],
+  mode: SelectionMode,
+  amount = 0,
+  favor: SequenceFavorEntry[] = [],
+): string {
+  return `__sequence(${JSON.stringify(name)},${JSON.stringify(values.join('|'))},${JSON.stringify(mode)},${amount},${JSON.stringify(JSON.stringify(favor))});`;
 }
 
 function compileFrom(
@@ -453,6 +750,63 @@ function compileFrom(
   return sourceSequenceCode(voice.name, definition.values);
 }
 
+type GenerativeMode = 'wander' | 'trend' | 'scatter' | 'flutter';
+
+type GenerativeSpec = {
+  base: string;
+  mode: GenerativeMode | null;
+  amount: number;
+};
+
+function parseGenerativeValue(value: string, line: number): GenerativeSpec & { view: boolean } {
+  const withMatch = value.match(/^(.*?)\s+with\s+(.+)$/i);
+  if (!withMatch) return { base: value.trim(), mode: null, amount: 0, view: false };
+
+  const modifiers = withMatch[2].split(',').map((item) => item.trim()).filter(Boolean);
+  let mode: GenerativeMode | null = null;
+  let amount = 0;
+  let view = false;
+
+  for (const modifier of modifiers) {
+    if (/^view$/i.test(modifier)) {
+      view = true;
+      continue;
+    }
+    const generative = modifier.match(/^(wander|trend|scatter|flutter)\s+(\d+(?:\.\d+)?)$/i);
+    if (!generative) {
+      return { base: value.trim(), mode: null, amount: 0, view: false };
+    }
+    if (mode) throw new LanguageError([{ line, message: 'only one generative modifier is allowed' }]);
+    amount = numberValue(generative[2], line, generative[1].toLowerCase());
+    if (amount <= 0) {
+      throw new LanguageError([{ line, message: `${generative[1].toLowerCase()} amount must be greater than 0` }]);
+    }
+    mode = generative[1].toLowerCase() as GenerativeMode;
+  }
+
+  if (!mode && view) {
+    throw new LanguageError([{ line, message: 'inline scalar view currently requires wander, trend, scatter, or flutter' }]);
+  }
+
+  return { base: withMatch[1].trim(), mode, amount, view };
+}
+
+
+function claimPitchProperty(
+  owner: VoiceState | FxState,
+  property: 'note' | 'scale' | 'freq',
+  line: number,
+  label: 'VOICE' | 'FX',
+): void {
+  if (owner.pitchProperty && owner.pitchProperty !== property) {
+    throw new LanguageError([{
+      line,
+      message: `${label} '${owner.name}' already uses ${owner.pitchProperty}; only one of note, scale, or freq can define pitch`,
+    }]);
+  }
+  owner.pitchProperty = property;
+}
+
 function compileVoiceProperty(
   voice: VoiceState,
   property: string,
@@ -463,22 +817,19 @@ function compileVoiceProperty(
   modSources: Map<string, ModSourceDefinition>,
 ): string {
   const key = property.toLowerCase();
-  if (['harmo', 'timbre', 'morph'].includes(key)) {
+  const value = rawValue.trim();
+  const soundParameter = voice.soundId ? SOUND_ENGINE_REGISTRY[voice.soundId]?.parameters[key] : undefined;
+  if (SOUND_PARAMETER_NAMES.has(key)) {
     if (!voice.soundId) {
       throw new LanguageError([{ line, message: `${key} requires sound to be declared first` }]);
     }
-    const parameter = SOUND_ENGINE_REGISTRY[voice.soundId]?.parameters[key];
-    if (!parameter) {
+    if (!soundParameter) {
       throw new LanguageError([{ line, message: `${key} is not available for ${voice.soundId}` }]);
     }
   }
-  const value = rawValue.trim();
 
-
-
-  if (['harmo', 'timbre', 'morph'].includes(key) && /^from\s+/i.test(value)) {
-    const parameter = voice.soundId ? SOUND_ENGINE_REGISTRY[voice.soundId]?.parameters[key] : undefined;
-    if (!parameter?.modulatable) {
+  if (soundParameter && /^from\s+/i.test(value)) {
+    if (!soundParameter.modulatable) {
       throw new LanguageError([{ line, message: `${key} is not modulatable for ${voice.soundId ?? 'this sound'}` }]);
     }
     const route = compileModulationRoute(voice, key, value, line, modSources);
@@ -488,42 +839,136 @@ function compileVoiceProperty(
 
 
   if ((key === 'note' || key === 'freq' || key === 'scale' || key === 'cycle') && /^from\s+/i.test(value)) {
+    if (key === 'cycle') {
+      const sourceName = value.replace(/^from\s+/i, '').trim();
+      return compileFrom(voice, key, sourceName, line, sourceKinds, sourceDefinitions);
+    }
+
+    claimPitchProperty(voice, key, line, 'VOICE');
+
+    const split = splitEveryClause(value);
+    const from = split.base.match(/^from\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(.+))?$/i);
+    if (!from) {
+      throw new LanguageError([{ line, message: `${key} from expects a source name and optional sequencing modifier` }]);
+    }
+
+    const sourceName = from[1];
+    const actual = sourceKinds.get(sourceName);
+    const definition = sourceDefinitions.get(sourceName);
+    if (!actual || !definition) {
+      throw new LanguageError([{ line, message: `unknown source '${sourceName}'` }]);
+    }
+
+    if (definition.kind === 'seq') {
+      if (key !== 'note') throw new LanguageError([{ line, message: `SEQ source '${sourceName}' currently supports note from only` }]);
+      if (from[2]) throw new LanguageError([{ line, message: 'SEQ turing controls its own generation; note from SEQ does not use selection modifiers' }]);
+      const initial = definition.values[0] ?? 440;
+      const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
+      return `${voice.name}.freq(${initial}); __seqvoice(${JSON.stringify(voice.name)},${JSON.stringify(sourceName)});${every}`;
+    }
+
+    const modifiers = (from[2] ?? '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const view = modifiers.some((modifier) => /^view$/i.test(modifier));
+    const selection = parseSelectionMode(modifiers.filter((modifier) => !/^view$/i.test(modifier)), line, key);
+
+    let values: number[];
+    let storedFavor: SequenceFavorEntry[] = [];
+
     if (key === 'scale') {
-      const match = value.match(/^from\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(.+))?$/i);
-      if (!match) {
-        throw new LanguageError([{ line, message: 'scale from expects a source name and optional sequencing modifier' }]);
-      }
-      const modifiers = (match[2] ?? '')
-        .split(',')
-        .map((item) => item.trim())
-        .filter(Boolean);
-      const mode = parseSelectionMode(modifiers, line, 'scale');
-      const sourceName = match[1];
-      const actual = sourceKinds.get(sourceName);
-      const definition = sourceDefinitions.get(sourceName);
-      if (!actual || !definition) {
-        throw new LanguageError([{ line, message: `unknown source '${sourceName}'` }]);
-      }
       if (definition.kind !== 'scale') {
         throw new LanguageError([{ line, message: `source '${sourceName}' is ${actual}, expected scale source for scale` }]);
       }
-      return sourceSequenceCode(voice.name, definition.values, mode);
+      values = definition.values;
+    } else if (key === 'note') {
+      if (definition.kind !== 'note' && definition.kind !== 'scale') {
+        throw new LanguageError([{ line, message: `source '${sourceName}' is ${actual}, expected note or scale source for note` }]);
+      }
+      values = definition.values;
+      if (definition.kind === 'note') storedFavor = definition.favor;
+    } else {
+      if (definition.kind !== 'freq') {
+        throw new LanguageError([{ line, message: `source '${sourceName}' is ${actual}, expected frequency source for freq` }]);
+      }
+      values = definition.values;
     }
 
-    const sourceName = value.replace(/^from\s+/i, '').trim();
-    return compileFrom(voice, key, sourceName, line, sourceKinds, sourceDefinitions);
+    const favor = mergeFavor(storedFavor, selection.favor);
+    validateFavorForMode(favor, selection.mode, line, key);
+
+    if (values.length === 1 && modifiers.length > 0) {
+      throw new LanguageError([{ line, message: `${key} selection modifiers require a list source` }]);
+    }
+
+    const sequence = values.length > 1
+      ? ` ${sequenceDirective(voice.name, values, selection.mode, selection.amount, favor)}`
+      : '';
+    const every = split.every
+      ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}`
+      : '';
+    const piano = view && (key === 'note' || key === 'scale')
+      ? ` ${inlinePianoDirective('voice', voice.name, key, line, values)}`
+      : '';
+
+    return `${voice.name}.freq(${values[0]});${sequence}${every}${piano}`;
   }
 
-  if (['harmo', 'timbre', 'morph'].includes(key)) {
-    const schema = voice.soundId ? SOUND_ENGINE_REGISTRY[voice.soundId]?.parameters[key] : undefined;
-    if (!schema) {
-      throw new LanguageError([{ line, message: `${key} is not available for ${voice.soundId ?? 'this sound'}` }]);
-    }
-
+  if (key === 'drive') {
+    if (voice.soundId !== 'matter') throw new LanguageError([{ line, message: 'drive is available only for sound matter' }]);
     const split = splitEveryClause(value);
-    const expression = split.base.trim();
+    let spec: EnvelopeSpec | null = null;
+    const from = split.base.match(/^from\s+([A-Za-z_][A-Za-z0-9_]*)$/i);
+    if (from) {
+      const definition = sourceDefinitions.get(from[1]);
+      if (!definition) throw new LanguageError([{ line, message: `unknown source '${from[1]}'` }]);
+      if (definition.kind !== 'envelope') throw new LanguageError([{ line, message: `source '${from[1]}' is ${definition.kind}, expected envelope source for drive` }]);
+      spec = definition.spec;
+    } else {
+      spec = parseEnvelopeSpec(split.base, line);
+      if (!spec) throw new LanguageError([{ line, message: 'drive expects AD/ADR/ASR/ADSR/DAHDSR [...] or FROM an envelope SET' }]);
+    }
+    const base = `${voice.name}.drive(${envelopeLiteral(spec)});`;
+    if (!split.every) return base;
+    const timing = parseEverySpec(split.every, line, sourceDefinitions);
+    const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+    return `${base} ${prefix}__driveevery(${JSON.stringify(voice.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
+  }
+
+  if (key === 'bow' || key === 'blow' || key === 'strike') {
+    if (voice.soundId !== 'matter') throw new LanguageError([{ line, message: `${key} is available only for sound matter` }]);
+    const withMatch = value.match(/^(.*?)(?:\s+with\s+(.+))?$/i)!;
+    const level = numberValue(withMatch[1].trim(), line, key);
+    if (level < 0 || level > 100) throw new LanguageError([{ line, message: `${key} expects 0..100` }]);
+    let timbre = 50;
+    const modifiers = (withMatch[2] ?? '').split(',').map((item) => item.trim()).filter(Boolean);
+    for (const modifier of modifiers) {
+      const timbreMatch = modifier.match(/^timbre\s+(.+)$/i);
+      if (!timbreMatch) throw new LanguageError([{ line, message: `${key} supports only WITH TIMBRE <0..100>` }]);
+      timbre = numberValue(timbreMatch[1], line, `${key} timbre`);
+      if (timbre < 0 || timbre > 100) throw new LanguageError([{ line, message: `${key} timbre expects 0..100` }]);
+    }
+    return `${voice.name}.${key}(${level}); ${voice.name}.${key}Timbre(${timbre});`;
+  }
+
+  if (soundParameter) {
+    const split = splitEveryClause(value);
+    const generative = parseGenerativeValue(split.base, line);
+    const expression = generative.base;
     if (!expression) {
       throw new LanguageError([{ line, message: `${key} expects a numeric expression` }]);
+    }
+
+    if (generative.mode) {
+      if (split.every === null) {
+        const inline = generative.view ? ` ${inlineScalarDirective('voice', voice.name, key, line, expression)}` : '';
+      return `${voice.name}.${key}(${expression}); __genparamdefault("voice",${JSON.stringify(voice.name)},${JSON.stringify(key)},${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount});${inline}`;
+      }
+      const timing = parseEverySpec(split.every, line, sourceDefinitions);
+      const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+      const inline = generative.view ? ` ${inlineScalarDirective('voice', voice.name, key, line, expression)}` : '';
+      return `${voice.name}.${key}(${expression}); ${prefix}__genparamcycle("voice",${JSON.stringify(voice.name)},${JSON.stringify(key)},${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});${inline}`;
     }
 
     if (split.every === null) {
@@ -531,7 +976,8 @@ function compileVoiceProperty(
     }
 
     const timing = parseEverySpec(split.every, line, sourceDefinitions);
-    return `${voice.name}.${key}(${expression}); __paramcycle(${JSON.stringify(voice.name)},${JSON.stringify(key)},${JSON.stringify(expression)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose});`;
+    const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+    return `${voice.name}.${key}(${expression}); ${prefix}__paramcycle(${JSON.stringify(voice.name)},${JSON.stringify(key)},${JSON.stringify(expression)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
   }
 
   switch (key) {
@@ -542,15 +988,27 @@ function compileVoiceProperty(
     }
 
     case 'sound': {
-      const match = value.match(/^([a-z][a-z0-9_-]*\.[a-z][a-z0-9_-]*)(?:\s+with\s+(.+))?$/i);
+      const match = value.match(/^([a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)?)(?:\s+with\s+(.+))?$/i);
       if (!match) {
-        throw new LanguageError([{ line, message: 'sound expects engine.algorithm [with option, ...]' }]);
+        throw new LanguageError([{ line, message: 'sound expects an engine or engine.algorithm [with option, ...]' }]);
       }
       const soundId = match[1].toLowerCase();
       const schema = SOUND_ENGINE_REGISTRY[soundId];
       if (!schema) throw new LanguageError([{ line, message: `unknown sound '${soundId}'` }]);
 
-      const options = (match[2] ?? '').split(',').map((v) => v.trim().toLowerCase()).filter(Boolean);
+      const optionText = (match[2] ?? '').trim();
+      if (soundId.startsWith('resonator.')) {
+        let polyphony = 1;
+        if (optionText) {
+          const poly = optionText.match(/^([124])\s+notes?$/i);
+          if (!poly) throw new LanguageError([{ line, message: `${soundId} expects WITH 1 NOTE, 2 NOTES, or 4 NOTES` }]);
+          polyphony = Number(poly[1]);
+        }
+        voice.soundId = soundId;
+        return `${voice.name}.model(${JSON.stringify(soundId)});\n${voice.name}.polyphony(${polyphony});`;
+      }
+
+      const options = optionText.split(',').map((v) => v.trim().toLowerCase()).filter(Boolean);
       const seen = new Set<string>();
       for (const option of options) {
         if (seen.has(option)) throw new LanguageError([{ line, message: `duplicate sound option '${option}'` }]);
@@ -560,44 +1018,55 @@ function compileVoiceProperty(
         }
       }
       voice.soundId = soundId;
-      return `${voice.name}.model(${JSON.stringify(soundId)});\n${voice.name}.lpg(${seen.has('lpg')});`;
+      const lpg = soundId === 'matter' ? '' : `\n${voice.name}.lpg(${seen.has('lpg')});`;
+      return `${voice.name}.model(${JSON.stringify(soundId)});${lpg}`;
     }
 
     case 'note': {
+      claimPitchProperty(voice, 'note', line, 'VOICE');
       const split = splitEveryClause(value);
       const { base, modifiers } = splitWith(split.base);
-      const notes = parseList(base, line, 'note');
+      const noteView = modifiers.some((modifier) => /^view$/i.test(modifier));
+      const selectionModifiers = modifiers.filter((modifier) => !/^view$/i.test(modifier));
+      const noteTokens = parseList(base, line, 'note').map((token) => parseNoteSequenceToken(token, line));
+      const notes = noteTokens.map((token) => token.note);
+      const inlineFavor = noteTokens.flatMap((token) => token.favor ? [token.favor] : []);
       const frequencies = notes.map((note) => {
         const midi = midiFromNote(note);
         if (midi === null) throw new LanguageError([{ line, message: `invalid note '${note}'` }]);
         return midiToFrequency(midi);
       });
-      const mode = parseSelectionMode(modifiers, line, 'note');
-      if (frequencies.length === 1 && modifiers.length > 0) {
+      const selection = parseSelectionMode(selectionModifiers, line, 'note');
+      const favor = mergeFavor(inlineFavor, selection.favor);
+      validateFavorForMode(favor, selection.mode, line, 'note');
+      if (frequencies.length === 1 && selectionModifiers.length > 0) {
         throw new LanguageError([{ line, message: 'note selection modifiers require a list' }]);
       }
-      const sequence = frequencies.length > 1 ? ` ${sequenceDirective(voice.name, frequencies, mode)}` : '';
+      const sequence = frequencies.length > 1 ? ` ${sequenceDirective(voice.name, frequencies, selection.mode, selection.amount, favor)}` : '';
       const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
-      return `${voice.name}.freq(${frequencies[0]});${sequence}${every}`;
+      const piano = noteView ? ` ${inlinePianoDirective('voice', voice.name, 'note', line, frequencies)}` : '';
+      return `${voice.name}.freq(${frequencies[0]});${sequence}${every}${piano}`;
     }
 
     case 'freq': {
+      claimPitchProperty(voice, 'freq', line, 'VOICE');
       const split = splitEveryClause(value);
       const { base, modifiers } = splitWith(split.base);
       const values = parseList(base, line, 'freq').map((item) => numberValue(item, line, 'freq'));
       if (values.some((item) => item <= 0)) {
         throw new LanguageError([{ line, message: 'freq must be greater than 0' }]);
       }
-      const mode = parseSelectionMode(modifiers, line, 'freq');
+      const selection = parseSelectionMode(modifiers, line, 'freq');
       if (values.length === 1 && modifiers.length > 0) {
         throw new LanguageError([{ line, message: 'freq selection modifiers require a list' }]);
       }
-      const sequence = values.length > 1 ? ` ${sequenceDirective(voice.name, values, mode)}` : '';
+      const sequence = values.length > 1 ? ` ${sequenceDirective(voice.name, values, selection.mode, selection.amount)}` : '';
       const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
       return `${voice.name}.freq(${values[0]});${sequence}${every}`;
     }
 
     case 'scale': {
+      claimPitchProperty(voice, 'scale', line, 'VOICE');
       const split = splitEveryClause(value);
       const parsed = parseScaleSpec(split.base, line, true);
       if (!parsed) {
@@ -607,12 +1076,13 @@ function compileVoiceProperty(
         }]);
       }
       const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
-      return `${sourceSequenceCode(voice.name, parsed.values, parsed.mode)}${every}`;
+      return `${sourceSequenceCode(voice.name, parsed.values, parsed.mode, parsed.amount, parsed.favor, parsed.view, line)}${every}`;
     }
 
     case 'every': {
       const timing = parseEverySpec(value, line, sourceDefinitions);
-      return `__objectevery(${JSON.stringify(voice.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose});`;
+      const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+      return `${prefix}__objectevery(${JSON.stringify(voice.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
     }
 
     case 'cycle':
@@ -638,6 +1108,8 @@ type EverySpec = {
   chance: number;
   drift: boolean;
   loose: boolean;
+  clockSource: string;
+  clockPrelude: string;
 };
 
 function splitEveryClause(value: string): { base: string; every: string | null } {
@@ -677,12 +1149,143 @@ function parseEverySpec(
     throw new LanguageError([{ line, message: 'beat timing currently requires a whole number of beats' }]);
   }
 
-  const timing = parseTimingModifiers(modifiers, line, unit);
-  return { amount, unit, ...timing };
+  let clockSource = 'Clock';
+  let clockPrelude = '';
+  const timingModifiers: string[] = [];
+
+  for (const modifier of modifiers) {
+    const clock = modifier.match(/^clock\s+(.+)$/i);
+    if (!clock) {
+      timingModifiers.push(modifier);
+      continue;
+    }
+    if (unit !== 'beat') {
+      throw new LanguageError([{ line, message: 'with clock is available only for beat-based every clauses' }]);
+    }
+    const clockValue = clock[1].trim();
+    const rate = clockValue.match(/^([/*])\s*(\d+(?:\.\d+)?)$/);
+    if (rate) {
+      const n = Number(rate[2]);
+      if (!Number.isFinite(n) || n <= 0) {
+        throw new LanguageError([{ line, message: 'clock divisor/multiplier must be greater than 0' }]);
+      }
+      const label = `${rate[1]}${formatSourceNumber(n)}`;
+      const safe = label.replace('/', 'div_').replace('*', 'mul_').replace('.', '_');
+      clockSource = `__clock_${line}_${safe}`;
+      clockPrelude = `${clockSource} = Clock.rate(${JSON.stringify(label)});`;
+      continue;
+    }
+    if (!IDENTIFIER.test(clockValue)) {
+      throw new LanguageError([{ line, message: `invalid clock source '${clockValue}'` }]);
+    }
+    const definition = sourceDefinitions.get(clockValue);
+    if (!definition) throw new LanguageError([{ line, message: `unknown clock source '${clockValue}'` }]);
+    if (definition.kind !== 'clock') {
+      throw new LanguageError([{ line, message: `source '${clockValue}' is ${definition.kind}, expected clock source` }]);
+    }
+    clockSource = definition.internalName;
+  }
+
+  const timing = parseTimingModifiers(timingModifiers, line, unit);
+  return { amount, unit, ...timing, clockSource, clockPrelude };
 }
 
 function everyDirective(name: string, spec: EverySpec): string {
-  return `__cycle(${JSON.stringify(name)},${spec.amount},${JSON.stringify(spec.unit)},${spec.chance},${spec.drift},${spec.loose});`;
+  const prefix = spec.clockPrelude ? `${spec.clockPrelude} ` : '';
+  return `${prefix}__cycle(${JSON.stringify(name)},${spec.amount},${JSON.stringify(spec.unit)},${spec.chance},${spec.drift},${spec.loose},${JSON.stringify(spec.clockSource)});`;
+}
+
+function requireSeqReady(seq: SeqState | null, diagnostics: LanguageDiagnostic[]): void {
+  if (!seq) return;
+  if (!seq.modelId) diagnostics.push({ line: seq.line, message: `SEQ '${seq.name}' requires model turing` });
+  if (seq.values.length === 0) diagnostics.push({ line: seq.line, message: `SEQ '${seq.name}' requires notes or scale material` });
+}
+
+function compileSeqProperty(
+  seq: SeqState,
+  property: string,
+  rawValue: string,
+  line: number,
+  sourceDefinitions: Map<string, SourceDefinition>,
+): string {
+  const key = property.toLowerCase();
+  const value = rawValue.trim();
+
+  if (key === 'model') {
+    if (value.toLowerCase() !== 'turing') throw new LanguageError([{ line, message: `unknown SEQ model '${value}'` }]);
+    seq.modelId = 'turing';
+    return `__seqmodel(${JSON.stringify(seq.name)},"turing");`;
+  }
+  if (key === 'length') {
+    const length = numberValue(value, line, 'SEQ length');
+    if (!Number.isInteger(length) || length < 2 || length > 32) throw new LanguageError([{ line, message: 'SEQ turing length expects an integer from 2 to 32' }]);
+    seq.length = length;
+    return `__seqlength(${JSON.stringify(seq.name)},${length});`;
+  }
+  if (key === 'change') {
+    const change = numberValue(value, line, 'SEQ change');
+    if (change < 0 || change > 100) throw new LanguageError([{ line, message: 'SEQ turing change expects 0..100' }]);
+    seq.change = change;
+    return `__seqchange(${JSON.stringify(seq.name)},${change});`;
+  }
+  if (key === 'notes') {
+    const list = value.match(/^\[([^\]]+)\]$/);
+    if (!list) throw new LanguageError([{ line, message: 'SEQ notes expects a note list such as [C2 Eb2 G2]' }]);
+    const items = list[1].trim().split(/\s+/).filter(Boolean);
+    const parsed = items.map((item) => parseNoteSequenceToken(item, line));
+    if (parsed.length === 0 || parsed.some((item) => midiFromNote(item.note) === null)) throw new LanguageError([{ line, message: 'SEQ notes contains an invalid note' }]);
+    if (parsed.some((item) => item.favor !== null)) {
+      throw new LanguageError([{ line, message: 'SEQ turing notes do not support weights, repeats, or retrigs' }]);
+    }
+    seq.values = parsed.map((item) => midiToFrequency(midiFromNote(item.note)!));
+    seq.material = 'notes';
+    const definition = sourceDefinitions.get(seq.name);
+    if (definition?.kind === 'seq') definition.values = [...seq.values];
+    return `__seqvalues(${JSON.stringify(seq.name)},${JSON.stringify(seq.values.join('|'))});`;
+  }
+  if (key === 'scale') {
+    const scale = parseScaleSource(value, line);
+    if (!scale) throw new LanguageError([{ line, message: 'SEQ scale expects a scale and range, for example C minor with range C2 C4' }]);
+    seq.values = scale.values;
+    seq.material = 'scale';
+    const definition = sourceDefinitions.get(seq.name);
+    if (definition?.kind === 'seq') definition.values = [...seq.values];
+    return `__seqvalues(${JSON.stringify(seq.name)},${JSON.stringify(seq.values.join('|'))});`;
+  }
+  if (key === 'every') {
+    const timing = parseEverySpec(value, line, sourceDefinitions);
+    const prefix = timing.clockPrelude ? `${timing.clockPrelude}\n` : '';
+    return `${prefix}__objectevery(${JSON.stringify(seq.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
+  }
+  throw new LanguageError([{ line, message: `unknown SEQ property '${property}'` }]);
+}
+
+function parseEnvelopeSpec(value: string, line: number): EnvelopeSpec | null {
+  const match = value.trim().match(/^(AD|ADR|ASR|ADSR|DAHDSR)\s*\[([^\]]*)\]$/i);
+  if (!match) return null;
+  const kind = match[1].toUpperCase() as EnvelopeKind;
+  const layout = ENVELOPE_LAYOUTS[kind];
+  const parts = match[2].split(',').map((item) => item.trim()).filter(Boolean);
+  if (parts.length !== layout.length) {
+    throw new LanguageError([{ line, message: `${kind} expects exactly ${layout.length} values, got ${parts.length}` }]);
+  }
+  const values = parts.map((part, index) => {
+    if (layout[index] === 'level') {
+      const level = numberValue(part, line, `${kind} sustain`);
+      if (level < 0 || level > 100) throw new LanguageError([{ line, message: `${kind} sustain expects 0..100` }]);
+      return level / 100;
+    }
+    const time = part.match(/^(\d+(?:\.\d+)?)\s*(ms|sec|secs|second|seconds)$/i);
+    if (!time) throw new LanguageError([{ line, message: `${kind} stage ${index + 1} expects a time with ms or sec` }]);
+    const amount = numberValue(time[1], line, `${kind} time`);
+    if (amount < 0) throw new LanguageError([{ line, message: `${kind} times cannot be negative` }]);
+    return /^ms$/i.test(time[2]) ? amount / 1000 : amount;
+  });
+  return { kind, values, display: `${kind} [${parts.join(', ')}]` };
+}
+
+function envelopeLiteral(spec: EnvelopeSpec): string {
+  return JSON.stringify(JSON.stringify({ kind: spec.kind, values: spec.values }));
 }
 
 function compileSet(
@@ -705,6 +1308,26 @@ function compileSet(
 
   const body = match[2].trim();
 
+  const envelope = parseEnvelopeSpec(body, line);
+  if (envelope) {
+    scalarNames.add(name);
+    sourceKinds.set(name, 'envelope');
+    sourceDefinitions.set(name, { kind: 'envelope', spec: envelope, display: envelope.display });
+    return `${name} = ${JSON.stringify(envelope.display)};`;
+  }
+
+  const clockAlias = body.match(/^clock\s+([/*])\s*(\d+(?:\.\d+)?)(?:\s+with\s+(view))?$/i);
+  if (clockAlias) {
+    const n = numberValue(clockAlias[2], line, 'clock rate');
+    if (n <= 0) throw new LanguageError([{ line, message: 'clock divisor/multiplier must be greater than 0' }]);
+    const label = `${clockAlias[1]}${formatSourceNumber(n)}`;
+    scalarNames.add(name);
+    sourceKinds.set(name, 'clock');
+    sourceDefinitions.set(name, { kind: 'clock', internalName: name, rateLabel: label, display: `clock ${label}` });
+    const view = clockAlias[3] ? '.view()' : '';
+    return `${name} = Clock.rate(${JSON.stringify(label)})${view};`;
+  }
+
   const scale = parseScaleSource(body, line);
   if (scale) {
     scalarNames.add(name);
@@ -716,12 +1339,16 @@ function compileSet(
   const noteList = body.match(/^\[([^\]]+)\]$/);
   if (noteList) {
     const items = noteList[1].trim().split(/\s+/).filter(Boolean);
-    if (items.length > 0 && items.every((item) => midiFromNote(item) !== null)) {
-      const values = items.map((item) => midiToFrequency(midiFromNote(item)!));
-      scalarNames.add(name);
-      sourceKinds.set(name, 'note');
-      sourceDefinitions.set(name, { kind: 'note', values, display: `[${items.join(' ')}]` });
-      return `${name} = ${JSON.stringify(`[${items.join(' ')}]`)};`;
+    if (items.length > 0) {
+      const parsed = items.map((item) => parseNoteSequenceToken(item, line));
+      if (parsed.every((item) => midiFromNote(item.note) !== null)) {
+        const values = parsed.map((item) => midiToFrequency(midiFromNote(item.note)!));
+        const favor = parsed.flatMap((item) => item.favor ? [item.favor] : []);
+        scalarNames.add(name);
+        sourceKinds.set(name, 'note');
+        sourceDefinitions.set(name, { kind: 'note', values, display: `[${items.join(' ')}]`, favor });
+        return `${name} = ${JSON.stringify(`[${items.join(' ')}]`)};`;
+      }
     }
   }
 
@@ -745,7 +1372,7 @@ function compileSet(
     const frequency = midiToFrequency(midi);
     scalarNames.add(name);
     sourceKinds.set(name, 'note');
-    sourceDefinitions.set(name, { kind: 'note', values: [frequency], display: note[1] });
+    sourceDefinitions.set(name, { kind: 'note', values: [frequency], display: note[1], favor: [] });
     return `${name} = ${JSON.stringify(note[1])};`;
   }
 
@@ -810,61 +1437,86 @@ function compileSet(
 }
 
 
+function requireClockReady(clock: ClockState | null, diagnostics: LanguageDiagnostic[]): void {
+  if (clock && !clock.parent) diagnostics.push({ line: clock.line, message: `CLOCK '${clock.name}' requires from <clock> /n or *n` });
+}
+
+function compileClockProperty(
+  clock: ClockState,
+  property: string,
+  rawValue: string,
+  line: number,
+  sourceDefinitions: Map<string, SourceDefinition>,
+): string {
+  const key = property.toLowerCase();
+  const value = rawValue.trim();
+  if (key === 'from') {
+    const match = value.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\s+([/*])\s*(\d+(?:\.\d+)?))?$/i);
+    if (!match) throw new LanguageError([{ line, message: 'CLOCK from expects MASTER or a clock name, optionally followed by /n or *n' }]);
+    const rawParent = match[1];
+    const parent = /^master$/i.test(rawParent) ? 'Clock' : rawParent;
+    if (parent !== 'Clock') {
+      const definition = sourceDefinitions.get(parent);
+      if (!definition || definition.kind !== 'clock') throw new LanguageError([{ line, message: `unknown parent clock '${rawParent}'` }]);
+      if (parent === clock.name) throw new LanguageError([{ line, message: 'CLOCK cannot derive from itself' }]);
+    }
+    const op = match[2] ?? '*';
+    const amount = match[3] ? numberValue(match[3], line, 'CLOCK rate') : 1;
+    if (amount <= 0) throw new LanguageError([{ line, message: 'CLOCK divisor/multiplier must be greater than 0' }]);
+    clock.parent = parent;
+    clock.rate = op === '/' ? 1 / amount : amount;
+    clock.rateLabel = `${op}${formatSourceNumber(amount)}`;
+    const definition = sourceDefinitions.get(clock.name);
+    if (definition?.kind === 'clock') definition.rateLabel = clock.rateLabel;
+    return `__clockparent(${JSON.stringify(clock.name)},${JSON.stringify(parent)},${JSON.stringify(clock.rateLabel)});`;
+  }
+  if (key === 'jitter' || key === 'drift') {
+    const amount = numberValue(value, line, `CLOCK ${key}`);
+    if (amount < 0 || amount > 100) throw new LanguageError([{ line, message: `CLOCK ${key} expects 0..100` }]);
+    if (key === 'jitter') clock.jitter = amount; else clock.drift = amount;
+    return `__clockfeel(${JSON.stringify(clock.name)},${JSON.stringify(key)},${amount});`;
+  }
+  throw new LanguageError([{ line, message: `unknown CLOCK property '${property}'` }]);
+}
+
 function compileClock(lineText: string, line: number): string {
   const match = lineText.match(/^CLOCK\s+set\s+(.+?)\s+bpm(?:\s+with\s+(.+))?$/i);
-  if (!match) {
-    throw new LanguageError([{
-      line,
-      message: 'CLOCK expects: CLOCK set <expression> bpm [with cycle <n> <unit>, drift]',
-    }]);
-  }
-
+  if (!match) throw new LanguageError([{ line, message: 'CLOCK expects: CLOCK set <expression> bpm [with jitter <0..100>, drift <0..100>]' }]);
   const expression = match[1].trim();
-  if (!expression) {
-    throw new LanguageError([{ line, message: 'CLOCK set expects a BPM expression' }]);
-  }
-
+  if (!expression) throw new LanguageError([{ line, message: 'CLOCK set expects a BPM expression' }]);
   let cycleAmount: number | null = null;
   let cycleUnit: 'ms' | 'sec' | 'beat' | null = null;
-  let drift = false;
-
-  const modifiers = (match[2] ?? '')
-    .split(',')
-    .map((item) => item.trim())
-    .filter(Boolean);
-
+  let expressionDrift = false;
+  let jitter = 0;
+  let timingDrift = 0;
+  const modifiers = (match[2] ?? '').split(',').map((item) => item.trim()).filter(Boolean);
   for (const modifier of modifiers) {
     const cycle = modifier.match(/^cycle\s+(\d+(?:\.\d+)?)\s+(ms|sec|secs|second|seconds|beat|beats)$/i);
     if (cycle) {
-      if (cycleAmount !== null) {
-        throw new LanguageError([{ line, message: 'CLOCK accepts only one cycle modifier' }]);
-      }
+      if (cycleAmount !== null) throw new LanguageError([{ line, message: 'CLOCK accepts only one cycle modifier' }]);
       cycleAmount = numberValue(cycle[1], line, 'CLOCK cycle');
-      if (cycleAmount <= 0) {
-        throw new LanguageError([{ line, message: 'CLOCK cycle must be greater than 0' }]);
-      }
+      if (cycleAmount <= 0) throw new LanguageError([{ line, message: 'CLOCK cycle must be greater than 0' }]);
       cycleUnit = normalizeCycleUnit(cycle[2], line);
-      if (cycleUnit === 'beat' && !Number.isInteger(cycleAmount)) {
-        throw new LanguageError([{ line, message: 'CLOCK beat cycles currently require a whole number of beats' }]);
-      }
+      if (cycleUnit === 'beat' && !Number.isInteger(cycleAmount)) throw new LanguageError([{ line, message: 'CLOCK beat cycles currently require a whole number of beats' }]);
       continue;
     }
-
-    if (/^drift$/i.test(modifier)) {
-      drift = true;
+    const jitterMatch = modifier.match(/^jitter\s+(\d+(?:\.\d+)?)$/i);
+    if (jitterMatch) {
+      jitter = numberValue(jitterMatch[1], line, 'CLOCK jitter');
+      if (jitter < 0 || jitter > 100) throw new LanguageError([{ line, message: 'CLOCK jitter expects 0..100' }]);
       continue;
     }
-
+    const driftMatch = modifier.match(/^drift\s+(\d+(?:\.\d+)?)$/i);
+    if (driftMatch) {
+      timingDrift = numberValue(driftMatch[1], line, 'CLOCK drift');
+      if (timingDrift < 0 || timingDrift > 100) throw new LanguageError([{ line, message: 'CLOCK drift expects 0..100' }]);
+      continue;
+    }
+    if (/^drift$/i.test(modifier)) { expressionDrift = true; continue; }
     throw new LanguageError([{ line, message: `CLOCK does not support modifier '${modifier}'` }]);
   }
-
-  if (cycleAmount === null || cycleUnit === null) {
-    return `__masterclock(${JSON.stringify(expression)},0,"ms",${drift});`;
-  }
-
-  return `__masterclock(${JSON.stringify(expression)},${cycleAmount},${JSON.stringify(cycleUnit)},${drift});`;
+  return `__masterclock(${JSON.stringify(expression)},${cycleAmount ?? 0},${JSON.stringify(cycleUnit ?? 'ms')},${expressionDrift},${jitter},${timingDrift});`;
 }
-
 
 function modSourceKey(ownerVoice: string | null, name: string): string {
   return ownerVoice ? `${ownerVoice}:${name}` : name;
@@ -1015,8 +1667,14 @@ function semitonesFromFrequency(frequency: number): number {
   return 12 * Math.log2(frequency / c4);
 }
 
-function fxPitchSequenceDirective(name: string, values: number[], mode: SelectionMode): string {
-  return `__fxsequence(${JSON.stringify(name)},${JSON.stringify(values.join('|'))},${JSON.stringify(mode)});`;
+function fxPitchSequenceDirective(
+  name: string,
+  values: number[],
+  mode: SelectionMode,
+  amount = 0,
+  favor: SequenceFavorEntry[] = [],
+): string {
+  return `__fxsequence(${JSON.stringify(name)},${JSON.stringify(values.join('|'))},${JSON.stringify(mode)},${amount},${JSON.stringify(JSON.stringify(favor))});`;
 }
 
 function compileFxProperty(
@@ -1041,13 +1699,25 @@ function compileFxProperty(
 
   if (key === 'every') {
     const timing = parseEverySpec(value, line, sourceDefinitions);
-    return `__objectevery(${JSON.stringify(fx.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose});`;
+    const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+    return `${prefix}__objectevery(${JSON.stringify(fx.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
   }
 
   if (!fx.modelId) {
     throw new LanguageError([{ line, message: `${property} requires FX model to be declared first` }]);
   }
   const schema = FX_MODEL_REGISTRY[fx.modelId];
+  const skyAliases: Record<string, FxParameter> = {
+    decay: 'feedback',
+    damp: 'texture',
+    damping: 'texture',
+    bloom: 'density',
+    diffuse: 'density',
+    predelay: 'position',
+    motion: 'reverb',
+    width: 'spread',
+  };
+  const effectiveKey = fx.modelId === 'sky' ? (skyAliases[key] ?? key) : key;
 
   if (key === 'freeze' || key === 'reverse') {
     if (!/^(on|off|true|false)$/i.test(value)) {
@@ -1057,63 +1727,133 @@ function compileFxProperty(
     return `${fx.name}.${key}(${enabled});`;
   }
 
-  if (key === 'note' || key === 'scale' || key === 'freq') {
+  const pitchModeMatch = key === 'pitch'
+    ? value.match(/^(note|scale|freq)\s+(.+)$/i)
+    : null;
+  const musicalPitchKey = pitchModeMatch
+    ? pitchModeMatch[1].toLowerCase() as 'note' | 'scale' | 'freq'
+    : (key === 'note' || key === 'scale' || key === 'freq' ? key : null);
+  const musicalPitchValue = pitchModeMatch ? pitchModeMatch[2].trim() : value;
+
+  if (musicalPitchKey) {
+    claimPitchProperty(fx, musicalPitchKey, line, 'FX');
     if (!schema.musicalPitch) {
-      throw new LanguageError([{ line, message: `${key} is not available for ${fx.modelId}` }]);
+      throw new LanguageError([{ line, message: `${musicalPitchKey} pitch is not available for ${fx.modelId}` }]);
     }
 
-    const split = splitEveryClause(value);
+    const split = splitEveryClause(musicalPitchValue);
     let pitchValues: number[] = [];
     let mode: SelectionMode = 'order';
+    let selectionAmount = 0;
+    let pitchFavor: SequenceFavorEntry[] = [];
+    let pitchView = false;
 
-    if (key === 'note') {
+    const fromSource = split.base.match(/^from\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(.+))?$/i);
+    if (fromSource) {
+      const sourceName = fromSource[1];
+      const definition = sourceDefinitions.get(sourceName);
+      if (!definition) {
+        throw new LanguageError([{ line, message: `unknown source '${sourceName}'` }]);
+      }
+
+      const modifiers = (fromSource[2] ?? '')
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean);
+      pitchView = modifiers.some((modifier) => /^view$/i.test(modifier));
+      const selection = parseSelectionMode(
+        modifiers.filter((modifier) => !/^view$/i.test(modifier)),
+        line,
+        `pitch ${musicalPitchKey}`,
+      );
+      mode = selection.mode;
+      selectionAmount = selection.amount;
+
+      if (musicalPitchKey === 'note') {
+        if (definition.kind !== 'note' && definition.kind !== 'scale') {
+          throw new LanguageError([{ line, message: `source '${sourceName}' is ${definition.kind}, expected note or scale source for pitch note` }]);
+        }
+        pitchValues = definition.values.map(semitonesFromFrequency);
+        const storedFavor = definition.kind === 'note' ? definition.favor : [];
+        pitchFavor = mergeFavor(storedFavor, selection.favor);
+        validateFavorForMode(pitchFavor, mode, line, 'pitch note');
+      } else if (musicalPitchKey === 'scale') {
+        if (definition.kind !== 'scale') {
+          throw new LanguageError([{ line, message: `source '${sourceName}' is ${definition.kind}, expected scale source for pitch scale` }]);
+        }
+        pitchValues = definition.values.map(semitonesFromFrequency);
+        pitchFavor = selection.favor;
+        validateFavorForMode(pitchFavor, mode, line, 'pitch scale');
+      } else {
+        if (definition.kind !== 'freq') {
+          throw new LanguageError([{ line, message: `source '${sourceName}' is ${definition.kind}, expected frequency source for pitch freq` }]);
+        }
+        pitchValues = definition.values.map(semitonesFromFrequency);
+        pitchFavor = selection.favor;
+        validateFavorForMode(pitchFavor, mode, line, 'pitch freq');
+      }
+    } else
+    if (musicalPitchKey === 'note') {
       const parsed = splitWith(split.base);
-      const notes = parseList(parsed.base, line, 'note');
+      pitchView = parsed.modifiers.some((modifier) => /^view$/i.test(modifier));
+      const pitchModifiers = parsed.modifiers.filter((modifier) => !/^view$/i.test(modifier));
+      const noteTokens = parseList(parsed.base, line, 'note').map((token) => parseNoteSequenceToken(token, line));
+      const notes = noteTokens.map((token) => token.note);
+      const inlineFavor = noteTokens.flatMap((token) => token.favor ? [token.favor] : []);
       pitchValues = notes.map((note) => {
         const midi = midiFromNote(note);
         if (midi === null) throw new LanguageError([{ line, message: `invalid note '${note}'` }]);
         return midi - 60;
       });
-      mode = parseSelectionMode(parsed.modifiers, line, 'note');
-    } else if (key === 'freq') {
+      { const selection = parseSelectionMode(pitchModifiers, line, 'note'); mode = selection.mode; selectionAmount = selection.amount; pitchFavor = mergeFavor(inlineFavor, selection.favor); validateFavorForMode(pitchFavor, mode, line, 'note'); }
+    } else if (musicalPitchKey === 'freq') {
       const parsed = splitWith(split.base);
       const frequencies = parseList(parsed.base, line, 'freq').map((item) => numberValue(item, line, 'freq'));
       if (frequencies.some((frequency) => frequency <= 0)) {
         throw new LanguageError([{ line, message: 'freq must be greater than 0' }]);
       }
       pitchValues = frequencies.map(semitonesFromFrequency);
-      mode = parseSelectionMode(parsed.modifiers, line, 'freq');
+      { const selection = parseSelectionMode(parsed.modifiers, line, 'freq'); mode = selection.mode; selectionAmount = selection.amount; pitchFavor = selection.favor; }
     } else {
       const parsed = parseScaleSpec(split.base, line, true);
       if (!parsed) throw new LanguageError([{ line, message: 'scale expects root and mode with optional range and sequencing modifier' }]);
       pitchValues = parsed.values.map(semitonesFromFrequency);
       mode = parsed.mode;
+      selectionAmount = parsed.amount;
+      pitchFavor = parsed.favor;
+      pitchView = parsed.view;
     }
 
     if (pitchValues.some((pitch) => pitch < -48 || pitch > 48)) {
       throw new LanguageError([{ line, message: 'FX musical pitch must resolve inside -48..48 semitones relative to C4' }]);
     }
 
-    const sequence = pitchValues.length > 1 ? ` ${fxPitchSequenceDirective(fx.name, pitchValues, mode)}` : '';
+    const sequence = pitchValues.length > 1 ? ` ${fxPitchSequenceDirective(fx.name, pitchValues, mode, selectionAmount, pitchFavor)}` : '';
+    const pianoProperty = musicalPitchKey === 'note' ? 'note' : musicalPitchKey === 'scale' ? 'scale' : null;
+    const piano = pitchView && pianoProperty
+      ? ` ${inlinePianoDirective('fx', fx.name, pianoProperty, line, pitchValues.map((pitch) => midiToFrequency(60 + pitch)))}`
+      : '';
     const every = split.every
       ? (() => {
           const timing = parseEverySpec(split.every!, line, sourceDefinitions);
-          return ` __fxpitchcycle(${JSON.stringify(fx.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose});`;
+          const prefix = timing.clockPrelude ? ` ${timing.clockPrelude}` : '';
+          return `${prefix} __fxpitchcycle(${JSON.stringify(fx.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
         })()
       : '';
-    return `${fx.name}.pitch(${pitchValues[0]});${sequence}${every}`;
+    return `${fx.name}.pitch(${pitchValues[0]});${sequence}${every}${piano}`;
   }
 
-  if (!schema.parameters.has(key as FxParameter)) {
+  if (!schema.parameters.has(effectiveKey as FxParameter)) {
     throw new LanguageError([{ line, message: `unknown FX property '${property}' for ${fx.modelId}` }]);
   }
 
-  const parameter = key as FxParameter;
+  const parameter = effectiveKey as FxParameter;
   const modulation = /^from\s+/i.test(value) ? compileFxModulation(fx, parameter, value, line, modSources) : null;
   if (modulation) return modulation;
 
   const split = splitEveryClause(value);
-  const expression = split.base;
+  const generative = parseGenerativeValue(split.base, line);
+  const expression = generative.base;
   if (!expression) throw new LanguageError([{ line, message: `${parameter} expects a value` }]);
 
   if (parameter === 'pitch') {
@@ -1124,27 +1864,51 @@ function compileFxProperty(
   }
 
   const initial = `${fx.name}.${parameter}(${expression});`;
+  if (generative.mode) {
+    if (split.every) {
+      const timing = parseEverySpec(split.every, line, sourceDefinitions);
+      const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+      const inline = generative.view ? ` ${inlineScalarDirective('fx', fx.name, parameter, line, expression)}` : '';
+      return `${initial} ${prefix}__genparamcycle("fx",${JSON.stringify(fx.name)},${JSON.stringify(parameter)},${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});${inline}`;
+    }
+    const inline = generative.view ? ` ${inlineScalarDirective('fx', fx.name, parameter, line, expression)}` : '';
+    return `${initial} __genparamdefault("fx",${JSON.stringify(fx.name)},${JSON.stringify(parameter)},${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount});${inline}`;
+  }
+
   if (split.every) {
     const timing = parseEverySpec(split.every, line, sourceDefinitions);
-    return `${initial} __fxparamcycle(${JSON.stringify(fx.name)},${JSON.stringify(parameter)},${JSON.stringify(expression)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose});`;
+    const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+    return `${initial} ${prefix}__fxparamcycle(${JSON.stringify(fx.name)},${JSON.stringify(parameter)},${JSON.stringify(expression)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
   }
   return `${initial} __fxparamdefault(${JSON.stringify(fx.name)},${JSON.stringify(parameter)},${JSON.stringify(expression)});`;
 }
 
+type PlayPort = 'out' | 'main' | 'aux' | 'lp' | 'hp' | 'bp' | 'np' | 'in' | 'in2' | null;
+
 type PlayEndpoint = {
   name: string;
   channel: 'L' | 'R' | null;
-  port: 'out' | 'aux' | null;
+  port: PlayPort;
   amount: number;
 };
 
+type PlayObjectKind = 'voice' | 'matter' | 'resonator' | 'fx' | 'filter' | 'main';
+
+type PlaySignal =
+  | { stereo: false; mono: string }
+  | { stereo: true; left: string; right: string; primary: string };
+
+type PlayInput =
+  | { stereo: false; mono: string }
+  | { stereo: true; left: string; right: string };
+
 function parsePlayEndpoint(raw: string, line: number): PlayEndpoint {
-  const match = raw.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\.(out|aux|L|R))?(?:\s+at\s+(.+))?$/i);
+  const match = raw.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\.(out|main|aux|lp|hp|bp|np|in|in2|L|R))?(?:\s+at\s+(.+))?$/i);
   if (!match) throw new LanguageError([{ line, message: `invalid PLAY endpoint '${raw.trim()}'` }]);
   const suffix = match[2]?.toLowerCase() ?? null;
   return {
     name: match[1],
-    port: suffix === 'out' || suffix === 'aux' ? suffix : null,
+    port: suffix === 'out' || suffix === 'main' || suffix === 'aux' || suffix === 'lp' || suffix === 'hp' || suffix === 'bp' || suffix === 'np' || suffix === 'in' || suffix === 'in2' ? suffix : null,
     channel: suffix === 'l' ? 'L' : suffix === 'r' ? 'R' : null,
     amount: match[3] === undefined ? 100 : normalizedAmount(match[3].trim(), line),
   };
@@ -1155,6 +1919,9 @@ function compilePlay(
   line: number,
   voices: Set<string>,
   fxs: Set<string>,
+  filters: Set<string>,
+  voiceEmbeddedFilters: Map<string, string>,
+  voiceSoundIds: Map<string, string>,
 ): string {
   const body = lineText.trim().replace(/^PLAY\s+/i, '');
   if (body === lineText.trim()) throw new LanguageError([{ line, message: 'PLAY expects a source' }]);
@@ -1174,11 +1941,131 @@ function compilePlay(
     throw new LanguageError([{ line, message: "after the first 'through', PLAY chains use 'then'" }]);
   }
 
-  const kindOf = (name: string): 'voice' | 'fx' | 'main' => {
-    if (voices.has(name)) return 'voice';
+  const kindOf = (name: string): PlayObjectKind => {
+    if (voices.has(name)) {
+      const sound = voiceSoundIds.get(name) ?? '';
+      if (sound === 'matter') return 'matter';
+      if (sound.startsWith('resonator.')) return 'resonator';
+      return 'voice';
+    }
     if (fxs.has(name)) return 'fx';
+    if (filters.has(name)) return 'filter';
     if (name.toUpperCase() === 'MAIN') return 'main';
     throw new LanguageError([{ line, message: `unknown PLAY object '${name}'` }]);
+  };
+
+  const sourceSignal = (endpoint: PlayEndpoint, kind: PlayObjectKind): PlaySignal => {
+    if (kind === 'main') throw new LanguageError([{ line, message: 'MAIN cannot be used as a PLAY source' }]);
+
+    if (kind === 'filter') {
+      if (endpoint.channel) throw new LanguageError([{ line, message: 'FILTER outputs are mono; .L/.R are not valid' }]);
+      if (endpoint.port === 'in' || endpoint.port === 'in2') {
+        throw new LanguageError([{ line, message: `FILTER '${endpoint.name}' input cannot be used as an audio source` }]);
+      }
+      if (endpoint.port && !['lp', 'hp', 'bp', 'np'].includes(endpoint.port)) {
+        throw new LanguageError([{ line, message: `FILTER '${endpoint.name}' output must be .lp, .hp, .bp, or .np` }]);
+      }
+      return { stereo: false, mono: `${endpoint.name}.${endpoint.port ?? 'lp'}` };
+    }
+
+    if (kind === 'fx') {
+      if (endpoint.port) throw new LanguageError([{ line, message: 'FX outputs use .L/.R, not named mono ports' }]);
+      if (endpoint.channel) {
+        return { stereo: false, mono: `${endpoint.name}.${endpoint.channel === 'R' ? 'out_R' : 'out_L'}` };
+      }
+      return {
+        stereo: true,
+        left: `${endpoint.name}.out_L`,
+        right: `${endpoint.name}.out_R`,
+        primary: `${endpoint.name}.out_L`,
+      };
+    }
+
+    const embeddedFilter = voiceEmbeddedFilters.get(endpoint.name);
+    if (embeddedFilter) {
+      if (endpoint.channel) throw new LanguageError([{ line, message: 'VOICE/FILTER outputs are mono; .L/.R are not valid' }]);
+      if (endpoint.port === 'in' || endpoint.port === 'in2') {
+        throw new LanguageError([{ line, message: `input selector '${endpoint.port}' cannot be used as an output of '${endpoint.name}'` }]);
+      }
+      if (endpoint.port && !['lp', 'hp', 'bp', 'np'].includes(endpoint.port)) {
+        throw new LanguageError([{ line, message: `VOICE '${endpoint.name}' contains FILTER '${embeddedFilter}'; available outputs are .lp, .hp, .bp, .np` }]);
+      }
+      return { stereo: false, mono: `${endpoint.name}.${endpoint.port ?? 'lp'}` };
+    }
+
+    if (kind === 'voice') {
+      if (endpoint.channel) throw new LanguageError([{ line, message: 'VOICE outputs are mono ports; .L/.R are not valid' }]);
+      if (endpoint.port === 'in' || endpoint.port === 'in2') {
+        throw new LanguageError([{ line, message: `VOICE '${endpoint.name}' does not expose an audio input` }]);
+      }
+      if (endpoint.port && !['out', 'aux'].includes(endpoint.port)) {
+        throw new LanguageError([{ line, message: `VOICE '${endpoint.name}' output must be .out or .aux` }]);
+      }
+      return { stereo: false, mono: `${endpoint.name}.${endpoint.port ?? 'out'}` };
+    }
+
+    if (endpoint.channel) throw new LanguageError([{ line, message: `${kind} outputs use named MAIN/AUX ports, not .L/.R` }]);
+    // When an input selector is used on an intermediate endpoint (for example
+    // `THROUGH body.in2 THEN MAIN`), the following edge uses the default stereo
+    // output of the same object.
+    const outputPort = endpoint.port === 'in' || endpoint.port === 'in2' ? null : endpoint.port;
+    if (outputPort && !['out', 'main', 'aux'].includes(outputPort)) {
+      throw new LanguageError([{ line, message: `${kind} '${endpoint.name}' output must be .main/.out or .aux` }]);
+    }
+    if (outputPort === 'out' || outputPort === 'main') return { stereo: false, mono: `${endpoint.name}.out` };
+    if (outputPort === 'aux') return { stereo: false, mono: `${endpoint.name}.aux` };
+    return {
+      stereo: true,
+      left: `${endpoint.name}.out`,
+      right: `${endpoint.name}.aux`,
+      primary: `${endpoint.name}.out`,
+    };
+  };
+
+  const targetInput = (endpoint: PlayEndpoint, kind: PlayObjectKind): PlayInput | null => {
+    if (kind === 'main') return null;
+
+    if (kind === 'voice') {
+      throw new LanguageError([{ line, message: `object '${endpoint.name}' does not expose an audio input` }]);
+    }
+
+    if (kind === 'filter') {
+      if (endpoint.channel) throw new LanguageError([{ line, message: 'FILTER input is mono; .L/.R are not valid' }]);
+      if (endpoint.port === 'in2') throw new LanguageError([{ line, message: `FILTER '${endpoint.name}' has no .in2 input` }]);
+      // An output selector on an intermediate node selects which FILTER output
+      // is used by the next edge; audio still enters the filter's default IN.
+      if (endpoint.port && !['in', 'lp', 'hp', 'bp', 'np'].includes(endpoint.port)) {
+        throw new LanguageError([{ line, message: `FILTER '${endpoint.name}' has no input '${endpoint.port}'` }]);
+      }
+      return { stereo: false, mono: `${endpoint.name}.in` };
+    }
+
+    if (kind === 'resonator') {
+      if (endpoint.channel) throw new LanguageError([{ line, message: `resonator '${endpoint.name}' has one mono audio input` }]);
+      if (endpoint.port === 'in2') throw new LanguageError([{ line, message: `resonator '${endpoint.name}' has no .in2 input` }]);
+      if (endpoint.port && !['in', 'out', 'main', 'aux'].includes(endpoint.port)) {
+        throw new LanguageError([{ line, message: `resonator '${endpoint.name}' has no input '${endpoint.port}'` }]);
+      }
+      return { stereo: false, mono: `${endpoint.name}.in` };
+    }
+
+    if (kind === 'matter') {
+      if (endpoint.channel) throw new LanguageError([{ line, message: `matter '${endpoint.name}' external inputs are mono` }]);
+      if (endpoint.port && !['in', 'in2', 'out', 'main', 'aux'].includes(endpoint.port)) {
+        throw new LanguageError([{ line, message: `matter '${endpoint.name}' has no input '${endpoint.port}'` }]);
+      }
+      return { stereo: false, mono: `${endpoint.name}.${endpoint.port === 'in2' ? 'in2' : 'in'}` };
+    }
+
+    // Stereo FX can be addressed as a stereo destination, or one channel can
+    // be selected explicitly with .L/.R. Output channel selectors on an
+    // intermediate FX therefore naturally select the same channel on both
+    // incoming and outgoing edges.
+    if (endpoint.port) throw new LanguageError([{ line, message: `FX '${endpoint.name}' input uses .L/.R channel selectors` }]);
+    if (endpoint.channel) {
+      return { stereo: false, mono: `${endpoint.name}.${endpoint.channel === 'R' ? 'inR' : 'inL'}` };
+    }
+    return { stereo: true, left: `${endpoint.name}.inL`, right: `${endpoint.name}.inR` };
   };
 
   const routes: string[] = [];
@@ -1187,41 +2074,39 @@ function compilePlay(
     const target = endpoints[edge + 1];
     const sourceKind = kindOf(source.name);
     const targetKind = kindOf(target.name);
-    if (sourceKind === 'main') throw new LanguageError([{ line, message: 'MAIN cannot be used as a PLAY source' }]);
-    if (targetKind === 'voice') throw new LanguageError([{ line, message: 'VOICE cannot be used as an audio destination' }]);
-    if (target.port) throw new LanguageError([{ line, message: 'destination uses .L/.R channel selectors, not .out/.aux' }]);
-    if (sourceKind === 'fx' && source.port) throw new LanguageError([{ line, message: 'FX outputs use .L/.R, not .out/.aux' }]);
-    if (sourceKind === 'voice' && source.channel) throw new LanguageError([{ line, message: 'VOICE outputs use .out/.aux; .L/.R are for stereo FX' }]);
-
+    const signal = sourceSignal(source, sourceKind);
     const amount = source.amount;
-    const sourceMono = sourceKind === 'voice' || source.channel !== null;
-    const sourceMonoSignal = sourceKind === 'voice'
-      ? `${source.name}.${source.port ?? 'out'}`
-      : `${source.name}.${source.channel === 'R' ? 'out_R' : 'out_L'}`;
 
     if (targetKind === 'main') {
+      if (target.port) throw new LanguageError([{ line, message: 'MAIN has no named audio port; use MAIN, MAIN.L, or MAIN.R' }]);
       if (target.channel) {
-        if (!sourceMono) throw new LanguageError([{ line, message: `stereo FX '${source.name}' must select .L or .R when routing to MAIN.${target.channel}` }]);
-        routes.push(`${sourceMonoSignal}(${amount}) -> Audio.out_${target.channel};`);
-      } else if (sourceMono) {
-        routes.push(`${sourceMonoSignal}(${amount}) -> Audio.out;`);
+        const mono = signal.stereo ? (target.channel === 'R' ? signal.right : signal.left) : signal.mono;
+        routes.push(`${mono}(${amount}) -> Audio.out_${target.channel};`);
+      } else if (signal.stereo) {
+        routes.push(`${signal.left}(${amount}) -> Audio.out_L;`);
+        routes.push(`${signal.right}(${amount}) -> Audio.out_R;`);
       } else {
-        routes.push(`${source.name}.out_L(${amount}) -> Audio.out_L;`);
-        routes.push(`${source.name}.out_R(${amount}) -> Audio.out_R;`);
+        routes.push(`${signal.mono}(${amount}) -> Audio.out;`);
       }
       continue;
     }
 
-    // Target is stereo FX.
-    if (target.channel) {
-      if (!sourceMono) throw new LanguageError([{ line, message: `stereo FX '${source.name}' must select .L or .R when routing to ${target.name}.${target.channel}` }]);
-      routes.push(`${sourceMonoSignal}(${amount}) -> ${target.name}.in${target.channel};`);
-    } else if (sourceMono) {
-      // Mono convenience input duplicates to both channels in the Mist engine.
-      routes.push(`${sourceMonoSignal}(${amount}) -> ${target.name}.in;`);
+    const input = targetInput(target, targetKind);
+    if (!input) throw new LanguageError([{ line, message: `object '${target.name}' does not expose an audio input` }]);
+
+    if (input.stereo) {
+      if (signal.stereo) {
+        routes.push(`${signal.left}(${amount}) -> ${input.left};`);
+        routes.push(`${signal.right}(${amount}) -> ${input.right};`);
+      } else {
+        routes.push(`${signal.mono}(${amount}) -> ${input.left};`);
+        routes.push(`${signal.mono}(${amount}) -> ${input.right};`);
+      }
     } else {
-      routes.push(`${source.name}.out_L(${amount}) -> ${target.name}.inL;`);
-      routes.push(`${source.name}.out_R(${amount}) -> ${target.name}.inR;`);
+      // Stereo -> mono coercion uses the object's primary channel. For all
+      // current stereo Sonus objects that is MAIN/L; explicit .aux/.R always
+      // overrides the coercion at the source endpoint.
+      routes.push(`${signal.stereo ? signal.primary : signal.mono}(${amount}) -> ${input.mono};`);
     }
   }
 
@@ -1232,6 +2117,162 @@ function compilePlay(
   return routes.join('\n');
 }
 
+
+function compileFilterProperty(
+  filter: FilterState,
+  property: string,
+  rawValue: string,
+  line: number,
+  sourceDefinitions: Map<string, SourceDefinition>,
+): string {
+  const key = property.toLowerCase();
+  const value = rawValue.trim();
+
+  if (key === 'every') {
+    const timing = parseEverySpec(value, line, sourceDefinitions);
+    const prefix = timing.clockPrelude ? `${timing.clockPrelude}\n` : '';
+    return `${prefix}__objectevery(${JSON.stringify(filter.internalName)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
+  }
+
+  if (key === 'model') {
+    if (!/^svf$/i.test(value)) {
+      throw new LanguageError([{ line, message: "FILTER model expects svf" }]);
+    }
+    filter.hasModel = true;
+    return `${filter.internalName}.model("svf");`;
+  }
+  if (!filter.hasModel) throw new LanguageError([{ line, message: `FILTER '${filter.name}' requires model before parameters` }]);
+
+  if (key === 'resonance') {
+    const split = splitEveryClause(value);
+    const generative = parseGenerativeValue(split.base, line);
+    const expression = generative.base;
+    const literal = Number(expression);
+    if (Number.isFinite(literal) && (literal < 0 || literal > 100)) {
+      throw new LanguageError([{ line, message: 'resonance expects 0..100' }]);
+    }
+    const initial = `${filter.internalName}.resonance(${expression});`;
+    if (generative.mode) {
+      if (split.every) {
+        const timing = parseEverySpec(split.every, line, sourceDefinitions);
+        const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+        const inline = generative.view ? ` ${inlineScalarDirective('filter', filter.internalName, 'resonance', line, expression)}` : '';
+        return `${initial} ${prefix}__genparamcycle("filter",${JSON.stringify(filter.internalName)},"resonance",${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});${inline}`;
+      }
+      const inline = generative.view ? ` ${inlineScalarDirective('filter', filter.internalName, 'resonance', line, expression)}` : '';
+      return `${initial} __genparamdefault("filter",${JSON.stringify(filter.internalName)},"resonance",${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount});${inline}`;
+    }
+    if (split.every) throw new LanguageError([{ line, message: 'resonance every requires a generative modifier' }]);
+    return initial;
+  }
+  if (key === 'drive') {
+    const split = splitEveryClause(value);
+    const generative = parseGenerativeValue(split.base, line);
+    const expression = generative.base;
+    const literal = Number(expression);
+    if (Number.isFinite(literal) && (literal < 0 || literal > 100)) {
+      throw new LanguageError([{ line, message: 'drive expects 0..100' }]);
+    }
+    const initial = `${filter.internalName}.drive(${expression});`;
+    if (generative.mode) {
+      if (split.every) {
+        const timing = parseEverySpec(split.every, line, sourceDefinitions);
+        const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+        const inline = generative.view ? ` ${inlineScalarDirective('filter', filter.internalName, 'drive', line, expression)}` : '';
+        return `${initial} ${prefix}__genparamcycle("filter",${JSON.stringify(filter.internalName)},"drive",${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});${inline}`;
+      }
+      const inline = generative.view ? ` ${inlineScalarDirective('filter', filter.internalName, 'drive', line, expression)}` : '';
+      return `${initial} __genparamdefault("filter",${JSON.stringify(filter.internalName)},"drive",${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount});${inline}`;
+    }
+    if (split.every) throw new LanguageError([{ line, message: 'drive every requires a generative modifier' }]);
+    return initial;
+  }
+
+  if (key !== 'cutoff') throw new LanguageError([{ line, message: `unknown FILTER property '${property}'` }]);
+
+  const split = splitEveryClause(value);
+  const base = split.base.trim();
+
+  const note = base.match(/^note\s+(.+)$/i);
+  if (note) {
+    const parsed = splitWith(note[1].trim());
+    const view = parsed.modifiers.some((modifier) => /^view$/i.test(modifier));
+    const selectionModifiers = parsed.modifiers.filter((modifier) => !/^view$/i.test(modifier));
+    const tokens = parseList(parsed.base, line, 'cutoff note').map((token) => parseNoteSequenceToken(token, line));
+    const values = tokens.map((token) => {
+      const midi = midiFromNote(token.note);
+      if (midi === null) throw new LanguageError([{ line, message: `invalid cutoff note '${token.note}'` }]);
+      return midiToFrequency(midi);
+    });
+    const inlineFavor = tokens.flatMap((token) => token.favor ? [token.favor] : []);
+    const selection = parseSelectionMode(selectionModifiers, line, 'cutoff note');
+    const favor = mergeFavor(inlineFavor, selection.favor);
+    validateFavorForMode(favor, selection.mode, line, 'cutoff note');
+    if (values.length === 1) {
+      if (split.every) throw new LanguageError([{ line, message: 'single cutoff note does not use every' }]);
+      return `${filter.internalName}.cutoff(${values[0]});`;
+    }
+    if (!split.every) throw new LanguageError([{ line, message: 'cutoff note list requires every <time>' }]);
+    const every = parseEverySpec(split.every, line, sourceDefinitions);
+    const prelude = every.clockPrelude ? `${every.clockPrelude}\n` : '';
+    const piano = view ? `\n${inlinePianoDirective('filter', filter.internalName, 'note', line, values)}` : '';
+    return `${filter.internalName}.cutoff(${values[0]});\n${prelude}__filtersequence(${JSON.stringify(filter.internalName)},${JSON.stringify(values.join('|'))},${JSON.stringify(selection.mode)},${selection.amount},${JSON.stringify(JSON.stringify(favor))},${every.amount},${JSON.stringify(every.unit)},${every.chance},${every.drift},${every.loose},${JSON.stringify(every.clockSource)});${piano}`;
+  }
+
+  const scale = base.match(/^scale\s+(.+)$/i);
+  if (scale) {
+    const parsed = parseScaleSpec(scale[1], line, true);
+    if (!parsed) throw new LanguageError([{ line, message: 'invalid cutoff scale' }]);
+    if (!split.every) throw new LanguageError([{ line, message: 'cutoff scale requires every <time>' }]);
+    const every = parseEverySpec(split.every, line, sourceDefinitions);
+    const prelude = every.clockPrelude ? `${every.clockPrelude}\n` : '';
+    const piano = parsed.view ? `\n${inlinePianoDirective('filter', filter.internalName, 'scale', line, parsed.values)}` : '';
+    return `${filter.internalName}.cutoff(${parsed.values[0]});\n${prelude}__filtersequence(${JSON.stringify(filter.internalName)},${JSON.stringify(parsed.values.join('|'))},${JSON.stringify(parsed.mode)},${parsed.amount},${JSON.stringify(JSON.stringify(parsed.favor))},${every.amount},${JSON.stringify(every.unit)},${every.chance},${every.drift},${every.loose},${JSON.stringify(every.clockSource)});${piano}`;
+  }
+
+  const freq = base.match(/^freq\s+(.+)$/i);
+  if (freq) {
+    const parsed = splitWith(freq[1].trim());
+    const values = parseList(parsed.base, line, 'cutoff freq').map((item) => {
+      const hz = numberValue(item, line, 'cutoff freq');
+      if (hz < 20 || hz > 20000) throw new LanguageError([{ line, message: 'cutoff freq expects 20..20000 Hz' }]);
+      return hz;
+    });
+    const selection = parseSelectionMode(parsed.modifiers, line, 'cutoff freq');
+    if (values.length === 1) {
+      if (split.every) throw new LanguageError([{ line, message: 'single cutoff freq does not use every' }]);
+      return `${filter.internalName}.cutoff(${values[0]});`;
+    }
+    if (!split.every) throw new LanguageError([{ line, message: 'cutoff freq list requires every <time>' }]);
+    const every = parseEverySpec(split.every, line, sourceDefinitions);
+    const prelude = every.clockPrelude ? `${every.clockPrelude}\n` : '';
+    return `${filter.internalName}.cutoff(${values[0]});\n${prelude}__filtersequence(${JSON.stringify(filter.internalName)},${JSON.stringify(values.join('|'))},${JSON.stringify(selection.mode)},${selection.amount},${JSON.stringify(JSON.stringify(selection.favor))},${every.amount},${JSON.stringify(every.unit)},${every.chance},${every.drift},${every.loose},${JSON.stringify(every.clockSource)});`;
+  }
+
+  const generative = parseGenerativeValue(split.base, line);
+  const expression = generative.base;
+  const literal = Number(expression);
+  if (Number.isFinite(literal) && (literal < 0 || literal > 100)) {
+    throw new LanguageError([{ line, message: 'cutoff expects 0..100, or cutoff freq/note/scale' }]);
+  }
+  const initial = `${filter.internalName}.cutoffPercent(${expression});`;
+  if (generative.mode) {
+    if (split.every) {
+      const timing = parseEverySpec(split.every, line, sourceDefinitions);
+      const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+      const inline = generative.view ? ` ${inlineScalarDirective('filter', filter.internalName, 'cutoff', line, expression)}` : '';
+      return `${initial} ${prefix}__genparamcycle("filter",${JSON.stringify(filter.internalName)},"cutoff",${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});${inline}`;
+    }
+    const inline = generative.view ? ` ${inlineScalarDirective('filter', filter.internalName, 'cutoff', line, expression)}` : '';
+    return `${initial} __genparamdefault("filter",${JSON.stringify(filter.internalName)},"cutoff",${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount});${inline}`;
+  }
+  if (split.every) throw new LanguageError([{ line, message: 'numeric cutoff every requires a generative modifier' }]);
+  return initial;
+}
+
+function requireFilterModel(filter: FilterState | null, diagnostics: LanguageDiagnostic[]): void {
+  if (filter && !filter.hasModel) diagnostics.push({ line: filter.line, message: `FILTER '${filter.name}' requires model` });
+}
 
 function requireVoiceSound(voice: VoiceState | null, diagnostics: LanguageDiagnostic[]): void {
   if (voice && !voice.hasSound) {
@@ -1264,12 +2305,19 @@ export function compileLanguageSource(source: string): string {
   const diagnostics: LanguageDiagnostic[] = [];
   const voices = new Set<string>();
   const fxs = new Set<string>();
+  const filters = new Set<string>();
+  const voiceEmbeddedFilters = new Map<string, string>();
+  const voiceSoundIds = new Map<string, string>();
   const scalarNames = new Set<string>();
   const sourceKinds = new Map<string, SourceKind>();
   const sourceDefinitions = new Map<string, SourceDefinition>();
   const modSources = new Map<string, ModSourceDefinition>();
+  const seqs = new Set<string>();
+  let currentSeq: SeqState | null = null;
+  let currentClock: ClockState | null = null;
   let currentVoice: VoiceState | null = null;
   let currentFx: FxState | null = null;
+  let currentFilter: FilterState | null = null;
   let currentMod: ModState | null = null;
 
   for (let index = 0; index < lines.length; index += 1) {
@@ -1287,6 +2335,61 @@ export function compileLanguageSource(source: string): string {
 
     try {
       if (currentMod && indentation <= currentMod.indentation) currentMod = null;
+      if (currentSeq && indentation <= currentSeq.indentation) { requireSeqReady(currentSeq, diagnostics); currentSeq = null; }
+      if (currentClock && indentation <= currentClock.indentation) { requireClockReady(currentClock, diagnostics); currentClock = null; }
+      if (currentFilter && indentation <= currentFilter.indentation) {
+        requireFilterModel(currentFilter, diagnostics);
+        currentFilter = null;
+      }
+
+      const clockBlockMatch = trimmed.match(/^CLOCK\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
+      if (clockBlockMatch) {
+        if (indentation > 0) throw new LanguageError([{ line: lineNumber, message: 'CLOCK declarations are top-level only' }]);
+        requireVoiceSound(currentVoice, diagnostics); requireFxModel(currentFx, diagnostics); requireSeqReady(currentSeq, diagnostics);
+        currentVoice = null; currentFx = null; currentFilter = null; currentMod = null; currentSeq = null;
+        const name = clockBlockMatch[1];
+        if (/^master$/i.test(name) || voices.has(name) || fxs.has(name) || filters.has(name) || scalarNames.has(name) || seqs.has(name) || sourceDefinitions.has(name)) {
+          throw new LanguageError([{ line: lineNumber, message: `CLOCK '${name}' is already defined or reserved` }]);
+        }
+        sourceKinds.set(name, 'clock');
+        sourceDefinitions.set(name, { kind: 'clock', internalName: name, rateLabel: '*1', display: 'clock *1' });
+        currentClock = { name, line: lineNumber, indentation, parent: null, rate: 1, rateLabel: '*1', jitter: 0, drift: 0 };
+        output[index] = `${name} = Clock.rate("*1")${clockBlockMatch[2] ? '.view()' : ''};`;
+        continue;
+      }
+
+      const seqMatch = trimmed.match(/^SEQ\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
+      if (seqMatch) {
+        if (indentation > 0) throw new LanguageError([{ line: lineNumber, message: 'SEQ declarations are top-level only' }]);
+        requireVoiceSound(currentVoice, diagnostics);
+        requireFxModel(currentFx, diagnostics);
+        currentVoice = null; currentFx = null; currentFilter = null; currentMod = null;
+        const name = seqMatch[1];
+        if (voices.has(name) || fxs.has(name) || filters.has(name) || scalarNames.has(name) || seqs.has(name) || seqs.has(name)) {
+          throw new LanguageError([{ line: lineNumber, message: `SEQ '${name}' conflicts with an existing object or variable` }]);
+        }
+        seqs.add(name);
+        sourceKinds.set(name, 'seq');
+        sourceDefinitions.set(name, { kind: 'seq', values: [], display: `SEQ ${name}` });
+        currentSeq = { name, line: lineNumber, indentation, modelId: null, length: 8, change: 10, values: [], material: null };
+        const viewDirective = seqMatch[2] ? `\n__seqview(${JSON.stringify(name)});` : '';
+        output[index] = `__seq(${JSON.stringify(name)});${viewDirective}`;
+        continue;
+      }
+
+      if (currentClock && indentation > currentClock.indentation) {
+        const propertyMatch = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s+(.+)$/);
+        if (!propertyMatch) throw new LanguageError([{ line: lineNumber, message: 'expected CLOCK property and value' }]);
+        output[index] = compileClockProperty(currentClock, propertyMatch[1], propertyMatch[2], lineNumber, sourceDefinitions);
+        continue;
+      }
+
+      if (currentSeq && indentation > currentSeq.indentation) {
+        const propertyMatch = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s+(.+)$/);
+        if (!propertyMatch) throw new LanguageError([{ line: lineNumber, message: 'expected SEQ property and value' }]);
+        output[index] = compileSeqProperty(currentSeq, propertyMatch[1], propertyMatch[2], lineNumber, sourceDefinitions);
+        continue;
+      }
 
       const modMatch = trimmed.match(/^MOD\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
       if (modMatch) {
@@ -1302,7 +2405,7 @@ export function compileLanguageSource(source: string): string {
           requireFxModel(currentFx, diagnostics);
           currentVoice = null;
           currentFx = null;
-          if (voices.has(name) || fxs.has(name) || scalarNames.has(name)) {
+          if (voices.has(name) || fxs.has(name) || filters.has(name) || scalarNames.has(name) || seqs.has(name)) {
             throw new LanguageError([{ line: lineNumber, message: `MOD '${name}' conflicts with an existing object or variable` }]);
           }
         }
@@ -1323,6 +2426,32 @@ export function compileLanguageSource(source: string): string {
         continue;
       }
 
+      const filterMatch = trimmed.match(/^FILTER\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*$/i);
+      if (filterMatch) {
+        const name = filterMatch[1];
+        const embedded = indentation > 0 && currentVoice !== null;
+        if (indentation > 0 && !embedded) throw new LanguageError([{ line: lineNumber, message: 'FILTER can be top-level or directly inside a VOICE' }]);
+
+        if (embedded) {
+          if (currentVoice!.embeddedFilter) throw new LanguageError([{ line: lineNumber, message: `VOICE '${currentVoice!.name}' already contains FILTER '${currentVoice!.embeddedFilter}'` }]);
+          currentVoice!.embeddedFilter = name;
+          voiceEmbeddedFilters.set(currentVoice!.name, name);
+        } else {
+          requireVoiceSound(currentVoice, diagnostics);
+          requireFxModel(currentFx, diagnostics);
+          currentVoice = null; currentFx = null; currentMod = null;
+          if (filters.has(name) || voices.has(name) || fxs.has(name) || scalarNames.has(name) || seqs.has(name)) {
+            throw new LanguageError([{ line: lineNumber, message: `FILTER '${name}' is already defined` }]);
+          }
+          filters.add(name);
+        }
+
+        const internalName = embedded ? `__filter_${currentVoice!.name}_${name}` : name;
+        currentFilter = { name, internalName, line: lineNumber, indentation, ownerVoice: embedded ? currentVoice!.name : null, hasModel: false };
+        output[index] = `${internalName} = Filter();\n${internalName}.owner(${JSON.stringify(currentFilter.ownerVoice ?? '')});\n${internalName}.displayName(${JSON.stringify(name)});`;
+        continue;
+      }
+
       const fxMatch = trimmed.match(/^FX\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
       if (fxMatch) {
         if (indentation > 0) throw new LanguageError([{ line: lineNumber, message: 'FX declarations are top-level only' }]);
@@ -1331,11 +2460,11 @@ export function compileLanguageSource(source: string): string {
         currentVoice = null;
         currentMod = null;
         const name = fxMatch[1];
-        if (fxs.has(name) || voices.has(name) || scalarNames.has(name)) {
+        if (fxs.has(name) || voices.has(name) || filters.has(name) || scalarNames.has(name) || seqs.has(name)) {
           throw new LanguageError([{ line: lineNumber, message: `FX '${name}' is already defined` }]);
         }
         fxs.add(name);
-        currentFx = { name, line: lineNumber, indentation, hasModel: false, modelId: null };
+        currentFx = { name, line: lineNumber, indentation, hasModel: false, modelId: null, pitchProperty: null };
         const viewDirective = fxMatch[2] ? `\n${name}.view();` : '';
         output[index] = `${name} = Mist();\n__fxmeta(${JSON.stringify(name)});${viewDirective}`;
         continue;
@@ -1347,12 +2476,12 @@ export function compileLanguageSource(source: string): string {
         requireFxModel(currentFx, diagnostics);
         currentFx = null;
         const name = voiceMatch[1];
-        if (voices.has(name) || fxs.has(name) || scalarNames.has(name)) {
+        if (voices.has(name) || fxs.has(name) || scalarNames.has(name) || seqs.has(name)) {
           throw new LanguageError([{ line: lineNumber, message: `VOICE '${name}' is already defined` }]);
         }
         voices.add(name);
         sourceKinds.set(name, 'voice');
-        currentVoice = { name, line: lineNumber, hasSound: false, soundId: null };
+        currentVoice = { name, line: lineNumber, indentation, hasSound: false, soundId: null, pitchProperty: null, embeddedFilter: null };
         output[index] = voiceMatch[2] ? `${name} = Voice();\n${name}.view();` : `${name} = Voice();`;
         continue;
       }
@@ -1360,8 +2489,10 @@ export function compileLanguageSource(source: string): string {
       if (/^CLOCK\b/i.test(trimmed)) {
         requireVoiceSound(currentVoice, diagnostics);
         requireFxModel(currentFx, diagnostics);
-        currentVoice = null;
-        currentFx = null;
+        requireSeqReady(currentSeq, diagnostics);
+  requireClockReady(currentClock, diagnostics);
+        requireClockReady(currentClock, diagnostics);
+        currentVoice = null; currentFx = null; currentSeq = null; currentClock = null;
         output[index] = compileClock(trimmed, lineNumber);
         continue;
       }
@@ -1377,7 +2508,7 @@ export function compileLanguageSource(source: string): string {
           sourceKinds,
           sourceDefinitions,
           scalarNames,
-          new Set([...voices, ...fxs]),
+          new Set([...voices, ...fxs, ...filters]),
         );
         continue;
       }
@@ -1400,7 +2531,14 @@ export function compileLanguageSource(source: string): string {
         requireFxModel(currentFx, diagnostics);
         currentVoice = null;
         currentFx = null;
-        output[index] = compilePlay(trimmed, lineNumber, voices, fxs);
+        output[index] = compilePlay(trimmed, lineNumber, voices, fxs, filters, voiceEmbeddedFilters, voiceSoundIds);
+        continue;
+      }
+
+      if (currentFilter && indentation > currentFilter.indentation) {
+        const propertyMatch = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s+(.+)$/);
+        if (!propertyMatch) throw new LanguageError([{ line: lineNumber, message: 'expected FILTER property and value' }]);
+        output[index] = compileFilterProperty(currentFilter, propertyMatch[1], propertyMatch[2], lineNumber, sourceDefinitions);
         continue;
       }
 
@@ -1419,17 +2557,20 @@ export function compileLanguageSource(source: string): string {
           throw new LanguageError([{ line: lineNumber, message: 'expected VOICE property and value' }]);
         }
         output[index] = compileVoiceProperty(currentVoice, propertyMatch[1], propertyMatch[2], lineNumber, sourceKinds, sourceDefinitions, modSources);
-        if (propertyMatch[1].toLowerCase() === 'sound') currentVoice.hasSound = true;
+        if (propertyMatch[1].toLowerCase() === 'sound') {
+          currentVoice.hasSound = true;
+          if (currentVoice.soundId) voiceSoundIds.set(currentVoice.name, currentVoice.soundId);
+        }
         continue;
       }
 
       if (/^[A-Za-z_][A-Za-z0-9_]*\s*:/.test(trimmed)) {
-        throw new LanguageError([{ line: lineNumber, message: 'only VOICE, FX and MOD blocks are supported' }]);
+        throw new LanguageError([{ line: lineNumber, message: 'only VOICE, FX, FILTER, MOD, SEQ and CLOCK blocks are supported' }]);
       }
 
       throw new LanguageError([{
         line: lineNumber,
-        message: 'each top-level statement must begin with VOICE, FX, MOD, SET, CLOCK, MAIN, or PLAY',
+        message: 'each top-level statement must begin with VOICE, FX, FILTER, MOD, SEQ, SET, CLOCK, MAIN, or PLAY',
       }]);
     } catch (error) {
       if (error instanceof LanguageError) diagnostics.push(...error.diagnostics);
@@ -1439,6 +2580,8 @@ export function compileLanguageSource(source: string): string {
 
   requireVoiceSound(currentVoice, diagnostics);
   requireFxModel(currentFx, diagnostics);
+  requireFilterModel(currentFilter, diagnostics);
+  requireSeqReady(currentSeq, diagnostics);
 
   if (diagnostics.length > 0) throw new LanguageError(diagnostics);
   return output.join('\n');

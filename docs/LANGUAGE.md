@@ -11,22 +11,16 @@ routing, and views are all declared textually.
 
 ## Evaluation and transport
 
-`Cmd+Enter` / `Ctrl+Enter` recompiles and starts the current live program.
+`Cmd+Enter` / `Ctrl+Enter` starts the program when LIVE is stopped. While LIVE is already running, it performs a quantized hot reload: the edited source is validated immediately and the new desired state is reconciled on the next master-clock beat. Existing DSP objects are retained where possible, so effect tails and persistent generative state do not restart just because a parameter or route changed.
 
-`RUN` starts the complete program transport.
+`RUN` follows the same rule: start when stopped, hot-reload when already running.
 
-`RUN STOP` stops the complete live program, including:
+`RUN STOP` is a musical transport stop. It stops master-clock transport, voice scheduling, parameter/beat jobs, and modulators, but leaves downstream FX routes alive so reverbs and delays can decay naturally. The full emergency cut remains `PANIC`.
 
-- voice scheduling;
-- master-clock transport;
-- parameter reevaluation jobs;
-- beat-based jobs;
-- local and global `MOD` objects.
-
-The current shortcut for `RUN STOP` on macOS is:
+The transport-stop shortcut is:
 
 ```text
-Cmd+Backspace
+Cmd+Backspace / Ctrl+Backspace
 ```
 
 The master clock does not start implicitly. A program that depends on beat
@@ -127,11 +121,24 @@ VOICE lead:
 
 ## CLOCK
 
-The master clock is explicit:
+The master clock is explicit and its monitor is always available:
 
 ```text
 CLOCK set 120 bpm
 ```
+
+The master can deliberately move away from a perfectly rigid pulse:
+
+```text
+CLOCK set 120 bpm with jitter 8, drift 12
+```
+
+`jitter 0..100` adds fast interval-to-interval timing variation. A value of 10
+allows roughly ±10% instantaneous interval variation around the nominal tempo.
+`drift 0..100` is slower and correlated: the clock gradually wanders around the
+nominal BPM instead of choosing a completely new offset on every tick. The BPM
+shown in the status bar remains the nominal BPM; the always-on master clock view
+shows the actual irregular trigger spacing.
 
 A program using beat-based `every` statements remains stopped with respect to
 beat timing until a master clock is declared and the program transport is
@@ -140,11 +147,66 @@ running.
 The clock value can also be dynamic:
 
 ```text
-CLOCK set rnd(110,120) bpm
+CLOCK set rnd(110,120) bpm with cycle 4 beats
 ```
 
-The timing system is shared by all objects. Wall-clock timing and beat timing
-are handled by the same runtime scheduler.
+### Named derived clocks
+
+Simple one-off dividers and multipliers remain available:
+
+```text
+SET half: clock /2
+SET double: clock *2
+```
+
+For a clock with its own timing character, declare a named `CLOCK` block:
+
+```text
+CLOCK slow with view:
+    from MASTER /4
+    jitter 15
+    drift 25
+```
+
+`with view` is optional. Unlike the master clock, named clocks do not create a
+sidebar monitor unless requested.
+
+A named clock can derive from another named clock:
+
+```text
+CLOCK slow:
+    from MASTER /2
+    drift 10
+
+CLOCK broken with view:
+    from slow /3
+    jitter 30
+    drift 4
+```
+
+The rate is relative to the selected parent. The parent's jitter/drift character
+is inherited and the child's values are added on top, capped at 100. This lets a
+clock remain related to the master while becoming progressively less rigid.
+
+Use named clocks from any beat-based `every` clause:
+
+```text
+VOICE bass:
+    sound macro.analog
+    note [C2 Eb2 G2] with walk every 1 beat with clock slow
+```
+
+or use an anonymous master-derived rate directly:
+
+```text
+morph 50 every 2 beats with clock /4
+```
+
+The `every` count is measured in ticks of the selected clock. Therefore
+`every 2 beats with clock /2` updates every two ticks of the half-rate clock.
+Timing modifiers such as `chance`, `coin` and `loose` remain local to the
+`every` clause rather than changing the clock itself.
+
 
 ## VOICE
 
@@ -168,13 +230,104 @@ sound macro.fm
 
 Only parameters supported by the selected engine are accepted.
 
-Typical engine parameters include:
+Typical macro-engine parameters include:
 
 ```text
 harmo 50
 timbre 50
 morph 50
 ```
+
+### Matter physical-modeling voices
+
+`matter` is backed by the original Mutable Instruments Elements DSP, compiled as
+a separate WebAssembly module. It remains one physical-modeling instrument: a
+shared pitch/resonator, three exciters, two external mono excitation inputs,
+and one logical stereo output.
+
+```text
+VOICE body:
+    sound matter
+    note C3
+    bow 35 with timbre 50
+    blow 20 with timbre 65
+    strike 70 with timbre 40
+    geometry 45
+    brightness 65
+    damping 55
+    position 35
+    space 25
+```
+
+`BOW`, `BLOW`, and `STRIKE` are independent exciter levels in `0..100`. If an
+exciter is omitted its level defaults to `0`; its local `TIMBRE` defaults to
+`50`. Resonator parameters use their normal object defaults when omitted.
+
+#### Matter audio I/O
+
+Matter preserves the two external audio paths of Elements. `body.in` is the
+default external input and follows the envelope/diffuser excitation path;
+`body.in2` is the second direct resonator input. Both are mono. The default
+unsuffixed Matter output is stereo, with MAIN on the left and AUX on the right;
+`.main`/`.out` and `.aux` select either output explicitly.
+
+```text
+PLAY source THROUGH body THEN MAIN
+PLAY source THROUGH body.in2 THEN MAIN
+```
+
+Because Matter is a `VOICE` with audio inputs, it can be used as a serial
+processor without changing its declaration category.
+
+#### Envelope values
+
+Envelope shapes are typed values. Structured envelope lists use commas because
+time values consist of a number plus a unit:
+
+```text
+AD      [250 ms, 1.2 sec]
+ADR     [4 sec, 300 ms, 1.2 sec]
+ASR     [800 ms, 75, 2 sec]
+ADSR    [20 ms, 300 ms, 70, 1.5 sec]
+DAHDSR  [100 ms, 400 ms, 250 ms, 800 ms, 65, 2 sec]
+```
+
+The arity and value types are strict. Time stages require `ms` or `sec`; sustain
+values use `0..100`. For example an ADSR always requires exactly four values and
+its third value must be the sustain level.
+
+Envelopes can be stored in `SET` and consumed only by compatible parameters:
+
+```text
+SET env1: ADR [4 sec, 300 ms, 1.2 sec]
+
+VOICE body:
+    sound matter
+    strike 70
+    drive from env1
+```
+
+`DRIVE` controls the common Elements excitation/performance signal. Without an
+explicit `EVERY`, it is retriggered by the VOICE note event (including each new
+note produced by a note/scale/SEQ source). Retriggering starts from the current
+envelope level rather than forcing a discontinuity to zero.
+
+`DRIVE` may instead use the normal global timing grammar:
+
+```text
+DRIVE AD [1 sec, 1 sec] EVERY 2 beat
+DRIVE FROM env1 EVERY 4 beat WITH CHANCE 70
+DRIVE FROM env1 EVERY 2 beat WITH CLOCK pulse, LOOSE
+```
+
+This does not create a local scheduler. The trigger is registered as another job
+on the single runtime scheduler used by all `EVERY` events. When `DRIVE` has its
+own `EVERY`, note changes update pitch but do not also retrigger DRIVE.
+
+The envelope itself runs inside the Matter AudioWorklet at DSP rate. Its current
+level drives Elements performance strength continuously; the gate stays active
+while the envelope has non-zero energy, allowing bow/blow excitation to evolve
+through the envelope while strike responds to the gate edge.
 
 ### LPG
 
@@ -571,9 +724,13 @@ Basic route:
 PLAY lead through MAIN
 ```
 
-The source output defaults to the primary output of the object.
+The source output defaults to the primary output of the object. `THROUGH` is
+resolved by audio-port capability rather than by declaration category: an
+object may be a `VOICE`, `FILTER`, or `FX` and still be a valid processor if it
+exposes an audio input. An object with no audio input is rejected as a
+`THROUGH` destination.
 
-For a voice, explicit outputs are:
+For a normal macro voice, explicit outputs are:
 
 ```text
 lead.out
@@ -585,6 +742,17 @@ Example:
 ```text
 PLAY lead.out through MAIN
 ```
+
+Intermediate output selectors belong to the node, not to its input. For
+example:
+
+```text
+PLAY lead THROUGH tone.hp THEN MAIN
+```
+
+routes `lead` into `tone.in`, then routes the SVF high-pass output to `MAIN`.
+The same rule allows source/processor hybrids such as `resonator.*` and
+`matter` to appear inside a serial chain.
 
 ### Route level
 
@@ -673,6 +841,12 @@ Conceptually:
 lead.out -> grain.L
 lead.out -> grain.R
 ```
+
+### Stereo to mono coercion
+
+When a stereo object is routed into a mono input without selecting a channel,
+Sonus uses that object's primary channel. For the current stereo objects this
+is MAIN/left. Explicit `.aux` or `.R` selection always overrides this default.
 
 ### Stereo FX to MAIN
 
@@ -814,39 +988,260 @@ Session files remain text-based and suitable for version control.
 
 ## Expression and generative helpers
 
-The language already uses small expression helpers in dynamic parameter
-contexts.
-
-Examples:
+The language supports direct random expressions such as:
 
 ```text
 rnd(10,50)
 ```
 
-and dynamic parameters such as:
+`rnd()` is stateless: each evaluation simply chooses a new value from the
+requested range.
+
+Sonus Umbrae also provides **generative modifiers**. These describe the musical
+character of a changing value rather than exposing the mathematical algorithm
+used internally.
+
+The initial vocabulary is:
+
+| Modifier | Character | Meaning of amount |
+| --- | --- | --- |
+| `wander` | gradual correlated movement | maximum freedom of movement per update |
+| `trend` | persistent directional movement with inertia | strength of the current trend |
+| `scatter` | independent jumps around the base value | maximum deviation from the base |
+| `flutter` | small irregular movement concentrated near the base | maximum microvariation |
+
+Examples:
 
 ```text
-morph rnd(30,70) every 1 sec
+morph 50 with wander 20 every 1 beat
+timbre 60 with trend 15 every 2 beats
+harmo 40 with scatter 30 every 4 beats
+position 50 with flutter 8 every 0.25 sec
 ```
 
-The broader generative/event language is still evolving. Syntax documented in
-older prototypes such as low-level object construction, direct `->` patching,
-or `when (...) { ... }` should not be treated as part of the current 0.1.0
-high-level language unless it is reintroduced explicitly.
+The amount is interpreted in the natural domain of the parameter. For ordinary
+0..100 parameters:
+
+```text
+morph 50 with wander 20 every 1 beat
+```
+
+starts from 50 and allows the wandering process to move with an intensity of
+20 while always respecting the legal 0..100 range.
+
+The modifiers are intentionally different:
+
+```text
+morph 50 with wander 20 every 1 beat
+```
+
+depends on the previous generated value, producing a random walk.
+
+```text
+morph 50 with trend 20 every 1 beat
+```
+
+develops a direction and tends to continue in that direction for several
+updates before gradually reversing.
+
+```text
+morph 50 with scatter 20 every 1 beat
+```
+
+does not walk from the previous value; each update is a new deviation around
+the base value 50.
+
+```text
+morph 50 with flutter 20 every 1 beat
+```
+
+also remains centered on the base but concentrates most changes closer to it,
+producing smaller irregular fluctuations.
+
+All generative modifiers are stateful for the lifetime of the running program.
+`RUN STOP` and a subsequent fresh run reinitialize their state.
+
+### Sequence movement
+
+`wander`, `trend`, `scatter`, and `flutter` apply only to scalar parameters.
+They are not sequencing modes for note lists or scales.
+
+Discrete musical sequences keep their own vocabulary:
+
+```text
+random
+walk
+shuffle
+reverse
+```
+
+`walk` can optionally take an amount:
+
+```text
+scale C minor with walk every 1 beat
+scale C minor with walk 3 every 1 beat
+```
+
+Without an amount, `walk` moves by one sequence step at a time. With an amount,
+the runtime may move forward or backward by up to that many sequence steps on
+each update.
+
+For a scale, these are scale degrees/list positions rather than semitones.
+
+```text
+scale C minor with range C2 C5, walk 2 every 1 beat
+```
+
+remains inside the declared C2..C5 range.
+
+This distinction is intentional:
+
+- `walk` answers **which item comes next in a discrete sequence**;
+- `wander`, `trend`, `scatter`, and `flutter` answer **how a scalar value
+  evolves over time**.
+
+
+### Generative modifiers and derived clocks
+
+Generative behavior composes with normal timing:
+
+```text
+SET slow: clock /2
+
+VOICE lead:
+    sound macro.fm
+    scale C minor with range C3 C5, walk 2 every 2 beats with clock slow
+    morph 50 with trend 20 every 1 beat with clock /4
+```
+
+The generator determines **how** the value changes. `every` determines **when**
+it changes. `with clock ...` determines which clock provides those beat steps.
+
+
+
+## SEQ and Turing Machine
+
+`SEQ` declares a reusable generative note source. Unlike a static `SET`, a
+sequencer owns runtime state and can evolve independently from the VOICE or FX
+that reads it.
+
+The first implemented model is `turing`, inspired by the shift-register
+behaviour of classic modular Turing Machine sequencers:
+
+```text
+SEQ melody:
+    model turing
+    length 8
+    change 12
+    scale C minor with range C2 C4
+    every 1 beat
+```
+
+The generated source is read with `from`:
+
+```text
+VOICE bass:
+    sound macro.analog
+    note from melody every 1 beat
+```
+
+The `SEQ` timing and the consumer timing are independent. For example:
+
+```text
+SEQ melody:
+    model turing
+    length 8
+    change 10
+    scale D dorian with range D2 D4
+    every 2 beats
+
+VOICE bass:
+    sound macro.analog
+    note from melody every 1 beat
+```
+
+Here the Turing register advances every two beats, while the voice reads its
+current note every beat. Multiple consumers can therefore read the same
+sequence source at different rates.
+
+### Turing parameters
+
+`length` sets the active shift-register length and accepts integers from 2 to
+32. Traditional hardware-inspired lengths such as 2, 3, 4, 5, 6, 8, 12 and 16
+are useful, but Sonus Umbrae does not restrict the sequencer to those values.
+
+`change` is a percentage from 0 to 100 controlling how likely the feedback bit
+is to mutate when the register advances:
+
+```text
+change 0
+```
+
+keeps the current loop locked, while higher values introduce progressively
+more variation.
+
+The musical material can be supplied as a scale:
+
+```text
+scale C minor with range C2 C4
+```
+
+or as an explicit note vocabulary:
+
+```text
+notes [C2 Eb2 G2 Bb2 C3]
+```
+
+Turing `notes` intentionally do not accept note weights, repeats or retrigs.
+Those modifiers belong to list traversal modes such as `random`, whereas the
+Turing register itself determines the generated selection.
+
+`every` uses the normal Sonus Umbrae timing grammar, including derived clocks
+and probability modifiers:
+
+```text
+every 1 beat with clock /4
+every 2 beats with coin
+```
+
+A SEQ source controls its own generation, so consumers do not add list
+selection modes on top of it. The canonical form is therefore:
+
+```text
+note from melody every 1 beat
+```
+
+rather than `note from melody with random ...`.
+
+### Turing view
+
+A Turing sequence can request a dedicated sidebar monitor:
+
+```text
+SEQ melody with view:
+    model turing
+    length 8
+    change 12
+    notes [C2 Eb2 G2 Bb2]
+    every 1 beat
+```
+
+The panel shows the current register as filled/empty cells, the active length,
+change amount and current note. The cells shift visually as the register
+advances, making it possible to distinguish a stable repeating loop from a
+stopped scheduler.
+
+`SEQ` objects also appear in the VARIABLES monitor with type `Seq`.
+
 
 ## Current implementation boundary
 
-The public 0.1.0 language intentionally hides the current upstream DSP module
-names behind Sonus Umbrae engine families:
-
-```text
-VOICE -> macro.*
-MOD   -> current four-output modulation backend
-FX    -> mist.*
-```
-
-This keeps the language independent from any one upstream hardware product and
-allows future DSP families to coexist behind the same object model.
+The public language intentionally hides upstream implementation names behind
+Sonus Umbrae engine families. Current families include macro synthesis,
+physical modelling, resonators, modulation, stereo effects, ambient reverb and
+multimode filtering. This keeps the language independent from any one upstream
+hardware product or DSP library and allows future engines to coexist behind the
+same object model.
 
 ## Planned language directions
 
@@ -868,3 +1263,148 @@ The following remain future or incomplete areas:
 The core design principle remains unchanged: the text document is the source of
 truth, the runtime reconciles it live, and Scheme remains an observer rather
 than a graphical editor.
+
+
+### SVF multimode filter
+
+`MODEL svf` is the clean multimode FILTER backed by Electrosmith DaisySP. One input sample is processed once and all five responses are available simultaneously:
+
+```text
+FILTER tone:
+    MODEL svf
+    CUTOFF 45
+    RESONANCE 30
+    DRIVE 0
+```
+
+The public outputs are:
+
+```text
+tone.lp
+tone.hp
+tone.bp
+tone.np
+```
+
+`.lp` is the default. Therefore `PLAY source THROUGH tone THEN MAIN` uses the low-pass response. A response can also be selected directly on an intermediate node:
+
+```text
+PLAY source THROUGH tone.hp THEN MAIN
+```
+
+which means `source -> tone.in -> tone.hp -> MAIN`. Embedded FILTER blocks follow the same rule. DaisySP also computes a peak response internally, but Sonus does not expose it as a routing port in this language version.
+
+`CUTOFF` retains the typed musical cutoff forms already supported by FILTER. It can be driven by a normalized scalar/generative value, explicit frequencies, notes or scales, including the existing selection and `EVERY ... WITH ...` timing grammar where applicable. `RESONANCE` and `DRIVE` use the 0..100 Sonus control range. The SVF is intentionally exposed as the DaisySP filter itself; Sonus does not add artificial self-oscillation or oscillator behaviour.
+
+The implementation is compiled into the independent `daisy-filters.wasm` module. Future DaisySP DSP areas may use separate WASM modules rather than expanding this filter binary into a general-purpose monolith.
+
+### Sky ambient reverb
+
+`sky` uses Ghost Note Audio's MIT-licensed CloudSeedCore algorithm. It is tuned as an ambient/special-effect reverb rather than a room simulation, with a compact Sonus control surface over CloudSeedCore's diffusion, modulation, late delay network, filtering, and stereo decorrelation.
+
+```text
+FX space:
+    MODEL sky
+    SIZE 82
+    DECAY 94
+    BLOOM 76
+    DAMPING 38
+    PREDELAY 12
+    MOTION 30
+    WIDTH 92
+    MIX 45
+```
+
+The accepted aliases are:
+
+- `DECAY` -> feedback/tail length;
+- `DAMP` or `DAMPING` -> high-frequency damping;
+- `BLOOM` (or legacy `DIFFUSE`) -> progressive early/late diffusion density;
+- `PREDELAY` -> 0..500 ms normalized pre-delay;
+- `MOTION` -> delay/diffuser modulation;
+- `WIDTH` (or `SPREAD`) -> stereo decorrelation;
+- `SIZE`, `MIX`, and `FREEZE` retain their usual FX meanings.
+
+`sky` does not expose musical pitch. The upstream source is fetched by `npm run dsp:setup` into `vendor/cloudseed-core/` and compiled into `sky.wasm`.
+
+### Hot-reload timing continuity
+
+When live code is already running, `Cmd/Ctrl+Enter` applies the validated update on the next master beat. Matching `every` jobs preserve their current phase across that update: for example, an `every 4 beats` sequence already at beat 3 continues to its fourth beat instead of restarting a new four-beat cycle. The same rule applies to beat-based and wall-clock `every` jobs as long as their source and interval are unchanged. Changing the cadence intentionally starts a new phase. `when(..., cycle(...))` event positions are preserved as well.
+
+
+### Resonator voices
+
+`resonator.*` is backed by the original Mutable Instruments Rings DSP, compiled
+into a separate WebAssembly module. It is intentionally presented as a Sonus
+Umbrae resonator family rather than as a virtual Eurorack panel.
+
+The primary models are:
+
+```text
+SOUND resonator.modal
+SOUND resonator.sympathetic
+SOUND resonator.string
+```
+
+`resonator.strings` is an alias for `resonator.sympathetic`. Rings internal
+polyphony is declared directly on the sound selector:
+
+```text
+SOUND resonator.modal WITH 1 NOTE
+SOUND resonator.modal WITH 2 NOTES
+SOUND resonator.modal WITH 4 NOTES
+```
+
+Only 1, 2, and 4 are valid. The default is 1 note.
+
+The initial high-level parameters mirror the four shared Rings resonator
+controls while preserving Sonus defaults when omitted:
+
+```text
+STRUCTURE  0..100
+BRIGHTNESS 0..100
+DAMPING    0..100
+POSITION   0..100
+```
+
+Every new NOTE/scale/sequence pitch event automatically performs a Rings strum.
+Pitch changes caused by hot reload also strum the existing resonator instance.
+There is no explicit STRUM property in this first language version.
+
+#### Resonator I/O and routing
+
+The backend has one mono audio input and two mono outputs. Sonus treats the pair
+as one logical stereo VOICE output:
+
+```text
+resonator.main -> stereo L
+resonator.aux  -> stereo R
+```
+
+Thus:
+
+```text
+PLAY bells THROUGH MAIN
+```
+
+expands to MAIN -> `Audio.out_L` and AUX -> `Audio.out_R`. Explicit mono access
+is available as:
+
+```text
+PLAY bells.main THROUGH MAIN
+PLAY bells.aux THROUGH MAIN
+```
+
+If an unsuffixed Resonator output is sent to a mono destination, the language
+selects its MAIN output automatically.
+
+The Rings input is mono and is addressed by routing another object through the
+Resonator VOICE:
+
+```text
+PLAY source THROUGH bells THEN MAIN
+```
+
+When an external source is connected, the Rings worklet uses the original
+external-exciter path; with no input connection it uses the original internal
+exciter.

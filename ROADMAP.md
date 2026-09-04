@@ -30,6 +30,7 @@ The items below describe directions beyond this baseline.
 
 ### Language core
 
+- Stateful `SEQ` generative sources; the first implemented model is a Turing Machine shift-register sequencer.
 - Arithmetic, comparison, and logical expressions beyond the current scalar
   expression support.
 - Richer conditional execution.
@@ -81,11 +82,15 @@ Current direction:
 
 - `VOICE` macro engines backed initially by Mutable Instruments Plaits DSP.
 - `MOD` modulation backed initially by Mutable Instruments Tides 2018 DSP.
-- `FX` processors backed initially by the Mist / SuperParasites integration.
+- `FX` processors backed by Mist / SuperParasites plus the MIT-licensed `sky` ambient reverb based on CloudSeedCore.
+- `FILTER` processors backed by modular permissively licensed DSP areas; the first implementation is DaisySP `svf` with simultaneous multimode outputs.
+- Additional DaisySP areas may be introduced as separate WASM modules rather than one monolithic library.
 - Additional permissively licensed DSP where appropriate.
+- [x] Consolidate the active DSP build around permissive licenses only.
 - Original Sonus Umbrae DSP modules.
 - Inspiration from other modular systems and open algorithms without necessarily reproducing their original user interfaces.
 - A stable module metadata format describing parameters, ports, signal semantics, and visual behavior.
+- [x] Route `THROUGH` by exposed audio-port capability rather than declaration category, so source/processor hybrids such as Resonator and Matter remain `VOICE` objects while accepting audio input.
 
 The language should not depend on the identity of any one upstream hardware module.
 
@@ -95,15 +100,15 @@ The language should not depend on the identity of any one upstream hardware modu
 
 Planned directions include:
 
-- Master BPM.
-- Clock-derived trigger sources using ratios such as `/2`, `/4`, `*2`, and non-binary ratios.
+- Master BPM with per-clock `jitter` and slow correlated `drift`.
+- Named hierarchical clock sources derived from `MASTER` or another clock, with ratios such as `/2`, `/4`, `*2`, and non-binary ratios.
 - Meter information.
 - Phase offsets.
 - Swing.
 - Probability.
 - Trigger skipping.
 - Ratchets.
-- Irregular and algorithmically changing rates.
+- Additional clock feel controls such as swing, phase, probability and algorithmically changing rates.
 - Event-driven scripting connected to clock and trigger ports.
 
 The design is conceptually closer to a programmable modular timing source than to a conventional DAW transport.
@@ -364,3 +369,24 @@ Sonus Umbrae should continue to follow these principles:
 - Visual interfaces should remain compact, phosphor-inspired, keyboard-first, and deliberately non-IDE-like.
 - The runtime should reconcile changes rather than destructively restart the whole audio system.
 - The language should remain usable for ambient, generative, experimental, and modular composition without becoming pattern-centric.
+
+
+## Matter physical modeling
+
+- [x] Compile Mutable Instruments Elements DSP into a dedicated `matter.wasm`.
+- [x] Run Elements in an AudioWorklet with host-rate resampling while preserving the original 32 kHz DSP contract.
+- [x] Expose Elements as one high-level `matter` VOICE engine with mixed BOW/BLOW/STRIKE exciters and stereo output.
+- [x] Integrate Matter voices with note/scale sequencing, routing, levels, hot reload, Scheme, and musical transport stop.
+- [x] Add typed AD/ADR/ASR/ADSR/DAHDSR envelope values, SET/FROM compatibility, and Matter DRIVE triggering through the global scheduler.
+- [ ] Evaluate future audio-rate modulation inputs for selected Matter parameters without exposing the original Eurorack panel semantics.
+
+
+## Resonator physical modeling
+
+- [x] Compile Mutable Instruments Rings DSP into a dedicated `resonator.wasm`.
+- [x] Expose the three primary Rings resonator models as `resonator.modal`, `resonator.sympathetic`, and `resonator.string`.
+- [x] Support Rings 1/2/4-note internal polyphony through `SOUND ... WITH N NOTES`.
+- [x] Automatically strum on VOICE note events.
+- [x] Treat MAIN/AUX as a logical stereo output (MAIN -> L, AUX -> R) while allowing explicit `.main` / `.aux` mono routing.
+- [x] Expose the original mono audio input so a Resonator VOICE can also process another source in `PLAY ... THROUGH resonator THEN ...` chains.
+- [ ] Evaluate explicit strum/pitch decoupling only after the initial note-driven workflow has been tested musically.
