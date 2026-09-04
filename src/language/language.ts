@@ -1883,20 +1883,32 @@ function compileFxProperty(
   return `${initial} __fxparamdefault(${JSON.stringify(fx.name)},${JSON.stringify(parameter)},${JSON.stringify(expression)});`;
 }
 
+type PlayPort = 'out' | 'main' | 'aux' | 'lp' | 'hp' | 'bp' | 'np' | 'in' | 'in2' | null;
+
 type PlayEndpoint = {
   name: string;
   channel: 'L' | 'R' | null;
-  port: 'out' | 'main' | 'aux' | 'lp12' | 'bp12' | 'lp24' | null;
+  port: PlayPort;
   amount: number;
 };
 
+type PlayObjectKind = 'voice' | 'matter' | 'resonator' | 'fx' | 'filter' | 'main';
+
+type PlaySignal =
+  | { stereo: false; mono: string }
+  | { stereo: true; left: string; right: string; primary: string };
+
+type PlayInput =
+  | { stereo: false; mono: string }
+  | { stereo: true; left: string; right: string };
+
 function parsePlayEndpoint(raw: string, line: number): PlayEndpoint {
-  const match = raw.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\.(out|main|aux|lp12|bp12|lp24|L|R))?(?:\s+at\s+(.+))?$/i);
+  const match = raw.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\.(out|main|aux|lp|hp|bp|np|in|in2|L|R))?(?:\s+at\s+(.+))?$/i);
   if (!match) throw new LanguageError([{ line, message: `invalid PLAY endpoint '${raw.trim()}'` }]);
   const suffix = match[2]?.toLowerCase() ?? null;
   return {
     name: match[1],
-    port: suffix === 'out' || suffix === 'main' || suffix === 'aux' || suffix === 'lp12' || suffix === 'bp12' || suffix === 'lp24' ? suffix : null,
+    port: suffix === 'out' || suffix === 'main' || suffix === 'aux' || suffix === 'lp' || suffix === 'hp' || suffix === 'bp' || suffix === 'np' || suffix === 'in' || suffix === 'in2' ? suffix : null,
     channel: suffix === 'l' ? 'L' : suffix === 'r' ? 'R' : null,
     amount: match[3] === undefined ? 100 : normalizedAmount(match[3].trim(), line),
   };
@@ -1929,12 +1941,131 @@ function compilePlay(
     throw new LanguageError([{ line, message: "after the first 'through', PLAY chains use 'then'" }]);
   }
 
-  const kindOf = (name: string): 'voice' | 'resonator' | 'fx' | 'filter' | 'main' => {
-    if (voices.has(name)) return voiceSoundIds.get(name)?.startsWith('resonator.') ? 'resonator' : 'voice';
+  const kindOf = (name: string): PlayObjectKind => {
+    if (voices.has(name)) {
+      const sound = voiceSoundIds.get(name) ?? '';
+      if (sound === 'matter') return 'matter';
+      if (sound.startsWith('resonator.')) return 'resonator';
+      return 'voice';
+    }
     if (fxs.has(name)) return 'fx';
     if (filters.has(name)) return 'filter';
     if (name.toUpperCase() === 'MAIN') return 'main';
     throw new LanguageError([{ line, message: `unknown PLAY object '${name}'` }]);
+  };
+
+  const sourceSignal = (endpoint: PlayEndpoint, kind: PlayObjectKind): PlaySignal => {
+    if (kind === 'main') throw new LanguageError([{ line, message: 'MAIN cannot be used as a PLAY source' }]);
+
+    if (kind === 'filter') {
+      if (endpoint.channel) throw new LanguageError([{ line, message: 'FILTER outputs are mono; .L/.R are not valid' }]);
+      if (endpoint.port === 'in' || endpoint.port === 'in2') {
+        throw new LanguageError([{ line, message: `FILTER '${endpoint.name}' input cannot be used as an audio source` }]);
+      }
+      if (endpoint.port && !['lp', 'hp', 'bp', 'np'].includes(endpoint.port)) {
+        throw new LanguageError([{ line, message: `FILTER '${endpoint.name}' output must be .lp, .hp, .bp, or .np` }]);
+      }
+      return { stereo: false, mono: `${endpoint.name}.${endpoint.port ?? 'lp'}` };
+    }
+
+    if (kind === 'fx') {
+      if (endpoint.port) throw new LanguageError([{ line, message: 'FX outputs use .L/.R, not named mono ports' }]);
+      if (endpoint.channel) {
+        return { stereo: false, mono: `${endpoint.name}.${endpoint.channel === 'R' ? 'out_R' : 'out_L'}` };
+      }
+      return {
+        stereo: true,
+        left: `${endpoint.name}.out_L`,
+        right: `${endpoint.name}.out_R`,
+        primary: `${endpoint.name}.out_L`,
+      };
+    }
+
+    const embeddedFilter = voiceEmbeddedFilters.get(endpoint.name);
+    if (embeddedFilter) {
+      if (endpoint.channel) throw new LanguageError([{ line, message: 'VOICE/FILTER outputs are mono; .L/.R are not valid' }]);
+      if (endpoint.port === 'in' || endpoint.port === 'in2') {
+        throw new LanguageError([{ line, message: `input selector '${endpoint.port}' cannot be used as an output of '${endpoint.name}'` }]);
+      }
+      if (endpoint.port && !['lp', 'hp', 'bp', 'np'].includes(endpoint.port)) {
+        throw new LanguageError([{ line, message: `VOICE '${endpoint.name}' contains FILTER '${embeddedFilter}'; available outputs are .lp, .hp, .bp, .np` }]);
+      }
+      return { stereo: false, mono: `${endpoint.name}.${endpoint.port ?? 'lp'}` };
+    }
+
+    if (kind === 'voice') {
+      if (endpoint.channel) throw new LanguageError([{ line, message: 'VOICE outputs are mono ports; .L/.R are not valid' }]);
+      if (endpoint.port === 'in' || endpoint.port === 'in2') {
+        throw new LanguageError([{ line, message: `VOICE '${endpoint.name}' does not expose an audio input` }]);
+      }
+      if (endpoint.port && !['out', 'aux'].includes(endpoint.port)) {
+        throw new LanguageError([{ line, message: `VOICE '${endpoint.name}' output must be .out or .aux` }]);
+      }
+      return { stereo: false, mono: `${endpoint.name}.${endpoint.port ?? 'out'}` };
+    }
+
+    if (endpoint.channel) throw new LanguageError([{ line, message: `${kind} outputs use named MAIN/AUX ports, not .L/.R` }]);
+    // When an input selector is used on an intermediate endpoint (for example
+    // `THROUGH body.in2 THEN MAIN`), the following edge uses the default stereo
+    // output of the same object.
+    const outputPort = endpoint.port === 'in' || endpoint.port === 'in2' ? null : endpoint.port;
+    if (outputPort && !['out', 'main', 'aux'].includes(outputPort)) {
+      throw new LanguageError([{ line, message: `${kind} '${endpoint.name}' output must be .main/.out or .aux` }]);
+    }
+    if (outputPort === 'out' || outputPort === 'main') return { stereo: false, mono: `${endpoint.name}.out` };
+    if (outputPort === 'aux') return { stereo: false, mono: `${endpoint.name}.aux` };
+    return {
+      stereo: true,
+      left: `${endpoint.name}.out`,
+      right: `${endpoint.name}.aux`,
+      primary: `${endpoint.name}.out`,
+    };
+  };
+
+  const targetInput = (endpoint: PlayEndpoint, kind: PlayObjectKind): PlayInput | null => {
+    if (kind === 'main') return null;
+
+    if (kind === 'voice') {
+      throw new LanguageError([{ line, message: `object '${endpoint.name}' does not expose an audio input` }]);
+    }
+
+    if (kind === 'filter') {
+      if (endpoint.channel) throw new LanguageError([{ line, message: 'FILTER input is mono; .L/.R are not valid' }]);
+      if (endpoint.port === 'in2') throw new LanguageError([{ line, message: `FILTER '${endpoint.name}' has no .in2 input` }]);
+      // An output selector on an intermediate node selects which FILTER output
+      // is used by the next edge; audio still enters the filter's default IN.
+      if (endpoint.port && !['in', 'lp', 'hp', 'bp', 'np'].includes(endpoint.port)) {
+        throw new LanguageError([{ line, message: `FILTER '${endpoint.name}' has no input '${endpoint.port}'` }]);
+      }
+      return { stereo: false, mono: `${endpoint.name}.in` };
+    }
+
+    if (kind === 'resonator') {
+      if (endpoint.channel) throw new LanguageError([{ line, message: `resonator '${endpoint.name}' has one mono audio input` }]);
+      if (endpoint.port === 'in2') throw new LanguageError([{ line, message: `resonator '${endpoint.name}' has no .in2 input` }]);
+      if (endpoint.port && !['in', 'out', 'main', 'aux'].includes(endpoint.port)) {
+        throw new LanguageError([{ line, message: `resonator '${endpoint.name}' has no input '${endpoint.port}'` }]);
+      }
+      return { stereo: false, mono: `${endpoint.name}.in` };
+    }
+
+    if (kind === 'matter') {
+      if (endpoint.channel) throw new LanguageError([{ line, message: `matter '${endpoint.name}' external inputs are mono` }]);
+      if (endpoint.port && !['in', 'in2', 'out', 'main', 'aux'].includes(endpoint.port)) {
+        throw new LanguageError([{ line, message: `matter '${endpoint.name}' has no input '${endpoint.port}'` }]);
+      }
+      return { stereo: false, mono: `${endpoint.name}.${endpoint.port === 'in2' ? 'in2' : 'in'}` };
+    }
+
+    // Stereo FX can be addressed as a stereo destination, or one channel can
+    // be selected explicitly with .L/.R. Output channel selectors on an
+    // intermediate FX therefore naturally select the same channel on both
+    // incoming and outgoing edges.
+    if (endpoint.port) throw new LanguageError([{ line, message: `FX '${endpoint.name}' input uses .L/.R channel selectors` }]);
+    if (endpoint.channel) {
+      return { stereo: false, mono: `${endpoint.name}.${endpoint.channel === 'R' ? 'inR' : 'inL'}` };
+    }
+    return { stereo: true, left: `${endpoint.name}.inL`, right: `${endpoint.name}.inR` };
   };
 
   const routes: string[] = [];
@@ -1943,82 +2074,39 @@ function compilePlay(
     const target = endpoints[edge + 1];
     const sourceKind = kindOf(source.name);
     const targetKind = kindOf(target.name);
-    if (sourceKind === 'main') throw new LanguageError([{ line, message: 'MAIN cannot be used as a PLAY source' }]);
-    if (targetKind === 'voice') throw new LanguageError([{ line, message: 'VOICE cannot be used as an audio destination unless its sound is resonator.*' }]);
-
-    const embeddedFilter = sourceKind === 'voice' || sourceKind === 'resonator' ? voiceEmbeddedFilters.get(source.name) : undefined;
-    if (sourceKind === 'voice' || sourceKind === 'resonator') {
-      if (source.channel) throw new LanguageError([{ line, message: 'VOICE outputs are mono ports; .L/.R are not valid' }]);
-      if (embeddedFilter) {
-        if (!source.port || !['lp12','bp12','lp24'].includes(source.port)) {
-          throw new LanguageError([{ line, message: `VOICE '${source.name}' contains FILTER '${embeddedFilter}'; available outputs are .lp12, .bp12, .lp24` }]);
-        }
-      } else if (source.port && ['lp12','bp12','lp24'].includes(source.port)) {
-        throw new LanguageError([{ line, message: `VOICE '${source.name}' has no embedded FILTER; use .out or .aux` }]);
-      }
-      if (sourceKind === 'resonator' && source.port === 'main') source.port = 'out';
-      if (sourceKind === 'voice' && source.port === 'main') {
-        throw new LanguageError([{ line, message: `.main is available only on resonator.* voices` }]);
-      }
-    }
-    if (sourceKind === 'filter') {
-      if (source.channel) throw new LanguageError([{ line, message: 'FILTER outputs are mono; .L/.R are not valid' }]);
-      if (!source.port || !['lp12','bp12','lp24'].includes(source.port)) {
-        throw new LanguageError([{ line, message: `FILTER '${source.name}' source must select .lp12, .bp12, or .lp24` }]);
-      }
-    }
-    if (sourceKind === 'fx' && source.port) throw new LanguageError([{ line, message: 'FX outputs use .L/.R, not named mono ports' }]);
-    if (targetKind === 'resonator' && (target.port || target.channel)) throw new LanguageError([{ line, message: `resonator destination '${target.name}' uses its single mono IN and does not take an output selector` }]);
-    if (targetKind === 'filter' && (target.port || target.channel)) throw new LanguageError([{ line, message: 'FILTER destination does not select an output port' }]);
-    if (targetKind === 'fx' && target.port) throw new LanguageError([{ line, message: 'FX destination uses .L/.R channel selectors' }]);
-
+    const signal = sourceSignal(source, sourceKind);
     const amount = source.amount;
-    const resonatorStereo = sourceKind === 'resonator' && !source.port && source.channel === null;
-    const sourceMono = sourceKind === 'voice' || sourceKind === 'filter' || source.channel !== null || (sourceKind === 'resonator' && !resonatorStereo);
-    const sourceMonoSignal = sourceKind === 'voice' || sourceKind === 'resonator'
-      ? `${source.name}.${embeddedFilter ? source.port : (source.port ?? 'out')}`
-      : sourceKind === 'filter'
-        ? `${source.name}.${source.port}`
-        : `${source.name}.${source.channel === 'R' ? 'out_R' : 'out_L'}`;
 
     if (targetKind === 'main') {
+      if (target.port) throw new LanguageError([{ line, message: 'MAIN has no named audio port; use MAIN, MAIN.L, or MAIN.R' }]);
       if (target.channel) {
-        if (!sourceMono) throw new LanguageError([{ line, message: `stereo FX '${source.name}' must select .L or .R when routing to MAIN.${target.channel}` }]);
-        routes.push(`${sourceMonoSignal}(${amount}) -> Audio.out_${target.channel};`);
-      } else if (sourceMono) {
-        routes.push(`${sourceMonoSignal}(${amount}) -> Audio.out;`);
-      } else if (sourceKind === 'resonator') {
-        routes.push(`${source.name}.out(${amount}) -> Audio.out_L;`);
-        routes.push(`${source.name}.aux(${amount}) -> Audio.out_R;`);
+        const mono = signal.stereo ? (target.channel === 'R' ? signal.right : signal.left) : signal.mono;
+        routes.push(`${mono}(${amount}) -> Audio.out_${target.channel};`);
+      } else if (signal.stereo) {
+        routes.push(`${signal.left}(${amount}) -> Audio.out_L;`);
+        routes.push(`${signal.right}(${amount}) -> Audio.out_R;`);
       } else {
-        routes.push(`${source.name}.out_L(${amount}) -> Audio.out_L;`);
-        routes.push(`${source.name}.out_R(${amount}) -> Audio.out_R;`);
+        routes.push(`${signal.mono}(${amount}) -> Audio.out;`);
       }
       continue;
     }
 
-    if (targetKind === 'filter' || targetKind === 'resonator') {
-      const targetPort = `${target.name}.in`;
-      if (!sourceMono) {
-        if (sourceKind === 'resonator') routes.push(`${source.name}.out(${amount}) -> ${targetPort};`);
-        else throw new LanguageError([{ line, message: `stereo FX '${source.name}' must select .L or .R before mono destination '${target.name}'` }]);
-      } else {
-        routes.push(`${sourceMonoSignal}(${amount}) -> ${targetPort};`);
-      }
-      continue;
-    }
+    const input = targetInput(target, targetKind);
+    if (!input) throw new LanguageError([{ line, message: `object '${target.name}' does not expose an audio input` }]);
 
-    if (target.channel) {
-      if (!sourceMono) throw new LanguageError([{ line, message: `stereo FX '${source.name}' must select .L or .R when routing to ${target.name}.${target.channel}` }]);
-      routes.push(`${sourceMonoSignal}(${amount}) -> ${target.name}.in${target.channel};`);
-    } else if (sourceMono) {
-      routes.push(`${sourceMonoSignal}(${amount}) -> ${target.name}.in;`);
-    } else if (sourceKind === 'resonator') {
-      routes.push(`${source.name}.out(${amount}) -> ${target.name}.inL;`);
-      routes.push(`${source.name}.aux(${amount}) -> ${target.name}.inR;`);
+    if (input.stereo) {
+      if (signal.stereo) {
+        routes.push(`${signal.left}(${amount}) -> ${input.left};`);
+        routes.push(`${signal.right}(${amount}) -> ${input.right};`);
+      } else {
+        routes.push(`${signal.mono}(${amount}) -> ${input.left};`);
+        routes.push(`${signal.mono}(${amount}) -> ${input.right};`);
+      }
     } else {
-      routes.push(`${source.name}.out_L(${amount}) -> ${target.name}.inL;`);
-      routes.push(`${source.name}.out_R(${amount}) -> ${target.name}.inR;`);
+      // Stereo -> mono coercion uses the object's primary channel. For all
+      // current stereo Sonus objects that is MAIN/L; explicit .aux/.R always
+      // overrides the coercion at the source endpoint.
+      routes.push(`${signal.stereo ? signal.primary : signal.mono}(${amount}) -> ${input.mono};`);
     }
   }
 
@@ -2047,11 +2135,11 @@ function compileFilterProperty(
   }
 
   if (key === 'model') {
-    if (!/^liquid(?:\.mono)?$/i.test(value)) {
-      throw new LanguageError([{ line, message: "FILTER model expects liquid" }]);
+    if (!/^svf$/i.test(value)) {
+      throw new LanguageError([{ line, message: "FILTER model expects svf" }]);
     }
     filter.hasModel = true;
-    return `${filter.internalName}.model("liquid.mono");`;
+    return `${filter.internalName}.model("svf");`;
   }
   if (!filter.hasModel) throw new LanguageError([{ line, message: `FILTER '${filter.name}' requires model before parameters` }]);
 
@@ -2077,6 +2165,29 @@ function compileFilterProperty(
     if (split.every) throw new LanguageError([{ line, message: 'resonance every requires a generative modifier' }]);
     return initial;
   }
+  if (key === 'drive') {
+    const split = splitEveryClause(value);
+    const generative = parseGenerativeValue(split.base, line);
+    const expression = generative.base;
+    const literal = Number(expression);
+    if (Number.isFinite(literal) && (literal < 0 || literal > 100)) {
+      throw new LanguageError([{ line, message: 'drive expects 0..100' }]);
+    }
+    const initial = `${filter.internalName}.drive(${expression});`;
+    if (generative.mode) {
+      if (split.every) {
+        const timing = parseEverySpec(split.every, line, sourceDefinitions);
+        const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+        const inline = generative.view ? ` ${inlineScalarDirective('filter', filter.internalName, 'drive', line, expression)}` : '';
+        return `${initial} ${prefix}__genparamcycle("filter",${JSON.stringify(filter.internalName)},"drive",${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});${inline}`;
+      }
+      const inline = generative.view ? ` ${inlineScalarDirective('filter', filter.internalName, 'drive', line, expression)}` : '';
+      return `${initial} __genparamdefault("filter",${JSON.stringify(filter.internalName)},"drive",${JSON.stringify(expression)},${JSON.stringify(generative.mode)},${generative.amount});${inline}`;
+    }
+    if (split.every) throw new LanguageError([{ line, message: 'drive every requires a generative modifier' }]);
+    return initial;
+  }
+
   if (key !== 'cutoff') throw new LanguageError([{ line, message: `unknown FILTER property '${property}'` }]);
 
   const split = splitEveryClause(value);

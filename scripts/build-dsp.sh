@@ -5,10 +5,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VENDOR="$ROOT/vendor/eurorack"
 SUPERPARASITES="$ROOT/vendor/superparasites"
 CLOUDSEED="$ROOT/vendor/cloudseed-core"
+DAISYSP="$ROOT/vendor/daisysp"
 VOICE_OUTPUT="$ROOT/public/dsp/voice.wasm"
 SWELL_OUTPUT="$ROOT/public/dsp/swell.wasm"
 MIST_OUTPUT="$ROOT/public/dsp/mist.wasm"
-LIQUID_OUTPUT="$ROOT/public/dsp/liquid.wasm"
+DAISY_FILTERS_OUTPUT="$ROOT/public/dsp/daisy-filters.wasm"
 SKY_OUTPUT="$ROOT/public/dsp/sky.wasm"
 MATTER_OUTPUT="$ROOT/public/dsp/matter.wasm"
 RESONATOR_OUTPUT="$ROOT/public/dsp/resonator.wasm"
@@ -24,6 +25,7 @@ if [[ ! -d "$VENDOR/plaits" ]]; then
 fi
 
 mkdir -p "$(dirname "$VOICE_OUTPUT")"
+rm -f "$ROOT/public/dsp/liquid.wasm"
 PLAITS_DSP=()
 while IFS= read -r source; do
   PLAITS_DSP+=("$source")
@@ -180,16 +182,20 @@ em++ \
 
 echo "Built $SKY_OUTPUT (Ghost Note Audio CloudSeedCore backend)"
 
+echo "Building DaisySP filter module (SVF)..."
 em++ \
   -std=c++17 \
   -O3 \
-  "$ROOT/dsp/liquid_bridge.cc" \
+  -I"$DAISYSP/Source" \
+  -I"$DAISYSP/Source/Utility" \
+  "$ROOT/dsp/daisy_filters_bridge.cc" \
+  "$DAISYSP/Source/Filters/svf.cpp" \
   -s STANDALONE_WASM=1 \
   -s ALLOW_MEMORY_GROWTH=0 \
-  -s INITIAL_MEMORY=2097152 \
+  -s INITIAL_MEMORY=4194304 \
   -s FILESYSTEM=0 \
-  -s EXPORTED_FUNCTIONS='["_su_liquid_create","_su_liquid_destroy","_su_liquid_set_sample_rate","_su_liquid_set_cutoff","_su_liquid_set_resonance","_su_liquid_in","_su_liquid_bp12","_su_liquid_lp12","_su_liquid_lp24","_su_liquid_process"]' \
+  -s EXPORTED_FUNCTIONS='["_su_daisy_filters_create","_su_daisy_filters_destroy","_su_daisy_filters_set_sample_rate","_su_daisy_filters_set_cutoff","_su_daisy_filters_set_resonance","_su_daisy_filters_set_drive","_su_daisy_filters_in","_su_daisy_filters_low","_su_daisy_filters_high","_su_daisy_filters_band","_su_daisy_filters_notch","_su_daisy_filters_peak","_su_daisy_filters_process"]' \
   -Wl,--no-entry \
-  -o "$LIQUID_OUTPUT"
+  -o "$DAISY_FILTERS_OUTPUT"
 
-echo "Built $LIQUID_OUTPUT (Ripples VA backend)"
+echo "Built $DAISY_FILTERS_OUTPUT (Electrosmith DaisySP SVF backend)"

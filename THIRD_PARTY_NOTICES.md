@@ -1,21 +1,31 @@
 # Third-party notices
 
-## Audible Instruments / Ripples virtual-analog model
-
-The `liquid.mono` DSP backend is an adaptation of the Mutable Instruments
-Ripples emulation by Tyler Coy, distributed in VCV Rack's Audible Instruments
-under GPL-3.0-or-later.
-
-Source: https://github.com/VCVRack/AudibleInstruments
-
-The Sonus Umbrae adaptation removes VCV Rack and SIMD dependencies and exposes
-a WebAssembly C ABI, while preserving the virtual-analog filter topology and
-the LP12/BP12/LP24 output model.
-
 ## Ghost Note Audio CloudSeedCore
 
-The `sky` FX backend uses Ghost Note Audio's CloudSeedCore reverb algorithm. The upstream source is fetched by `npm run dsp:setup` into `vendor/cloudseed-core/` and compiled into its own `sky.wasm` WebAssembly backend.
-
-CloudSeedCore is MIT licensed. Copyright remains with Ghost Note Engineering Ltd / Ghost Note Audio. Sonus Umbrae uses the name `sky` for its public model and does not present itself as an official Cloud Seed product.
+The Sonus Umbrae `sky` reverb uses the CloudSeedCore reverb algorithm by **Ghost Note Audio / Ghost Note Engineering Ltd**, distributed under the MIT License. Upstream license notice: **Copyright (c) 2024 Ghost Note Audio**.
 
 Upstream: https://github.com/GhostNoteAudio/CloudSeedCore
+
+Ghost Note Audio is the original author of the CloudSeedCore code used by this backend. The upstream project permits free and commercial use and requests attribution to Ghost Note Audio. Sonus Umbrae exposes the algorithm under the model name `sky`. Sonus Umbrae is an independent project and is **not created by, sponsored by, or affiliated with Ghost Note Audio**. Any reference to “Cloud Seed” in project documentation refers to the upstream algorithm and must not imply otherwise.
+
+## Electrosmith DaisySP
+
+The Sonus Umbrae `svf` filter backend uses DaisySP code by **Electrosmith, Corp.**, distributed under the MIT License.
+
+Upstream: https://github.com/electro-smith/DaisySP
+
+The current `daisy-filters.wasm` build uses DaisySP's double-sampled stable state-variable filter implementation. Sonus Umbrae currently exposes the simultaneous low-pass, high-pass, band-pass and notch responses as `lp`, `hp`, `bp` and `np`; DaisySP's peak response remains internal to the backend.
+
+## Mutable Instruments STM32F DSP
+
+Selected Sonus synthesis and modulation engines are derived from MIT-licensed STM32F DSP code by **Emilie Gillet / Mutable Instruments**, including DSP from Plaits, Elements, Rings and Tides 2018.
+
+Upstream: https://github.com/pichenettes/eurorack
+
+Mutable Instruments is a registered trademark. Sonus Umbrae is independent and is not affiliated with or endorsed by Mutable Instruments.
+
+## SuperParasites
+
+The `mist.*` FX family uses MIT-licensed STM32F DSP from **Patrick Dowling's SuperParasites** project and its permissively licensed upstream lineage.
+
+Upstream: https://github.com/patrickdowling/superparasites

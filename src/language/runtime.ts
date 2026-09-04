@@ -12,7 +12,7 @@ const RESERVED_IDENTIFIERS = new Set([
   'swell',
   'mist',
   'filter',
-  'liquid',
+  'svf',
   'pattern',
   'scale',
   'osc',
@@ -226,12 +226,13 @@ interface MistDefinition {
 }
 
 interface FilterDefinition {
-  model: 'liquid.mono';
+  model: 'svf';
   ownerVoice: string | null;
   displayName: string;
   cutoff: number;
   cutoffPercent: number | null;
   resonance: number;
+  drive: number;
   parameters: Map<string, string>;
 }
 
@@ -1185,13 +1186,14 @@ export class SonusRuntime {
           diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue;
         }
         filters.set(name, {
-          model: 'liquid.mono',
+          model: 'svf',
           ownerVoice: null,
           displayName: name,
           cutoff: 1000,
           cutoffPercent: null,
           resonance: 0,
-          parameters: new Map([['MODEL','LIQUID'],['CUTOFF','1000 HZ'],['RESONANCE','0%']]),
+          drive: 0,
+          parameters: new Map([['MODEL','SVF'],['CUTOFF','1000 HZ'],['RESONANCE','0%'],['DRIVE','0%']]),
         });
         results.push({ message: `${name} = Filter` });
         continue;
@@ -1712,7 +1714,7 @@ export class SonusRuntime {
         continue;
       }
 
-      match = line.match(/^([A-Za-z_]\w*)\.(owner|displayName|model|cutoff|cutoffPercent|resonance)\(\s*(.+)\s*\)\s*$/);
+      match = line.match(/^([A-Za-z_]\w*)\.(owner|displayName|model|cutoff|cutoffPercent|resonance|drive)\(\s*(.+)\s*\)\s*$/);
       if (match && filters.has(match[1])) {
         const definition = filters.get(match[1])!;
         const error = applyFilterCall(
@@ -1982,7 +1984,7 @@ export class SonusRuntime {
           diagnostics.push({ line: lineNumber, message: `aux output is only available on Voice objects: ${sourceName}` });
           continue;
         }
-        if (sourcePort === 'lp12' || sourcePort === 'bp12' || sourcePort === 'lp24') {
+        if (sourcePort === 'lp' || sourcePort === 'hp' || sourcePort === 'bp' || sourcePort === 'np') {
           const standaloneFilter = filters.has(sourceName);
           const embeddedFilter = voices.has(sourceName) && [...filters.values()].some((filter) => filter.ownerVoice === sourceName);
           if (!standaloneFilter && !embeddedFilter) {
@@ -2019,6 +2021,8 @@ export class SonusRuntime {
           // Mono FILTER input.
         } else if (targetPort === 'in' && voices.get(targetName)?.engine === 'resonator') {
           // Rings/Resonator has one mono external excitation input.
+        } else if ((targetPort === 'in' || targetPort === 'in2') && voices.get(targetName)?.engine === 'matter') {
+          // Elements/Matter exposes its two original mono external excitation inputs.
         } else if (!(targetName === 'Audio' && targetPort === 'out') && !gains.has(targetName)) {
           diagnostics.push({ line: lineNumber, message: `unknown or non-input object: ${targetName}` });
           continue;
@@ -2484,7 +2488,7 @@ export class SonusRuntime {
             value,
           })),
           ...(([...filters.values()].find((filter) => filter.ownerVoice === name)) ? [
-            { name: 'FILTER', value: 'LIQUID' },
+            { name: 'FILTER', value: 'SVF' },
           ] : []),
           ...([...routes.values()].some((route) => route.target === `${name}.v_oct`)
             ? [{ name: 'V_OCT', value: '--', liveSignal: `${name}.v_oct` }]
@@ -2553,11 +2557,11 @@ export class SonusRuntime {
 
     const schemeConnections: SchemeConnection[] = [
       ...[...routes.values()].map((route) => ({
-        source: route.source.replace(/\.(out|aux|lp12|bp12|lp24|out[1-4]|out_[LR]|t[1-3]|x[1-3]|y)$/, ''),
+        source: route.source.replace(/\.(out|aux|low|high|band|notch|peak|out[1-4]|out_[LR]|t[1-3]|x[1-3]|y)$/, ''),
         target: route.target.startsWith('Audio.')
           ? 'Audio'
           : route.target.replace(/\.(out_[LR]|inL|inR|in|trig|clock|v_oct|harmo|timbre|morph)$/, ''),
-        sourcePort: (route.source.match(/\.(out|aux|lp12|bp12|lp24|out[1-4]|out_[LR]|t[1-3]|x[1-3]|y)$/)?.[1] ?? 'out').toUpperCase(),
+        sourcePort: (route.source.match(/\.(out|aux|lp|hp|bp|np|out[1-4]|out_[LR]|t[1-3]|x[1-3]|y)$/)?.[1] ?? 'out').toUpperCase(),
         targetPort: route.target.endsWith('.trig')
           ? 'TRIG'
           : route.target.endsWith('.clock')
@@ -2682,6 +2686,7 @@ export class SonusRuntime {
         displayName: definition.displayName,
         cutoff: definition.cutoff,
         resonance: definition.resonance,
+        drive: definition.drive,
       })),
       gains: [...gains.entries()].map(([name, definition]) => ({
         name,
@@ -2923,6 +2928,13 @@ export class SonusRuntime {
             filter.parameters.set('RESONANCE', `${formatNumber(value)}%`);
             this.audio.setFilterResonance(cycle.owner, value);
             updateInlineScalar('filter', cycle.owner, 'resonance', value);
+            return;
+          }
+          if (cycle.parameter === 'drive') {
+            filter.drive = value;
+            filter.parameters.set('DRIVE', `${formatNumber(value)}%`);
+            this.audio.setFilterDrive(cycle.owner, value);
+            updateInlineScalar('filter', cycle.owner, 'drive', value);
             return;
           }
           return;
@@ -4296,10 +4308,10 @@ function parseChainedCalls(tail: string): ChainedCall[] | null {
 
 interface ParsedRoute {
   sourceName: string;
-  sourcePort: 'out' | 'out_L' | 'out_R' | 'aux' | 'lp12' | 'bp12' | 'lp24' | 'out1' | 'out2' | 'out3' | 'out4' | 't1' | 't2' | 't3' | 'x1' | 'x2' | 'x3' | 'y';
+  sourcePort: 'out' | 'out_L' | 'out_R' | 'aux' | 'lp' | 'hp' | 'bp' | 'np' | 'out1' | 'out2' | 'out3' | 'out4' | 't1' | 't2' | 't3' | 'x1' | 'x2' | 'x3' | 'y';
   amountExpression: string | null;
   targetName: string;
-  targetPort: 'out' | 'out_L' | 'out_R' | 'in' | 'inL' | 'inR' | 'trig' | 'clock' | 'v_oct' | 'harmo' | 'timbre' | 'morph';
+  targetPort: 'out' | 'out_L' | 'out_R' | 'in' | 'in2' | 'inL' | 'inR' | 'trig' | 'clock' | 'v_oct' | 'harmo' | 'timbre' | 'morph';
 }
 
 function parseRouteLine(line: string): ParsedRoute | null {
@@ -4310,12 +4322,12 @@ function parseRouteLine(line: string): ParsedRoute | null {
   const right = line.slice(arrow + 2).trim();
 
   const target = right.match(
-    /^([A-Za-z_]\w*)\.(out|out_L|out_R|inL|inR|in|trig|clock|v_oct|harmo|timbre|morph)$/,
+    /^([A-Za-z_]\w*)\.(out|out_L|out_R|inL|inR|in2|in|trig|clock|v_oct|harmo|timbre|morph)$/,
   );
   if (!target) return null;
 
   const source = left.match(
-    /^([A-Za-z_]\w*)\.(out_L|out_R|out1|out2|out3|out4|t1|t2|t3|x1|x2|x3|y|lp12|bp12|lp24|out|aux)(.*)$/,
+    /^([A-Za-z_]\w*)\.(out_L|out_R|out1|out2|out3|out4|t1|t2|t3|x1|x2|x3|y|lp|hp|bp|np|out|aux)(.*)$/,
   );
   if (!source) return null;
 
@@ -4384,9 +4396,9 @@ function applyFilterCall(
   switch (call.name) {
     case 'model': {
       const value = evaluate(call.argument);
-      if (value !== 'liquid.mono' && value !== 'liquid') return 'FILTER model expects liquid';
-      definition.model = 'liquid.mono';
-      definition.parameters.set('MODEL', 'LIQUID');
+      if (value !== 'svf') return 'FILTER model expects svf';
+      definition.model = 'svf';
+      definition.parameters.set('MODEL', 'SVF');
       return null;
     }
     case 'owner': {
@@ -4422,6 +4434,13 @@ function applyFilterCall(
       if (typeof value !== 'number' || value < 0 || value > 100) return 'resonance expects 0..100';
       definition.resonance = value;
       definition.parameters.set('RESONANCE', `${formatNumber(value)}%`);
+      return null;
+    }
+    case 'drive': {
+      const value = evaluate(call.argument);
+      if (typeof value !== 'number' || value < 0 || value > 100) return 'drive expects 0..100';
+      definition.drive = value;
+      definition.parameters.set('DRIVE', `${formatNumber(value)}%`);
       return null;
     }
     default: return `unknown Filter method: ${call.name}`;

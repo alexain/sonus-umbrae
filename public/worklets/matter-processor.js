@@ -15,6 +15,8 @@ class SonusMatterProcessor extends AudioWorkletProcessor {
     this.sourceRate = this.call('su_matter_sample_rate');
     this.hostRate = options.processorOptions?.hostSampleRate || sampleRate;
     this.ratio = this.sourceRate / this.hostRate;
+    this.blowInPtr = this.call('su_matter_blow_in', this.handle);
+    this.strikeInPtr = this.call('su_matter_strike_in', this.handle);
     this.mainPtr = this.call('su_matter_main', this.handle);
     this.auxPtr = this.call('su_matter_aux', this.handle);
     this.blockIndex = this.blockSize;
@@ -23,6 +25,16 @@ class SonusMatterProcessor extends AudioWorkletProcessor {
     this.nextMain = 0;
     this.nextAux = 0;
     this.phase = 0;
+
+    // Elements runs natively at 32 kHz. Keep the two external mono inputs as
+    // host-rate queues and resample them into each native DSP block. EXT IN 1
+    // follows the blow/envelope/diffuser path; EXT IN 2 is the direct resonator
+    // excitation input exposed by the original Elements Part API.
+    this.hostBlowInput = [];
+    this.hostStrikeInput = [];
+    this.blowReadPhase = 0;
+    this.strikeReadPhase = 0;
+    this.inputStep = this.hostRate / this.sourceRate;
 
     // Envelope state is intentionally local to each Matter worklet instance.
     // The runtime scheduler only emits triggers; the DSP-rate envelope runs here.
@@ -183,7 +195,39 @@ class SonusMatterProcessor extends AudioWorkletProcessor {
     return this.envLevel;
   }
 
+
+  appendHostInput(queue, input) {
+    if (!input || input.length === 0) return;
+    for (let i = 0; i < input.length; i += 1) queue.push(Number.isFinite(input[i]) ? input[i] : 0);
+  }
+
+  nextInputSample(queue, phaseName) {
+    if (queue.length === 0) return 0;
+    let phase = this[phaseName];
+    const index = Math.floor(phase);
+    const frac = phase - index;
+    const a = queue[Math.min(index, queue.length - 1)] || 0;
+    const b = queue[Math.min(index + 1, queue.length - 1)] || a;
+    const value = a + (b - a) * frac;
+    phase += this.inputStep;
+    const consumed = Math.floor(phase);
+    if (consumed > 0) {
+      queue.splice(0, Math.min(consumed, queue.length));
+      phase -= consumed;
+    }
+    this[phaseName] = phase;
+    return value;
+  }
+
   renderBlock() {
+    const memory = new Float32Array(this.memory.buffer);
+    const blowBase = this.blowInPtr >>> 2;
+    const strikeBase = this.strikeInPtr >>> 2;
+    for (let i = 0; i < this.blockSize; i += 1) {
+      memory[blowBase + i] = this.nextInputSample(this.hostBlowInput, 'blowReadPhase');
+      memory[strikeBase + i] = this.nextInputSample(this.hostStrikeInput, 'strikeReadPhase');
+    }
+
     // Advance the DRIVE envelope at source-sample rate. Performance.strength is
     // the continuous excitation amplitude; gate remains high while the envelope
     // is active, so bow/blow evolve continuously and strike reacts to its edge.
@@ -205,7 +249,12 @@ class SonusMatterProcessor extends AudioWorkletProcessor {
     return [main, aux];
   }
 
-  process(_inputs, outputs) {
+  process(inputs, outputs) {
+    const blowInput = inputs[0]?.[0];
+    const strikeInput = inputs[1]?.[0];
+    if (blowInput) this.appendHostInput(this.hostBlowInput, blowInput);
+    if (strikeInput) this.appendHostInput(this.hostStrikeInput, strikeInput);
+
     const mainOut = outputs[0]?.[0];
     const auxOut = outputs[1]?.[0];
     const frames = mainOut?.length ?? auxOut?.length ?? 128;

@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VENDOR="$ROOT/vendor/eurorack"
 SUPERPARASITES="$ROOT/vendor/superparasites"
 CLOUDSEED="$ROOT/vendor/cloudseed-core"
+DAISYSP="$ROOT/vendor/daisysp"
 
 if ! command -v git >/dev/null 2>&1; then
   echo "git is required" >&2
@@ -34,6 +35,15 @@ if ! git -C "$CLOUDSEED" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git clone --depth 1 https://github.com/GhostNoteAudio/CloudSeedCore.git "$CLOUDSEED"
 else
   echo "CloudSeedCore DSP sources already present: $CLOUDSEED"
+fi
+
+
+if ! git -C "$DAISYSP" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  mkdir -p "$ROOT/vendor"
+  echo "Fetching DaisySP DSP sources..."
+  git clone --depth 1 https://github.com/electro-smith/DaisySP.git "$DAISYSP"
+else
+  echo "DaisySP DSP sources already present: $DAISYSP"
 fi
 
 echo "Initialising required upstream submodules..."
@@ -76,6 +86,12 @@ if [[ ! -f "$CLOUDSEED/DSP/ReverbController.h" || \
       ! -f "$CLOUDSEED/DSP/RandomBuffer.cpp" || \
       ! -f "$CLOUDSEED/Parameters.cpp" ]]; then
   echo "CloudSeedCore DSP sources are incomplete" >&2
+  exit 1
+fi
+
+
+if [[ ! -f "$DAISYSP/Source/Filters/svf.h" || ! -f "$DAISYSP/Source/Filters/svf.cpp" || ! -f "$DAISYSP/Source/Utility/dsp.h" ]]; then
+  echo "DaisySP SVF sources are incomplete" >&2
   exit 1
 fi
 

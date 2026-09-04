@@ -83,11 +83,14 @@ Current direction:
 - `VOICE` macro engines backed initially by Mutable Instruments Plaits DSP.
 - `MOD` modulation backed initially by Mutable Instruments Tides 2018 DSP.
 - `FX` processors backed by Mist / SuperParasites plus the MIT-licensed `sky` ambient reverb based on CloudSeedCore.
+- `FILTER` processors backed by modular permissively licensed DSP areas; the first implementation is DaisySP `svf` with simultaneous multimode outputs.
+- Additional DaisySP areas may be introduced as separate WASM modules rather than one monolithic library.
 - Additional permissively licensed DSP where appropriate.
-- [x] Replace the GPL-3.0 Valley Plateau reverb dependency with Ghost Note Audio CloudSeedCore (MIT), exposed as `MODEL sky`.
+- [x] Consolidate the active DSP build around permissive licenses only.
 - Original Sonus Umbrae DSP modules.
 - Inspiration from other modular systems and open algorithms without necessarily reproducing their original user interfaces.
 - A stable module metadata format describing parameters, ports, signal semantics, and visual behavior.
+- [x] Route `THROUGH` by exposed audio-port capability rather than declaration category, so source/processor hybrids such as Resonator and Matter remain `VOICE` objects while accepting audio input.
 
 The language should not depend on the identity of any one upstream hardware module.
 

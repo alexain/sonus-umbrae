@@ -242,7 +242,8 @@ morph 50
 
 `matter` is backed by the original Mutable Instruments Elements DSP, compiled as
 a separate WebAssembly module. It remains one physical-modeling instrument: a
-shared pitch/resonator, three exciters, and one stereo output.
+shared pitch/resonator, three exciters, two external mono excitation inputs,
+and one logical stereo output.
 
 ```text
 VOICE body:
@@ -261,6 +262,22 @@ VOICE body:
 `BOW`, `BLOW`, and `STRIKE` are independent exciter levels in `0..100`. If an
 exciter is omitted its level defaults to `0`; its local `TIMBRE` defaults to
 `50`. Resonator parameters use their normal object defaults when omitted.
+
+#### Matter audio I/O
+
+Matter preserves the two external audio paths of Elements. `body.in` is the
+default external input and follows the envelope/diffuser excitation path;
+`body.in2` is the second direct resonator input. Both are mono. The default
+unsuffixed Matter output is stereo, with MAIN on the left and AUX on the right;
+`.main`/`.out` and `.aux` select either output explicitly.
+
+```text
+PLAY source THROUGH body THEN MAIN
+PLAY source THROUGH body.in2 THEN MAIN
+```
+
+Because Matter is a `VOICE` with audio inputs, it can be used as a serial
+processor without changing its declaration category.
 
 #### Envelope values
 
@@ -707,9 +724,13 @@ Basic route:
 PLAY lead through MAIN
 ```
 
-The source output defaults to the primary output of the object.
+The source output defaults to the primary output of the object. `THROUGH` is
+resolved by audio-port capability rather than by declaration category: an
+object may be a `VOICE`, `FILTER`, or `FX` and still be a valid processor if it
+exposes an audio input. An object with no audio input is rejected as a
+`THROUGH` destination.
 
-For a voice, explicit outputs are:
+For a normal macro voice, explicit outputs are:
 
 ```text
 lead.out
@@ -721,6 +742,17 @@ Example:
 ```text
 PLAY lead.out through MAIN
 ```
+
+Intermediate output selectors belong to the node, not to its input. For
+example:
+
+```text
+PLAY lead THROUGH tone.hp THEN MAIN
+```
+
+routes `lead` into `tone.in`, then routes the SVF high-pass output to `MAIN`.
+The same rule allows source/processor hybrids such as `resonator.*` and
+`matter` to appear inside a serial chain.
 
 ### Route level
 
@@ -809,6 +841,12 @@ Conceptually:
 lead.out -> grain.L
 lead.out -> grain.R
 ```
+
+### Stereo to mono coercion
+
+When a stereo object is routed into a mono input without selecting a channel,
+Sonus uses that object's primary channel. For the current stereo objects this
+is MAIN/left. Explicit `.aux` or `.R` selection always overrides this default.
 
 ### Stereo FX to MAIN
 
@@ -1198,17 +1236,12 @@ stopped scheduler.
 
 ## Current implementation boundary
 
-The public 0.1.0 language intentionally hides the current upstream DSP module
-names behind Sonus Umbrae engine families:
-
-```text
-VOICE -> macro.*
-MOD   -> current four-output modulation backend
-FX    -> mist.*
-```
-
-This keeps the language independent from any one upstream hardware product and
-allows future DSP families to coexist behind the same object model.
+The public language intentionally hides upstream implementation names behind
+Sonus Umbrae engine families. Current families include macro synthesis,
+physical modelling, resonators, modulation, stereo effects, ambient reverb and
+multimode filtering. This keeps the language independent from any one upstream
+hardware product or DSP library and allows future engines to coexist behind the
+same object model.
 
 ## Planned language directions
 
@@ -1231,6 +1264,39 @@ The core design principle remains unchanged: the text document is the source of
 truth, the runtime reconciles it live, and Scheme remains an observer rather
 than a graphical editor.
 
+
+### SVF multimode filter
+
+`MODEL svf` is the clean multimode FILTER backed by Electrosmith DaisySP. One input sample is processed once and all five responses are available simultaneously:
+
+```text
+FILTER tone:
+    MODEL svf
+    CUTOFF 45
+    RESONANCE 30
+    DRIVE 0
+```
+
+The public outputs are:
+
+```text
+tone.lp
+tone.hp
+tone.bp
+tone.np
+```
+
+`.lp` is the default. Therefore `PLAY source THROUGH tone THEN MAIN` uses the low-pass response. A response can also be selected directly on an intermediate node:
+
+```text
+PLAY source THROUGH tone.hp THEN MAIN
+```
+
+which means `source -> tone.in -> tone.hp -> MAIN`. Embedded FILTER blocks follow the same rule. DaisySP also computes a peak response internally, but Sonus does not expose it as a routing port in this language version.
+
+`CUTOFF` retains the typed musical cutoff forms already supported by FILTER. It can be driven by a normalized scalar/generative value, explicit frequencies, notes or scales, including the existing selection and `EVERY ... WITH ...` timing grammar where applicable. `RESONANCE` and `DRIVE` use the 0..100 Sonus control range. The SVF is intentionally exposed as the DaisySP filter itself; Sonus does not add artificial self-oscillation or oscillator behaviour.
+
+The implementation is compiled into the independent `daisy-filters.wasm` module. Future DaisySP DSP areas may use separate WASM modules rather than expanding this filter binary into a general-purpose monolith.
 
 ### Sky ambient reverb
 
@@ -1259,7 +1325,7 @@ The accepted aliases are:
 - `WIDTH` (or `SPREAD`) -> stereo decorrelation;
 - `SIZE`, `MIX`, and `FREEZE` retain their usual FX meanings.
 
-`sky` does not expose musical pitch. The upstream source is fetched by `npm run dsp:setup` into `vendor/cloudseed-core/` and compiled into `sky.wasm`. ValleyRackFree/Plateau is no longer part of the DSP build.
+`sky` does not expose musical pitch. The upstream source is fetched by `npm run dsp:setup` into `vendor/cloudseed-core/` and compiled into `sky.wasm`.
 
 ### Hot-reload timing continuity
 
