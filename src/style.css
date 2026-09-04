@@ -658,11 +658,22 @@ button, input, textarea { font: inherit; }
 }
 .syntax-comment {
   display: inline-block;
-  color: var(--phosphor-dim);
-  font-style: normal;
+  color: #747880;
+  font-style: italic;
   transform: skewX(-9deg);
   transform-origin: left bottom;
-  text-shadow: 0 0 4px rgba(215, 169, 46, 0.10);
+  text-shadow: none;
+}
+.syntax-line.syntax-disabled-object {
+  color: #9b7c2c;
+  text-shadow: 0 0 4px rgba(155, 124, 44, 0.16);
+}
+.syntax-line.syntax-disabled-object .syntax-comment {
+  color: #747880;
+  font-style: italic;
+  transform: skewX(-9deg);
+  transform-origin: left bottom;
+  text-shadow: none;
 }
 
 .editor-stack .editor {
@@ -909,4 +920,175 @@ button, input, textarea { font: inherit; }
 
 @media (prefers-reduced-motion: reduce) {
   .turing-bit-shift { animation: none; }
+}
+
+/* Configuration / About */
+.config-grid,
+.about-grid {
+  display: grid;
+  grid-template-columns: minmax(210px, max-content) minmax(0, 1fr);
+  gap: 10px 26px;
+  max-width: 850px;
+}
+.config-row { display: contents; }
+.config-row > span { color: var(--phosphor); }
+.config-row input,
+.config-row select {
+  justify-self: start;
+  accent-color: var(--phosphor-hot);
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--phosphor);
+  font: inherit;
+}
+.config-row select { min-width: 130px; padding: 2px 6px; }
+.about-copy { max-width: 850px; margin-bottom: 20px; color: var(--phosphor); }
+.about-grid span:nth-child(odd) { color: var(--phosphor-hot); }
+.about-grid span:nth-child(even) { color: var(--phosphor-dim); }
+
+/* USE capability restart gate. */
+.capability-restart-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 125;
+  display: grid;
+  place-items: center;
+  background: rgba(5, 6, 5, 0.82);
+  backdrop-filter: blur(1.5px);
+}
+.capability-restart-card {
+  width: min(590px, calc(100vw - 36px));
+  padding: 20px;
+  border: 1px solid var(--line);
+  background: rgba(5, 6, 5, 0.99);
+  box-shadow: 0 0 34px rgba(215, 169, 46, 0.10);
+}
+.capability-diff {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px 18px;
+  margin: 18px 0;
+  color: var(--phosphor-dim);
+}
+.capability-diff span { color: var(--phosphor-hot); }
+.capability-diff code { color: var(--phosphor); font: inherit; }
+.capability-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+
+/* Keyboard-first configuration navigation. */
+.system-subtitle {
+  margin: 18px 0 10px;
+  color: var(--phosphor-hot);
+  letter-spacing: .08em;
+}
+.config-row {
+  position: relative;
+}
+.config-row.selected > span,
+.config-row.selected input,
+.config-row.selected select {
+  color: var(--bg);
+  background: var(--phosphor-hot);
+  border-color: var(--phosphor-hot);
+  text-shadow: none;
+}
+.config-row.selected > span {
+  box-shadow: -8px 0 0 var(--phosphor-hot), 8px 0 0 var(--phosphor-hot);
+}
+.config-row input:disabled,
+.config-row select:disabled {
+  opacity: .58;
+}
+.config-info-row {
+  display: contents;
+}
+.config-info-row > span:first-child { color: var(--phosphor-dim); }
+.config-info-row > span:last-child { color: var(--phosphor); }
+
+/* ESC quick menu. */
+.quick-menu-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  background: rgba(5, 6, 5, 0.58);
+  backdrop-filter: blur(1px);
+}
+.quick-menu-card {
+  width: min(460px, calc(100vw - 36px));
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  background: rgba(5, 6, 5, 0.985);
+  box-shadow: 0 0 28px rgba(215, 169, 46, 0.10);
+}
+.quick-menu-grid {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  gap: 8px 16px;
+  margin: 16px 0 18px;
+}
+.quick-menu-grid span:nth-child(odd) {
+  color: var(--bg);
+  background: var(--phosphor-hot);
+  text-align: center;
+  text-shadow: none;
+}
+.quick-menu-grid span:nth-child(even) { color: var(--phosphor); }
+
+.about-link { color: inherit; text-decoration: underline; text-underline-offset: 3px; }
+.about-link:hover, .about-link:focus { color: var(--phosphor-hot); }
+
+/* Conway Life SEQ monitor. The SEQ view intentionally shows only the pool
+   state: active/inactive cells. Consumer playheads belong to optional inline
+   NOTE views, not to this shared sidebar view. */
+.life-monitor-card .monitor-body {
+  display: grid;
+  gap: 9px;
+}
+
+.life-grid {
+  --life-size: 8;
+  display: grid;
+  grid-template-columns: repeat(var(--life-size), minmax(0, 1fr));
+  gap: 3px;
+  width: min(100%, 246px);
+  aspect-ratio: 1;
+  padding: 8px;
+  border-left: 1px solid rgba(215, 169, 46, 0.18);
+  border-bottom: 1px solid rgba(215, 169, 46, 0.10);
+  background: rgba(5, 6, 5, 0.48);
+}
+
+.life-cell {
+  display: block;
+  min-width: 0;
+  min-height: 0;
+  aspect-ratio: 1;
+  border: 1px solid rgba(215, 169, 46, 0.22);
+  background: rgba(215, 169, 46, 0.018);
+  transition: background-color 120ms linear, border-color 120ms linear, box-shadow 120ms linear, opacity 120ms linear;
+}
+
+.life-cell.on {
+  border-color: rgba(255, 231, 131, 0.92);
+  background: rgba(255, 231, 131, 0.78);
+  box-shadow: 0 0 5px rgba(215, 169, 46, 0.34), inset 0 0 2px rgba(255, 255, 255, 0.20);
+}
+
+.life-cell.off {
+  opacity: 0.48;
+}
+
+.life-cell-change {
+  animation: life-cell-change 140ms ease-out;
+}
+
+@keyframes life-cell-change {
+  from { opacity: 0.35; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .life-cell { transition: none; }
+  .life-cell-change { animation: none; }
 }

@@ -28,14 +28,27 @@ class SonusDaisyFiltersProcessor extends AudioWorkletProcessor {
       this.call('su_daisy_filters_notch', this.handle),
       this.call('su_daisy_filters_peak', this.handle),
     ];
-    this.call('su_daisy_filters_set_sample_rate', this.handle, sampleRate);
+    this.sampleRate = sampleRate;
+    this.cutoff = 1000;
+    this.resonance = 0;
+    this.drive = 0;
+    this.bypassed = false;
+    this.call('su_daisy_filters_set_sample_rate', this.handle, this.sampleRate);
 
     this.port.onmessage = (event) => {
       const message = event.data ?? {};
+      if (message.type === 'reset') {
+        this.call('su_daisy_filters_reset', this.handle);
+        this.call('su_daisy_filters_set_cutoff', this.handle, this.cutoff);
+        this.call('su_daisy_filters_set_resonance', this.handle, this.resonance);
+        this.call('su_daisy_filters_set_drive', this.handle, this.drive);
+        return;
+      }
       if (message.type !== 'params') return;
-      if (message.cutoff !== undefined) this.call('su_daisy_filters_set_cutoff', this.handle, message.cutoff);
-      if (message.resonance !== undefined) this.call('su_daisy_filters_set_resonance', this.handle, message.resonance);
-      if (message.drive !== undefined) this.call('su_daisy_filters_set_drive', this.handle, message.drive);
+      if (message.bypassed !== undefined) this.bypassed = Boolean(message.bypassed);
+      if (message.cutoff !== undefined) { this.cutoff = message.cutoff; this.call('su_daisy_filters_set_cutoff', this.handle, message.cutoff); }
+      if (message.resonance !== undefined) { this.resonance = message.resonance; this.call('su_daisy_filters_set_resonance', this.handle, message.resonance); }
+      if (message.drive !== undefined) { this.drive = message.drive; this.call('su_daisy_filters_set_drive', this.handle, message.drive); }
     };
   }
 
@@ -52,13 +65,13 @@ class SonusDaisyFiltersProcessor extends AudioWorkletProcessor {
     const inputOffset = this.inPtr >>> 2;
     for (let i = 0; i < frames; ++i) memory[inputOffset + i] = input?.[i] ?? 0;
 
-    this.call('su_daisy_filters_process', this.handle, frames);
+    if (!this.bypassed) this.call('su_daisy_filters_process', this.handle, frames);
 
     for (let outputIndex = 0; outputIndex < 5; ++outputIndex) {
       const output = outputs[outputIndex]?.[0];
       if (!output) continue;
       const sourceOffset = this.outPtrs[outputIndex] >>> 2;
-      for (let i = 0; i < frames; ++i) output[i] = memory[sourceOffset + i];
+      for (let i = 0; i < frames; ++i) output[i] = this.bypassed ? (input?.[i] ?? 0) : memory[sourceOffset + i];
     }
     return true;
   }

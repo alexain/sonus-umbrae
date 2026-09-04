@@ -62,7 +62,7 @@ CLOCK set 120 bpm
 
 VOICE lead:
     sound macro.fm
-    note C4
+    PITCH NOTES C4
 
 PLAY lead through MAIN
 ```
@@ -108,6 +108,10 @@ Scale:
 SET harmony: C minor
 ```
 
+`SET` declarations can be local to `VOICE`, `FX`, or `FILTER` scopes. A local
+name shadows a global name only inside its owning object. This is useful for
+notes, scalar values, timing values, and structured envelopes.
+
 A typed time variable can be reused by `every`:
 
 ```text
@@ -121,92 +125,117 @@ VOICE lead:
 
 ## CLOCK
 
-The master clock is explicit and its monitor is always available:
+The master clock is explicit:
 
 ```text
-CLOCK set 120 bpm
+CLOCK SET 120 bpm
 ```
 
-The master can deliberately move away from a perfectly rigid pulse:
+Its clock view is always active in the sidebar and in Scheme. `WITH VIEW` is
+therefore not used on the master clock.
+
+The master can have its own timing character:
 
 ```text
-CLOCK set 120 bpm with jitter 8, drift 12
+CLOCK SET 120 bpm WITH JITTER 8, DRIFTER 12
 ```
 
-`jitter 0..100` adds fast interval-to-interval timing variation. A value of 10
-allows roughly ±10% instantaneous interval variation around the nominal tempo.
-`drift 0..100` is slower and correlated: the clock gradually wanders around the
-nominal BPM instead of choosing a completely new offset on every tick. The BPM
-shown in the status bar remains the nominal BPM; the always-on master clock view
-shows the actual irregular trigger spacing.
+`JITTER 0..100` adds fast interval-to-interval timing variation. `DRIFTER
+0..100` adds a slower correlated wander around the nominal tempo. Both are
+properties of the clock object; the BPM shown in the status bar remains the
+nominal BPM while the master view shows the actual trigger spacing.
 
-A program using beat-based `every` statements remains stopped with respect to
-beat timing until a master clock is declared and the program transport is
-running.
+The master clock may be paused live without stopping the rest of the program:
+
+```text
+_CLOCK SET 120 bpm WITH JITTER 8
+```
+
+Pausing the master stops the entire musical clock tree: the master, all named
+clocks derived from it, and all beat-based jobs stop receiving ticks. Wall-clock
+`sec`/`ms` jobs and already-running audio tails continue independently.
+Removing the underscore starts a fresh musical clock epoch: beat phase is not
+recovered or caught up, named clocks restart from the new master downbeat, and
+no burst of missed beat events is emitted.
 
 The clock value can also be dynamic:
 
 ```text
-CLOCK set rnd(110,120) bpm with cycle 4 beats
+CLOCK SET rnd(110,120) bpm WITH CYCLE 4 beats
 ```
 
-### Named derived clocks
+### Named clocks
 
-Simple one-off dividers and multipliers remain available:
+A named clock is a runtime object and is declared with `CLOCK`, never with
+`SET`. `SET` remains reserved for typed values/parameters.
+
+A named clock inherits the master rate by default, so this is valid:
 
 ```text
-SET half: clock /2
-SET double: clock *2
+CLOCK human WITH JITTER 10
 ```
 
-For a clock with its own timing character, declare a named `CLOCK` block:
+It runs at the same nominal rate as the master but has its own local jitter.
+`RATE` is optional and expresses a multiplier/divider of the master:
 
 ```text
-CLOCK slow with view:
-    from MASTER /4
-    jitter 15
-    drift 25
+CLOCK slow RATE /2
+CLOCK fast RATE *2
+CLOCK broken RATE /4 WITH JITTER 30, DRIFTER 8
 ```
 
-`with view` is optional. Unlike the master clock, named clocks do not create a
-sidebar monitor unless requested.
-
-A named clock can derive from another named clock:
+A named clock gets a visual clock view only when explicitly requested:
 
 ```text
-CLOCK slow:
-    from MASTER /2
-    drift 10
-
-CLOCK broken with view:
-    from slow /3
-    jitter 30
-    drift 4
+CLOCK slow RATE /2 WITH VIEW
+CLOCK human WITH JITTER 10, DRIFTER 4, VIEW
 ```
 
-The rate is relative to the selected parent. The parent's jitter/drift character
-is inherited and the child's values are added on top, capped at 100. This lets a
-clock remain related to the master while becoming progressively less rigid.
+The view uses the same moving clock-point language as the master clock view.
+Named clock modifiers can therefore include `JITTER`, `DRIFTER` and `VIEW`,
+separated by commas.
 
-Use named clocks from any beat-based `every` clause:
+A named clock can be paused independently:
+
+```text
+_CLOCK human WITH JITTER 10, VIEW
+```
+
+Only that clock stops emitting ticks; the master and other clocks continue.
+There is deliberately no `_SET` form because `SET` can hold non-clock typed
+values and disabling it would invalidate unrelated dependencies.
+
+Named clocks may also be local to an object when several parameters need to
+share the same derived clock without publishing it globally:
+
+```text
+VOICE lead:
+    CLOCK clockvoice RATE /2 WITH JITTER 5
+    TIMBRE 60 EVERY 1 beat ON CLOCK clockvoice
+    MORPH 40 EVERY 2 beat ON CLOCK clockvoice
+```
+
+The local clock is the same kind of master-derived clock as an anonymous
+`ON CLOCK /2` expression; naming it simply makes the same timeline reusable
+inside that object. `CLOCK SET` remains global and is not valid inside an
+object.
+
+Use named clocks from beat-based `EVERY` clauses:
 
 ```text
 VOICE bass:
-    sound macro.analog
-    note [C2 Eb2 G2] with walk every 1 beat with clock slow
+    SOUND macro.analog
+    PITCH NOTES [C2 Eb2 G2] WITH WALK EVERY 1 beat on CLOCK slow
 ```
 
-or use an anonymous master-derived rate directly:
+or use an anonymous master-derived rate directly when no persistent clock
+object is needed:
 
 ```text
-morph 50 every 2 beats with clock /4
+MORPH 50 EVERY 2 beats on CLOCK /4
 ```
 
-The `every` count is measured in ticks of the selected clock. Therefore
-`every 2 beats with clock /2` updates every two ticks of the half-rate clock.
-Timing modifiers such as `chance`, `coin` and `loose` remain local to the
-`every` clause rather than changing the clock itself.
-
+The `EVERY` count is measured in ticks of the selected clock.
 
 ## VOICE
 
@@ -281,53 +310,94 @@ processor without changing its declaration category.
 
 #### Envelope values
 
-Envelope shapes are typed values. Structured envelope lists use commas because
-time values consist of a number plus a unit:
+`ENVELOPE` is a structured, lightweight value for shaping compatible scalar
+parameters. The public language does not require the user to choose between
+AD/AR/ASR/ADSR names: the shape is inferred from the properties that are
+present.
+
+Inline envelopes stay on the parameter line and use comma-separated named
+properties:
 
 ```text
-AD      [250 ms, 1.2 sec]
-ADR     [4 sec, 300 ms, 1.2 sec]
-ASR     [800 ms, 75, 2 sec]
-ADSR    [20 ms, 300 ms, 70, 1.5 sec]
-DAHDSR  [100 ms, 400 ms, 250 ms, 800 ms, 65, 2 sec]
+TIMBRE ENVELOPE [att log 20 ms, dec 1/2 beat, sus 60, rel 2 beat, range 30 to 90]
 ```
 
-The arity and value types are strict. Time stages require `ms` or `sec`; sustain
-values use `0..100`. For example an ADSR always requires exactly four values and
-its third value must be the sustain level.
-
-Envelopes can be stored in `SET` and consumed only by compatible parameters:
+The canonical property names and their compact aliases are:
 
 ```text
-SET env1: ADR [4 sec, 300 ms, 1.2 sec]
-
-VOICE body:
-    sound matter
-    strike 70
-    drive from env1
+ATTACK   / ATT
+DECAY    / DEC
+SUSTAIN  / SUS
+RELEASE  / REL
+DELAY    / DEL
+HOLD
+RANGE
 ```
 
-`DRIVE` controls the common Elements excitation/performance signal. Without an
-explicit `EVERY`, it is retriggered by the VOICE note event (including each new
-note produced by a note/scale/SEQ source). Retriggering starts from the current
-envelope level rather than forcing a discontinuity to zero.
+`ATTACK`, `DECAY`, and `RELEASE` are linear by default. `LOG` may be written
+before their duration to select a logarithmic curve; `LIN` is accepted when an
+explicit linear label is preferred. `DELAY` and `HOLD` are durations and do not
+have a curve. `SUSTAIN` is a level in `0..100`. `RANGE min TO max` maps the
+normalized envelope to the target parameter domain and defaults to `0 TO 100`.
 
-`DRIVE` may instead use the normal global timing grammar:
+Time stages accept `ms`, `sec`, or `beat`, including fractional beat values:
 
 ```text
-DRIVE AD [1 sec, 1 sec] EVERY 2 beat
-DRIVE FROM env1 EVERY 4 beat WITH CHANCE 70
-DRIVE FROM env1 EVERY 2 beat WITH CLOCK pulse, LOOSE
+TIMBRE ENVELOPE [att 20 ms, hold 1/4 beat, rel log 2 beat]
 ```
 
-This does not create a local scheduler. The trigger is registered as another job
-on the single runtime scheduler used by all `EVERY` events. When `DRIVE` has its
-own `EVERY`, note changes update pitch but do not also retrigger DRIVE.
+Beat-based stages inherit the musical clock of the parameter. Therefore:
 
-The envelope itself runs inside the Matter AudioWorklet at DSP rate. Its current
-level drives Elements performance strength continuously; the gate stays active
-while the envelope has non-zero energy, allowing bow/blow excitation to evolve
-through the envelope while strike responds to the gate edge.
+```text
+TIMBRE ENVELOPE [att 1/2 beat, rel 1 beat] EVERY 4 beat ON CLOCK human
+```
+
+is triggered every four `human` ticks and its beat-based envelope stages are
+measured against that same named clock. Without `ON CLOCK`, the master clock is
+used. `ms`/`sec` stages remain wall-clock based.
+
+Reusable envelopes use the multiline typed `SET` form:
+
+```text
+SET motion TYPE ENVELOPE:
+    ATTACK LOG 20 ms
+    DECAY 1/2 beat
+    SUSTAIN 60
+    RELEASE 2 beat
+    RANGE 30 TO 90
+```
+
+and can then be used as the value of a compatible parameter:
+
+```text
+VOICE lead:
+    SOUND macro.fm
+    TIMBRE motion
+```
+
+`SET` can also be declared inside an object. Local values use lexical scope and
+do not leak into other objects:
+
+```text
+VOICE lead:
+    SET notes: [C3 Eb3 G3]
+    SET motion TYPE ENVELOPE:
+        ATTACK 20 ms
+        RELEASE 1 beat
+
+    PITCH notes EVERY 1 beat
+    TIMBRE motion
+```
+
+An envelope without `SUSTAIN` is one-shot. A sustained envelope is gated and,
+in the current implementation, follows the containing VOICE trigger/gate rather
+than declaring its own independent `EVERY`. This keeps release semantics
+explicit and avoids inventing a hidden gate duration.
+
+Matter `DRIVE` accepts the new `ENVELOPE` spelling but currently keeps the
+existing DSP-rate backend restrictions: linear, full-range `ms`/`sec` shapes
+without `DELAY`/`HOLD`. Generic scalar parameter envelopes run through the host
+control-rate envelope runtime.
 
 ### LPG
 
@@ -359,42 +429,57 @@ voice.
 A voice can use a fixed note:
 
 ```text
-note C4
+PITCH NOTES C4
 ```
 
 A fixed frequency:
 
 ```text
-freq 220
+PITCH FREQS 220
 ```
 
 A list:
 
 ```text
-note [C3 G3 Bb3]
+PITCH NOTES [C3 G3 Bb3]
 ```
 
 Selection modifiers:
 
 ```text
-note [C3 G3 Bb3] with random
-note [C3 G3 Bb3] with walk
-note [C3 G3 Bb3] with shuffle
-note [C3 G3 Bb3] with reverse
+PITCH NOTES [C3 G3 Bb3] with random
+PITCH NOTES [C3 G3 Bb3] with walk
+PITCH NOTES [C3 G3 Bb3] with shuffle
+PITCH NOTES [C3 G3 Bb3] with reverse
 ```
 
 Scales are written as:
 
 ```text
-scale C minor
+PITCH SCALE C minor
 ```
 
-The root note is normalized automatically to uppercase.
+The root note is normalized automatically to uppercase. Supported scale modes include the diatonic modes plus major and minor-pentatonic scales:
+
+```text
+PITCH SCALE C major-pentatonic
+PITCH SCALE A minor-pentatonic
+```
+
+Pentatonic scales use the same range, selection, sequencing, `SET`, and `SEQ life` machinery as the other scales. For example:
+
+```text
+SEQ sparks WITH VIEW:
+    MODEL life
+    SIZE 16
+    PITCH SCALE C minor-pentatonic WITH RANGE C2 C5
+    EVOLVE EVERY 8 beat
+```
 
 A range and sequencing mode can be combined:
 
 ```text
-scale C minor with range C2 C5, walk
+PITCH SCALE C minor with range C2 C5, walk
 ```
 
 ## every
@@ -408,23 +493,23 @@ morph rnd(30,70) every 1 sec
 ```
 
 ```text
-scale C minor with walk every 2 beats
+PITCH SCALE C minor with walk every 2 beats
 ```
 
 Timing modifiers belong to the `every` clause:
 
 ```text
-morph rnd(20,80) every 3 sec with drift
+morph rnd(20,80) every 3 sec on drift
 ```
 
 ```text
-scale C minor with random every 2 beats with loose, chance 80
+PITCH SCALE C minor with random every 2 beats on loose, chance 80
 ```
 
 The canonical order is:
 
 ```text
-property value [with property modifiers] every time [with timing modifiers]
+property value [with property modifiers] every time [on timing modifiers]
 ```
 
 `every` stays at the end of the property expression.
@@ -538,7 +623,7 @@ VOICE lead:
         rate 4 sec
         shape sine
 
-    morph from motion.a with depth 40
+    morph motion.a with depth 40
 ```
 
 The local name is scoped to the containing object. Internally the runtime uses
@@ -555,9 +640,9 @@ VOICE lead:
         rate 4 sec
         relation phase with shift 100
 
-    morph from motion.a with depth 30
-    timbre from motion.b with depth 20
-    harmo from motion.c with depth 15
+    morph motion.a with depth 30
+    timbre motion.b with depth 20
+    harmo motion.c with depth 15
 ```
 
 `depth` is expressed in the logical -100..100 modulation range.
@@ -658,7 +743,7 @@ Compatible Mist models accept musical pitch syntax.
 Fixed transposition by note:
 
 ```text
-note C4
+PITCH NOTES C4
 ```
 
 C4 is the current zero-semitone reference.
@@ -680,13 +765,13 @@ maps to approximately +12 semitones.
 Sequenced pitch:
 
 ```text
-note [C3 G3 Bb3] with random every 1 beat
+PITCH NOTES [C3 G3 Bb3] with random every 1 beat
 ```
 
 Scale sequencing:
 
 ```text
-scale C minor with range C3 C5, walk every 2 beats
+PITCH SCALE C minor with range C3 C5, walk every 2 beats
 ```
 
 Frequency syntax is also accepted where musical pitch is supported:
@@ -707,8 +792,8 @@ FX grain:
         rate 4 sec
         shape sine
 
-    position from motion.a with depth 30
-    density from motion.b with depth 20
+    position motion.a with depth 30
+    density motion.b with depth 20
 ```
 
 The current Mist integration receives this modulation at control rate rather
@@ -948,27 +1033,52 @@ graphical patch editor.
 Declared parameter values are shown inside the owning module. Optional views
 can also appear in the Scheme representation.
 
-## Command mode
 
-Press `Esc` from the editor to enter command mode.
+### Live disable, mute and bypass
 
-Current useful commands include:
+A leading underscore on a live object declaration temporarily excludes that object without deleting its definition or routes. The runtime keeps the object instantiated so removing the underscore is a fast hot-state change:
 
 ```text
-:scheme
-:config
-:help
-:save
-:load
-:new
-:clear
-:run
-:run stop
-:start
-:stop
-:test 440
-:test stop
-:panic
+_VOICE bass:
+    SOUND macro.analog
+    PITCH NOTES C2
+
+_FILTER tone:
+    MODEL svf
+    CUTOFF 60
+
+_FX space:
+    MODEL sky
+
+_CLOCK pulse RATE *2
+```
+
+The effect depends on the object's audio role: `_VOICE` mutes the voice output while preserving DSP state; `_FILTER` bypasses the filter and passes its input through all exposed filter outputs; `_FX` bypasses the processor dry while stopping new input into the wet engine so an existing reverb/delay tail can decay; `_CLOCK` pauses the selected named clock while the rest of the musical clock tree continues; `_CLOCK SET ... bpm` pauses the entire musical clock tree. Wall-clock `sec`/`ms` scheduling continues during a master-clock pause.
+
+The underscore is a live-performance state change. While the program is running, adding or removing `_` takes effect immediately without `Cmd+Enter`; the disabled-object colour follows the same runtime state, so a yellow block is already muted, bypassed or paused. A later normal compile preserves the source declaration as the source of truth. Timed mute/bypass scheduling is not part of this version yet.
+
+## Quick menu and command prompt
+
+Press `Esc` from the editor to open the compact quick menu. The menu is keyboard-driven: `C` opens Configuration, `A` opens About, `S` saves, `L` loads, `R` restarts the audio engine/runtime using the current program, and `N` creates a new empty project.
+
+Press `>` from the live editor to enter the terminal-style command prompt. The prompt uses `>` rather than `:`. Current useful commands include:
+
+```text
+>scheme
+>config
+>help
+>about
+>save
+>load
+>new
+>clear
+>run
+>run stop
+>start
+>stop
+>test 440
+>test stop
+>panic
 ```
 
 `:start` controls the Web Audio engine lifecycle.
@@ -976,7 +1086,7 @@ Current useful commands include:
 `:run` compiles and starts the current live program.
 
 `:run stop` stops the program transport without shutting down the Web Audio
-engine itself.
+engine itself. Generator scheduling and modulation stop, FILTER state is cleared immediately, while downstream tail-preserving FX remain alive long enough to decay naturally.
 
 ## Save and load
 
@@ -1078,8 +1188,8 @@ reverse
 `walk` can optionally take an amount:
 
 ```text
-scale C minor with walk every 1 beat
-scale C minor with walk 3 every 1 beat
+PITCH SCALE C minor with walk every 1 beat
+PITCH SCALE C minor with walk 3 every 1 beat
 ```
 
 Without an amount, `walk` moves by one sequence step at a time. With an amount,
@@ -1089,7 +1199,7 @@ each update.
 For a scale, these are scale degrees/list positions rather than semitones.
 
 ```text
-scale C minor with range C2 C5, walk 2 every 1 beat
+PITCH SCALE C minor with range C2 C5, walk 2 every 1 beat
 ```
 
 remains inside the declared C2..C5 range.
@@ -1106,16 +1216,16 @@ This distinction is intentional:
 Generative behavior composes with normal timing:
 
 ```text
-SET slow: clock /2
+CLOCK slow RATE /2
 
 VOICE lead:
     sound macro.fm
-    scale C minor with range C3 C5, walk 2 every 2 beats with clock slow
-    morph 50 with trend 20 every 1 beat with clock /4
+    PITCH SCALE C minor with range C3 C5, walk 2 every 2 beats on clock slow
+    morph 50 with trend 20 every 1 beat on clock /4
 ```
 
 The generator determines **how** the value changes. `every` determines **when**
-it changes. `with clock ...` determines which clock provides those beat steps.
+it changes. `ON CLOCK ...` determines which clock provides those beat steps.
 
 
 
@@ -1133,16 +1243,16 @@ SEQ melody:
     model turing
     length 8
     change 12
-    scale C minor with range C2 C4
+    PITCH SCALE C minor with range C2 C4
     every 1 beat
 ```
 
-The generated source is read with `from`:
+The generated source is used directly by name:
 
 ```text
 VOICE bass:
     sound macro.analog
-    note from melody every 1 beat
+    PITCH melody every 1 beat
 ```
 
 The `SEQ` timing and the consumer timing are independent. For example:
@@ -1152,12 +1262,12 @@ SEQ melody:
     model turing
     length 8
     change 10
-    scale D dorian with range D2 D4
+    PITCH SCALE D dorian with range D2 D4
     every 2 beats
 
 VOICE bass:
     sound macro.analog
-    note from melody every 1 beat
+    PITCH melody every 1 beat
 ```
 
 Here the Turing register advances every two beats, while the voice reads its
@@ -1183,7 +1293,7 @@ more variation.
 The musical material can be supplied as a scale:
 
 ```text
-scale C minor with range C2 C4
+PITCH SCALE C minor with range C2 C4
 ```
 
 or as an explicit note vocabulary:
@@ -1200,18 +1310,83 @@ Turing register itself determines the generated selection.
 and probability modifiers:
 
 ```text
-every 1 beat with clock /4
-every 2 beats with coin
+every 1 beat on clock /4
+every 2 beats on coin
 ```
 
 A SEQ source controls its own generation, so consumers do not add list
 selection modes on top of it. The canonical form is therefore:
 
 ```text
-note from melody every 1 beat
+PITCH melody every 1 beat
 ```
 
-rather than `note from melody with random ...`.
+rather than `note melody with random ...`.
+
+### Life note-pool sequencer
+
+`MODEL life` is a pool sequencer rather than a single-current-note source. At startup it creates one cellular grid and maps the live cells onto the declared pitch material. With no suffix it uses Conway's classic Life rule (`B3/S23`). Named Life-like variants can be selected with a dotted model name: `life.highlife` (`B36/S23`), `life.seeds` (`B2/S`), `life.day-night` (`B3678/S34678`), or `life.morley` (`B368/S245`). If no `EVOLVE` property is present, the initial grid remains static for the whole run.
+
+```text
+SEQ ecosystem WITH VIEW:
+    MODEL life
+    SIZE 16
+    PITCH SCALE C minor WITH RANGE C2 C5
+```
+
+`SIZE` currently accepts `8` or `16`. `PITCH SCALE ... WITH RANGE ...`, `PITCH NOTES [...]`, or `PITCH FREQS [...]` defines the pitch material available to the grid. The SEQ itself has no playhead and does not choose a current note. Its view therefore shows only the live/dead cell matrix.
+
+Available Life-like models:
+
+```text
+MODEL life             // Conway B3/S23 (default)
+MODEL life.highlife    // B36/S23
+MODEL life.seeds       // B2/S
+MODEL life.day-night   // B3678/S34678
+MODEL life.morley      // B368/S245
+```
+
+All variants use the same square grid and 8-neighbour Moore neighbourhood; only their birth/survival rule differs. `DENSITY`, `MAX`, `RESPAWN`, `EVOLVE`, `PITCH`, and consumer reader modes work identically for every variant.
+
+Evolution is explicit and optional:
+
+```text
+SEQ ecosystem WITH VIEW:
+    MODEL life
+    SIZE 16
+    DENSITY 15 WITH MAX 20, RESPAWN
+    PITCH SCALE C minor WITH RANGE C2 C5
+    EVOLVE EVERY 8 beat
+```
+
+`EVOLVE EVERY ...` uses the normal scheduling grammar, including `ON CLOCK ...`, `ON CHANCE ...`, and the other compatible timing modifiers. Each evolution changes the pool only; it never forces a consumer to change its currently sounding note.
+
+`DENSITY` controls the random population used when the Life grid is first created. The default is `34`, preserving the original behavior. An optional `WITH MAX` caps the percentage of live cells both after initialization and after every evolution; excess live cells are removed at random. Add `RESPAWN` to regenerate the grid with the initial density whenever an evolution reaches zero live cells.
+
+```text
+DENSITY 15 WITH MAX 20, RESPAWN
+```
+
+`MAX` must be in `0..100` and cannot be lower than the initial `DENSITY`. `RESPAWN` can also be used without a maximum (`DENSITY 10 WITH RESPAWN`). It acts only after an evolution produces an empty grid; it does not inject cells while Life is still active. `DENSITY` does not otherwise bias Conway's evolution; it only seeds the initial state, while `MAX` acts as an explicit musical population limiter.
+
+Consumers read the same pool independently. Unlike Turing, a Life pool requires a reader mode at the point of use:
+
+```text
+VOICE arp:
+    PITCH ecosystem WITH WALK EVERY 1/2 beat
+
+VOICE bells:
+    PITCH ecosystem WITH RANDOM EVERY 4 beat ON CHANCE 30
+
+VOICE anchor:
+    PITCH ecosystem WITH FIRST EVERY 2 beat
+```
+
+The initial reader modes are `ORDER`, `RANDOM`, `WALK`, `REVERSE`, `PENDULUM`, `FIRST`, and `LAST`. Each consumer owns its own reader state, so two voices may choose different notes from the same live-cell pool at the same time.
+
+When `EVOLVE` kills the cell currently associated with a consumer, the consumer keeps its current note until its own next `EVERY` event. At that point it chooses again from the new pool. `WALK` retains the old cell position as its geometric reference even if that cell has died. If the grid temporarily has no live cells, consumers retain their previous note until live material becomes available again.
+
+A future inline reader view may overlay the consumer's selected cell, but the SEQ module view itself intentionally remains state-only: it displays just the active cells.
 
 ### Turing view
 
@@ -1294,7 +1469,7 @@ PLAY source THROUGH tone.hp THEN MAIN
 
 which means `source -> tone.in -> tone.hp -> MAIN`. Embedded FILTER blocks follow the same rule. DaisySP also computes a peak response internally, but Sonus does not expose it as a routing port in this language version.
 
-`CUTOFF` retains the typed musical cutoff forms already supported by FILTER. It can be driven by a normalized scalar/generative value, explicit frequencies, notes or scales, including the existing selection and `EVERY ... WITH ...` timing grammar where applicable. `RESONANCE` and `DRIVE` use the 0..100 Sonus control range. The SVF is intentionally exposed as the DaisySP filter itself; Sonus does not add artificial self-oscillation or oscillator behaviour.
+`CUTOFF` remains the normalized scalar/generative cutoff control. Musical cutoff material now uses the same unified `PITCH` property as other objects: `PITCH SCALE ...`, `PITCH NOTES [...]`, or `PITCH FREQS [...]`, including the existing selection and `EVERY ... WITH ...` timing grammar where applicable. `RESONANCE` and `DRIVE` use the 0..100 Sonus control range. The SVF is intentionally exposed as the DaisySP filter itself; Sonus does not add artificial self-oscillation or oscillator behaviour.
 
 The implementation is compiled into the independent `daisy-filters.wasm` module. Future DaisySP DSP areas may use separate WASM modules rather than expanding this filter binary into a general-purpose monolith.
 
@@ -1408,3 +1583,93 @@ PLAY source THROUGH bells THEN MAIN
 When an external source is connected, the Rings worklet uses the original
 external-exciter path; with no input connection it uses the original internal
 exciter.
+
+### LIVE performance controls
+
+`LIVE` is a performance-UI qualifier. For direct parameters whose native Sonus domain is `0..100`, it exposes a realtime slider without changing the DSP meaning:
+
+```text
+FILTER tone:
+    MODEL svf
+    LIVE CUTOFF 60
+    LIVE RESONANCE 35
+    DRIVE 10
+```
+
+In the live editor, each `LIVE` parameter receives a compact realtime slider.
+Moving it sends the value directly to the active DSP parameter and also updates
+the literal in the source itself, so performance control stays smooth while the
+text remains the source of truth. When the gesture ends, the updated source is
+reconciled with the runtime. A scalar generative modifier remains attached to
+the updated base value, for example:
+
+```text
+LIVE CUTOFF 60 WITH WANDER 15
+```
+
+Changing the control to 72 rewrites only the literal as
+`LIVE CUTOFF 72 WITH WANDER 15`; the wander process is preserved.
+
+`LIVE PITCH` is the first typed exception to the scalar rule. It opens the inline piano view for the note value or note list, so the canonical performance form is now:
+
+```text
+VOICE lead:
+    SOUND macro.analog
+    LIVE PITCH NOTES C3
+```
+
+The older `PITCH NOTES ... WITH VIEW` form remains accepted for compatibility, but `LIVE PITCH NOTES ...` is the preferred spelling. The piano is display-only in this version; direct key editing of the source note/list is reserved for a later iteration. Other typed or derived values such as `PITCH FREQS`, `PITCH SCALE`, named sources and envelopes are not yet `LIVE`-editable. The qualifier is UI metadata; it does not introduce a second scheduler or hidden parameter value.
+
+## USE directive
+
+`USE` is the program capability directive. It is optional, may appear only once, and must be the first effective instruction in the source (blank lines and comments may precede it). Capability names are comma-separated:
+
+```text
+USE visual, midi
+```
+
+The currently reserved capability names are `visual`, `midi`, `audioin`, and `osc`. In the 0.2.x runtime they establish the capability lifecycle and restart contract; individual optional backends can be attached to that lifecycle as they are implemented.
+
+`USE` is structural rather than a live parameter. If its normalized capability set changes while code is running, Sonus does not hot-reconcile the edit. It asks for confirmation because the runtime must be stopped and rebuilt. Cancelling restores the previous `USE` directive in the editor. Accepting performs a runtime restart and rebuilds the program using the new capability set. Reordering the same capabilities does not require a restart.
+
+`USE` is intentionally not used for editor-only facilities such as the variable inspector, diagnostics, or live-control refresh rate. Those belong to the environment configuration.
+
+## Environment screens
+
+`>CONFIG` opens environment preferences. These settings are not part of the Sonus program and therefore do not alter program semantics. The screen is keyboard-first: `Up/Down` selects a row, `Left/Right` changes a value, and `Enter` toggles or advances the selected value. The selected row is shown in reverse video.
+
+The Audio section reports the effective Web Audio sample rate and available latency information. `SAMPLE RATE` can use the device default or request 44.1, 48, 88.2 or 96 kHz. Where the browser supports Audio Output Devices, `OUTPUT DEVICE` enumerates and selects available audio outputs; unsupported browsers keep that row browser-controlled. Device and sample-rate changes are structural: Sonus asks for confirmation, restarts the audio engine, reloads its AudioWorklets/WASM, and then rebuilds the current program. Cancelling restores the previous configuration. Browser APIs do not expose reliable hardware bit depth, so Sonus does not invent a bit-depth readout.
+
+The Interface section includes the variable inspector, lightweight runtime metrics, the header DSP status, and the refresh rate used by `LIVE` controls. Preferences are stored locally by the browser.
+
+`>ABOUT` opens the project/version and runtime information screen. `>HELP` remains the command reference and `>SCHEME` remains the signal-graph view.
+
+### Direct typed SET values
+
+A compatible named value or runtime source is used directly as a property value. `FROM` is no longer part of the public language. Name resolution checks local scope first and then global scope:
+
+```text
+VOICE bass:
+    SET notes: [C2 G1 C2 Bb1]
+    PITCH notes WITH ORDER EVERY 2 beat ON CLOCK bassclock
+```
+
+`SEQ` and `MOD` outputs follow the same rule: use the source name directly, for example `PITCH melody` or `MORPH motion.a WITH DEPTH 30`. The source type determines how the parameter consumes it.
+
+During quantized hot reload, voices driven by a sequence keep their current pitch instead of jumping back to the first declared note. This avoids an unnecessary pitch/strum discontinuity when the same live program is reconciled.
+
+### Manual Life reset
+
+A running `SEQ` using `MODEL life` can be repopulated without recompiling the program or changing transport state:
+
+```text
+:life reset ecosystem
+```
+
+Omit the name to reset every active Life sequence:
+
+```text
+:life reset
+```
+
+The new population uses the sequence's current `DENSITY` and optional `MAX` settings. Manual reset is independent of `EVOLVE` and does not require `RESPAWN`.

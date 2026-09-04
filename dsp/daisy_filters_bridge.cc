@@ -46,6 +46,18 @@ void su_daisy_filters_set_sample_rate(DaisyFiltersState* state, float sample_rat
   if (state) state->Init(sample_rate);
 }
 
+void su_daisy_filters_reset(DaisyFiltersState* state) {
+  if (!state) return;
+  const float sample_rate = state->sample_rate;
+  state->Init(sample_rate);
+  std::fill_n(state->input, kMaxBlockSize, 0.0f);
+  std::fill_n(state->low, kMaxBlockSize, 0.0f);
+  std::fill_n(state->high, kMaxBlockSize, 0.0f);
+  std::fill_n(state->band, kMaxBlockSize, 0.0f);
+  std::fill_n(state->notch, kMaxBlockSize, 0.0f);
+  std::fill_n(state->peak, kMaxBlockSize, 0.0f);
+}
+
 void su_daisy_filters_set_cutoff(DaisyFiltersState* state, float hz) {
   if (!state) return;
   const float max_hz = state->sample_rate / 3.0f;

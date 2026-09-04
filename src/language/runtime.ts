@@ -44,8 +44,10 @@ const RESERVED_IDENTIFIERS = new Set([
   'repeat',
   'set',
   'cycle',
-  'from',
   'with',
+  'on',
+  'envelope',
+  'type',
   'walk',
   'chaos',
   'seed',
@@ -89,6 +91,13 @@ export interface TuringViewState {
   change: number;
   bits: number[];
   currentFrequency: number;
+  revision: number;
+}
+
+export interface LifeViewState {
+  name: string;
+  size: number;
+  cells: boolean[];
   revision: number;
 }
 
@@ -170,6 +179,7 @@ type VoiceEngineKind = 'macro' | 'matter' | 'resonator';
 type VoiceParameterName = 'harmo' | 'timbre' | 'morph' | 'geometry' | 'structure' | 'brightness' | 'damping' | 'position' | 'space' | 'bow' | 'bowTimbre' | 'blow' | 'blowTimbre' | 'strike' | 'strikeTimbre';
 
 interface VoiceDefinition {
+  disabled: boolean;
   engine: VoiceEngineKind;
   soundId: string;
   model: number;
@@ -210,6 +220,7 @@ interface SwellDefinition {
 
 
 interface MistDefinition {
+  disabled: boolean;
   position: number;
   size: number;
   pitch: number;
@@ -226,6 +237,7 @@ interface MistDefinition {
 }
 
 interface FilterDefinition {
+  disabled: boolean;
   model: 'svf';
   ownerVoice: string | null;
   displayName: string;
@@ -244,6 +256,7 @@ interface RouteDefinition {
 }
 
 interface ClockDefinition {
+  disabled: boolean;
   rate: number;
   localRate: number;
   rateLabel: string;
@@ -275,6 +288,29 @@ interface LanguageTuringDefinition {
   values: number[];
   register: number;
   current: number;
+}
+
+type LifeVariant = 'conway' | 'highlife' | 'seeds' | 'day-night' | 'morley';
+
+interface LanguageLifeDefinition {
+  model: 'life';
+  variant: LifeVariant;
+  size: 8 | 16;
+  density: number;
+  maxDensity: number | null;
+  respawn: boolean;
+  values: number[];
+  cells: boolean[];
+}
+
+type LifeReaderMode = 'order' | 'random' | 'walk' | 'reverse' | 'pendulum' | 'first' | 'last';
+
+interface LanguageLifeReaderDefinition {
+  voice: string;
+  seq: string;
+  mode: LifeReaderMode;
+  amount: number;
+  view: boolean;
 }
 
 interface LanguageCycleDefinition {
@@ -323,6 +359,7 @@ interface LanguageMasterClockDefinition {
   drift: boolean;
   jitter: number;
   timingDrift: number;
+  disabled: boolean;
   line: number;
 }
 
@@ -405,6 +442,32 @@ interface LanguageFxModulationDefinition {
 }
 
 
+
+type LanguageEnvelopeCurve = 'lin' | 'log';
+type LanguageEnvelopeUnit = 'ms' | 'sec' | 'beat';
+type LanguageEnvelopeStage = { amount: number; unit: LanguageEnvelopeUnit; curve: LanguageEnvelopeCurve };
+type LanguageEnvelopeSpec = {
+  delay: LanguageEnvelopeStage | null;
+  attack: LanguageEnvelopeStage | null;
+  hold: LanguageEnvelopeStage | null;
+  decay: LanguageEnvelopeStage | null;
+  sustain: number | null;
+  release: LanguageEnvelopeStage | null;
+  range: [number, number];
+};
+type LanguageEnvelopeDefinition = {
+  ownerKind: 'voice' | 'fx' | 'filter';
+  owner: string;
+  parameter: string;
+  spec: LanguageEnvelopeSpec;
+  line: number;
+  interval: number;
+  unit: 'ms' | 'sec' | 'beat';
+  chance: number;
+  drift: boolean;
+  loose: boolean;
+  clockSource: string;
+};
 
 type LanguageGenerativeMode = 'wander' | 'trend' | 'scatter' | 'flutter';
 
@@ -565,6 +628,14 @@ class RuntimeScheduler {
     this.deferred = [];
   }
 
+  resetBeatPhase(): void {
+    for (const job of this.beatJobs) job.counter = 0;
+    this.preservedBeatPhase.clear();
+    // Deferred callbacks are produced only by loose beat jobs. A fresh master
+    // clock epoch must not fire callbacks that belonged to the previous epoch.
+    this.deferred = [];
+  }
+
   private tickWallClock(): void {
     const elapsed = performance.now() - this.epochMs;
 
@@ -623,6 +694,7 @@ export class SonusRuntime {
   private moduleViews = new Set<string>();
   private inlineViews = new Map<string, InlineViewState>();
   private turingViews = new Map<string, TuringViewState>();
+  private lifeViews = new Map<string, LifeViewState>();
 
   private scheme: SchemeModel = {
     nodes: [{ id: 'Audio', label: 'AUDIO OUT', kind: 'module', parameters: [] }],
@@ -632,6 +704,9 @@ export class SonusRuntime {
   private whenUnsubscribers: Array<() => void> = [];
   private readonly scheduler: RuntimeScheduler;
   private turingState = new Map<string, { register: number; current: number; length: number }>();
+  private lifeState = new Map<string, { size: number; cells: boolean[] }>();
+  private lifeDefinitions = new Map<string, LanguageLifeDefinition>();
+  private lifeReaderState = new Map<string, { seq: string; cell: number; direction: number }>();
   private voiceSequenceState = new Map<string, { cursor: number; walkCursor: number; direction: number; shuffleCursor: number }>();
   private whenEventState = new Map<string, number>();
   private randomState = 0x6d2b79f5;
@@ -650,6 +725,10 @@ export class SonusRuntime {
     }
   }
 
+  restartMusicalEpoch(): void {
+    this.scheduler.resetBeatPhase();
+  }
+
   validate(source: string): EvaluationResult[] {
     const saved = {
       parameterViews: this.parameterViews,
@@ -658,6 +737,7 @@ export class SonusRuntime {
       moduleViews: this.moduleViews,
       inlineViews: this.inlineViews,
       turingViews: this.turingViews,
+      lifeViews: this.lifeViews,
       randomState: this.randomState,
     };
     try {
@@ -669,6 +749,7 @@ export class SonusRuntime {
       this.moduleViews = saved.moduleViews;
       this.inlineViews = saved.inlineViews;
       this.turingViews = saved.turingViews;
+      this.lifeViews = saved.lifeViews;
       this.randomState = saved.randomState;
     }
   }
@@ -699,12 +780,93 @@ export class SonusRuntime {
     return [...this.turingViews.values()].map((view) => ({ ...view, bits: [...view.bits] }));
   }
 
+  getLifeViews(): LifeViewState[] {
+    return [...this.lifeViews.values()].map((view) => ({ ...view, cells: [...view.cells] }));
+  }
+
+  resetLife(name?: string): string[] {
+    const targets = name === undefined ? [...this.lifeDefinitions.keys()] : [name];
+    const reset: string[] = [];
+
+    for (const target of targets) {
+      const seq = this.lifeDefinitions.get(target);
+      if (!seq) continue;
+      const total = seq.size * seq.size;
+      let cells = Array.from({ length: total }, () => this.nextRandom() < seq.density / 100);
+
+      if (seq.maxDensity !== null) {
+        const maxAlive = Math.floor(total * (seq.maxDensity / 100));
+        const live = cells.map((alive, index) => alive ? index : -1).filter((index) => index >= 0);
+        for (let i = live.length - 1; i > 0; i -= 1) {
+          const j = Math.floor(this.nextRandom() * (i + 1));
+          [live[i], live[j]] = [live[j], live[i]];
+        }
+        for (let i = maxAlive; i < live.length; i += 1) cells[live[i]] = false;
+      }
+
+      if (!cells.some(Boolean) && total > 0 && seq.density > 0 && (seq.maxDensity === null || seq.maxDensity > 0)) {
+        cells[Math.floor(this.nextRandom() * total)] = true;
+      }
+
+      seq.cells = [...cells];
+      this.lifeState.set(target, { size: seq.size, cells: [...cells] });
+      const view = this.lifeViews.get(target);
+      if (view) {
+        view.cells = [...cells];
+        view.revision += 1;
+      }
+      this.lifeReaderState.forEach((state, voice) => {
+        if (state.seq === target) this.lifeReaderState.delete(voice);
+      });
+      reset.push(target);
+    }
+
+    return reset;
+  }
+
+  private nextRandom(): number {
+    let x = this.randomState | 0;
+    x ^= x << 13;
+    x ^= x >>> 17;
+    x ^= x << 5;
+    this.randomState = x >>> 0;
+    return this.randomState / 0x100000000;
+  }
+
   getInlineViews(): InlineViewState[] {
     return [...this.inlineViews.values()].map((view) =>
       view.kind === 'piano'
         ? { ...view, availableMidi: [...view.availableMidi] }
         : { ...view, history: [...view.history] },
     );
+  }
+
+  previewInlineViews(source: string): InlineViewState[] {
+    const saved = {
+      parameterViews: this.parameterViews,
+      variableViews: this.variableViews,
+      explicitSignalViews: this.explicitSignalViews,
+      moduleViews: this.moduleViews,
+      inlineViews: this.inlineViews,
+      turingViews: this.turingViews,
+      lifeViews: this.lifeViews,
+      scheme: this.scheme,
+      randomState: this.randomState,
+    };
+    try {
+      this.evaluate(source, { applyAudio: false, hotReload: true });
+      return this.getInlineViews();
+    } finally {
+      this.parameterViews = saved.parameterViews;
+      this.variableViews = saved.variableViews;
+      this.explicitSignalViews = saved.explicitSignalViews;
+      this.moduleViews = saved.moduleViews;
+      this.inlineViews = saved.inlineViews;
+      this.turingViews = saved.turingViews;
+      this.lifeViews = saved.lifeViews;
+      this.scheme = saved.scheme;
+      this.randomState = saved.randomState;
+    }
   }
 
   getSchemeModel(): SchemeModel {
@@ -723,6 +885,9 @@ export class SonusRuntime {
     const hotReload = options.hotReload ?? false;
     if (applyAudio && !hotReload) {
       this.turingState.clear();
+      this.lifeState.clear();
+      this.lifeDefinitions.clear();
+      this.lifeReaderState.clear();
       this.voiceSequenceState.clear();
       this.whenEventState.clear();
       this.randomState = 0x6d2b79f5;
@@ -745,15 +910,8 @@ export class SonusRuntime {
     const variables = new Map<string, ScalarValue>();
     const scalarExpressions = new Map<string, { expression: string; line: number }>();
     const generativeState = new Map<string, number | { x: number; y: number }>();
-    const random = (): number => {
-      // Keep generative randomness continuous across hot reloads.
-      let x = this.randomState | 0;
-      x ^= x << 13;
-      x ^= x >>> 17;
-      x ^= x << 5;
-      this.randomState = x >>> 0;
-      return this.randomState / 0x100000000;
-    };
+    // Keep generative randomness continuous across hot reloads and manual Life resets.
+    const random = (): number => this.nextRandom();
     const results: EvaluationResult[] = [];
     const diagnostics: SonusDiagnostic[] = [];
 
@@ -763,6 +921,9 @@ export class SonusRuntime {
 
     const languageSequences = new Map<string, LanguageSequenceDefinition>();
     const languageTurings = new Map<string, LanguageTuringDefinition>();
+    const languageLives = new Map<string, LanguageLifeDefinition>();
+    const languageLifeReaders = new Map<string, LanguageLifeReaderDefinition>();
+    const languageLifeEvolve = new Map<string, LanguageCycleDefinition>();
     const languageTuringViews = new Set<string>();
     const languageTuringVoiceSources = new Map<string, string>();
     const languageCycles = new Map<string, LanguageCycleDefinition>();
@@ -773,6 +934,7 @@ export class SonusRuntime {
     const languageGenerativeCycles: LanguageGenerativeCycleDefinition[] = [];
     const languageInlinePianos: LanguageInlinePianoDefinition[] = [];
     const languageInlineScalars: LanguageInlineScalarDefinition[] = [];
+    const languageEnvelopes: LanguageEnvelopeDefinition[] = [];
     const languageFilterSequences: LanguageFilterSequenceDefinition[] = [];
     const languageObjectEvery = new Map<string, LanguageObjectEveryDefinition>();
     const languageDriveEvery = new Map<string, LanguageObjectEveryDefinition>();
@@ -794,10 +956,20 @@ export class SonusRuntime {
       const seqView = parseLanguageTuringView(line);
       if (seqView) { languageTuringViews.add(seqView); continue; }
 
-      const seqModel = parseLanguageTuringModel(line);
+      const seqModel = parseLanguageSeqModel(line);
       if (seqModel) {
-        const seq = languageTurings.get(seqModel.name);
-        if (seq) seq.model = seqModel.model;
+        if (seqModel.model === 'life') {
+          languageTurings.delete(seqModel.name);
+          languageLives.set(seqModel.name, { model: 'life', variant: seqModel.variant, size: 8, density: 34, maxDensity: null, respawn: false, values: [], cells: [] });
+        }
+        continue;
+      }
+      const seqSize = parseLanguageSeqSize(line);
+      if (seqSize) { const seq = languageLives.get(seqSize.name); if (seq) seq.size = seqSize.size; continue; }
+      const lifeDensity = parseLanguageLifeDensity(line);
+      if (lifeDensity) {
+        const seq = languageLives.get(lifeDensity.name);
+        if (seq) { seq.density = lifeDensity.density; seq.maxDensity = lifeDensity.maxDensity; seq.respawn = lifeDensity.respawn; }
         continue;
       }
       const seqLength = parseLanguageTuringLength(line);
@@ -805,9 +977,19 @@ export class SonusRuntime {
       const seqChange = parseLanguageTuringChange(line);
       if (seqChange) { const seq = languageTurings.get(seqChange.name); if (seq) seq.change = seqChange.change; continue; }
       const seqValues = parseLanguageTuringValues(line);
-      if (seqValues) { const seq = languageTurings.get(seqValues.name); if (seq) { seq.values = seqValues.values; seq.current = seqValues.values[0] ?? 440; } continue; }
+      if (seqValues) {
+        const turing = languageTurings.get(seqValues.name);
+        if (turing) { turing.values = seqValues.values; turing.current = seqValues.values[0] ?? 440; }
+        const life = languageLives.get(seqValues.name);
+        if (life) life.values = seqValues.values;
+        continue;
+      }
       const seqVoice = parseLanguageTuringVoice(line);
       if (seqVoice) { languageTuringVoiceSources.set(seqVoice.voice, seqVoice.seq); continue; }
+      const lifeReader = parseLanguageLifeReader(line);
+      if (lifeReader) { languageLifeReaders.set(lifeReader.voice, lifeReader); continue; }
+      const lifeEvolve = parseLanguageLifeEvolve(line);
+      if (lifeEvolve) { languageLifeEvolve.set(lifeEvolve.name, lifeEvolve.timing); continue; }
 
       const inlinePiano = parseLanguageInlinePianoDirective(line);
       if (inlinePiano) {
@@ -818,6 +1000,12 @@ export class SonusRuntime {
       const inlineScalar = parseLanguageInlineScalarDirective(line);
       if (inlineScalar) {
         languageInlineScalars.push(inlineScalar);
+        continue;
+      }
+
+      const envelope = parseLanguageEnvelopeDirective(line, lineNumber);
+      if (envelope) {
+        languageEnvelopes.push(envelope);
         continue;
       }
 
@@ -1065,6 +1253,7 @@ export class SonusRuntime {
         }
         const config = languageClockConfigs.get(name);
         const definition: ClockDefinition = {
+          disabled: false,
           rate,
           localRate: config?.rate ?? rate,
           rateLabel: config?.rateLabel ?? label,
@@ -1078,7 +1267,11 @@ export class SonusRuntime {
         clockSources.set(name, definition);
         for (const call of calls) {
           if (call.name === 'view' && call.argument.length === 0) views.set(`${name}.out`, 'trigger');
-          else diagnostics.push({ line: lineNumber, message: `unknown clock method: ${call.name}` });
+          else if (call.name === 'disabled') {
+            const literal = call.argument.trim().toLowerCase();
+            if (literal !== 'true' && literal !== 'false') diagnostics.push({ line: lineNumber, message: 'clock disabled expects true or false' });
+            else definition.disabled = literal === 'true';
+          } else diagnostics.push({ line: lineNumber, message: `unknown clock method: ${call.name}` });
         }
         results.push({ message: `${name} = Clock ${label}` });
         continue;
@@ -1114,6 +1307,7 @@ export class SonusRuntime {
         if (swells.has(name) || reservedOrDuplicate(name, oscillators, gains, voices, diagnostics, lineNumber)) { if (swells.has(name)) diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue; }
 
         const definition: VoiceDefinition = {
+          disabled: false,
           engine: 'macro',
           soundId: 'macro.analog',
           model: 1,
@@ -1186,6 +1380,7 @@ export class SonusRuntime {
           diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue;
         }
         filters.set(name, {
+          disabled: false,
           model: 'svf',
           ownerVoice: null,
           displayName: name,
@@ -1212,6 +1407,7 @@ export class SonusRuntime {
           continue;
         }
         mists.set(name, {
+          disabled: false,
           position: 50,
           size: 50,
           pitch: 0,
@@ -1391,7 +1587,7 @@ export class SonusRuntime {
     // source order. All module declarations already exist, so references between
     // modules are still independent from declaration order.
     for (const { source: line, line: lineNumber } of lines) {
-      if (parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageTuringModel(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageFxMetadata(line) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
+      if (parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageSeqModel(line) || parseLanguageSeqSize(line) || parseLanguageLifeDensity(line) || parseLanguageLifeReader(line) || parseLanguageLifeEvolve(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageEnvelopeDirective(line, lineNumber) || parseLanguageFxMetadata(line) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
 
       const oscillatorDeclaration = parseOscillatorDeclaration(line);
       if (oscillatorDeclaration) {
@@ -1452,7 +1648,7 @@ export class SonusRuntime {
       const setterAssignment = line.match(/^([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*)\.(freq|note|level|model|harmo|timbre|morph|bpm)\(\s*(.+)\s*\)$/);
       if (setterAssignment) {
         const [, variableName, objectName, parameter, rawValue] = setterAssignment;
-        const reservationError = identifierReservationError(variableName);
+        const reservationError = variableName.startsWith('__set_') ? null : identifierReservationError(variableName);
         if (reservationError) {
           diagnostics.push({ line: lineNumber, message: reservationError });
           continue;
@@ -1564,7 +1760,7 @@ export class SonusRuntime {
       const scalarAssignment = line.match(/^([A-Za-z_]\w*)\s*=\s*(.+)$/);
       if (scalarAssignment) {
         const [, name, expression] = scalarAssignment;
-        const reservationError = identifierReservationError(name);
+        const reservationError = name.startsWith('__set_') ? null : identifierReservationError(name);
         if (reservationError) {
           diagnostics.push({ line: lineNumber, message: reservationError });
           continue;
@@ -1714,7 +1910,7 @@ export class SonusRuntime {
         continue;
       }
 
-      match = line.match(/^([A-Za-z_]\w*)\.(owner|displayName|model|cutoff|cutoffPercent|resonance|drive)\(\s*(.+)\s*\)\s*$/);
+      match = line.match(/^([A-Za-z_]\w*|__filter_[A-Za-z_]\w*)\.(disabled|owner|displayName|model|cutoff|cutoffPercent|resonance|drive)\(\s*(.+)\s*\)\s*$/);
       if (match && filters.has(match[1])) {
         const definition = filters.get(match[1])!;
         const error = applyFilterCall(
@@ -1803,7 +1999,7 @@ export class SonusRuntime {
         continue;
       }
 
-      match = line.match(/^([A-Za-z_]\w*)\.(position|size|pitch|density|texture|mix|spread|feedback|reverb|freeze|reverse|mode)\(\s*(.+)\s*\)\s*$/);
+      match = line.match(/^([A-Za-z_]\w*)\.(disabled|position|size|pitch|density|texture|mix|spread|feedback|reverb|freeze|reverse|mode)\(\s*(.+)\s*\)\s*$/);
       if (match && mists.has(match[1])) {
         const definition = mists.get(match[1])!;
         const error = applyMistCall(
@@ -1815,6 +2011,21 @@ export class SonusRuntime {
         );
         if (error) diagnostics.push({ line: lineNumber, message: error });
         else results.push({ message: `${match[1]}.${match[2]}` });
+        continue;
+      }
+
+      match = line.match(/^([A-Za-z_]\w*)\.disabled\(\s*(true|false)\s*\)\s*$/i);
+      if (match && voices.has(match[1])) {
+        const voice = voices.get(match[1])!;
+        const error = applyVoiceCall(
+          match[1],
+          voice,
+          { name: 'disabled', argument: match[2].toLowerCase() },
+          moduleViews,
+          (expression) => evalValue(expression, lineNumber),
+        );
+        if (error) diagnostics.push({ line: lineNumber, message: error });
+        else results.push({ message: `${match[1]}.disabled ${match[2].toLowerCase()}` });
         continue;
       }
 
@@ -2312,6 +2523,7 @@ export class SonusRuntime {
     for (const [name] of oscillators) variableViews.push({ name, value: 'Osc' });
     for (const [name] of gains) variableViews.push({ name, value: 'Gain' });
     for (const [name] of languageTurings) variableViews.push({ name, value: 'Seq' });
+    for (const [name] of languageLives) variableViews.push({ name, value: 'Seq' });
     for (const [name, value] of variables) variableViews.push({ name, value: formatScalar(value) });
 
     // Parameter views are declarative like the rest of the source. Resolve their
@@ -2437,21 +2649,21 @@ export class SonusRuntime {
       }
       resolvingClocks.add(name);
       let parentRate = 1;
-      let parentJitter = masterJitter;
-      let parentDrift = masterTimingDrift;
       if (definition.parent !== 'Clock') {
         const parent = resolveClock(definition.parent);
         if (!parent) diagnostics.push({ line: languageMasterClock?.line ?? 1, message: `unknown parent CLOCK '${definition.parent}' for '${name}'` });
-        else { parentRate = parent.rate; parentJitter = parent.jitter; parentDrift = parent.drift; }
+        else parentRate = parent.rate;
       }
       definition.rate = parentRate * definition.localRate;
-      definition.jitter = Math.min(100, parentJitter + definition.localJitter);
-      definition.drift = Math.min(100, parentDrift + definition.localDrift);
+      // Named clock feel is local to the clock object. It shares the master's
+      // nominal tempo/rate relationship but can carry independent jitter/drifter.
+      definition.jitter = definition.localJitter;
+      definition.drift = definition.localDrift;
       definition.parameters = new Map([
         ['FROM', definition.parent === 'Clock' ? 'MASTER' : definition.parent.toUpperCase()],
         ['RATE', definition.rateLabel],
         ['JITTER', `${formatNumber(definition.localJitter)}%`],
-        ['DRIFT', `${formatNumber(definition.localDrift)}%`],
+        ['DRIFTER', `${formatNumber(definition.localDrift)}%`],
       ]);
       resolvingClocks.delete(name);
       resolvedClocks.add(name);
@@ -2463,7 +2675,7 @@ export class SonusRuntime {
       { id: 'Clock', label: 'CLOCK', kind: 'module' as const, parameters: clockBpm > 0 ? [
         { name: 'BPM', value: formatNumber(clockBpm) },
         { name: 'JITTER', value: `${formatNumber(masterJitter)}%` },
-        { name: 'DRIFT', value: `${formatNumber(masterTimingDrift)}%` },
+        { name: 'DRIFTER', value: `${formatNumber(masterTimingDrift)}%` },
       ] : [], views: embeddedViews.get('Clock') },
       ...[...clockSources.entries()]
         .filter(([name]) => name.toLowerCase() !== 'clock' && !name.startsWith('__clock_'))
@@ -2548,7 +2760,7 @@ export class SonusRuntime {
         parameters: [
           { name: 'BPM', value: `${formatNumber(clockBpm)} BPM` },
           { name: 'JITTER', value: `${formatNumber(masterJitter)}%` },
-          { name: 'DRIFT', value: `${formatNumber(masterTimingDrift)}%` },
+          { name: 'DRIFTER', value: `${formatNumber(masterTimingDrift)}%` },
         ],
         views: embeddedViews.get('Clock'),
       }] : []),
@@ -2582,9 +2794,9 @@ export class SonusRuntime {
       clock: { bpm: clockBpm, jitter: masterJitter, drift: masterTimingDrift },
       mainLevel,
       clockSources: [
-        { name: 'Clock', rate: 1, jitter: masterJitter, drift: masterTimingDrift },
-        ...[...clockSources.entries()].map(([name, definition]) => ({ name, rate: definition.rate, jitter: definition.jitter, drift: definition.drift })),
-        ...whenHandlers.filter((handler) => handler.sourceName !== 'Clock').map((handler) => ({ name: handler.sourceName, rate: handler.rate, jitter: masterJitter, drift: masterTimingDrift })),
+        { name: 'Clock', rate: 1, jitter: masterJitter, drift: masterTimingDrift, enabled: !(languageMasterClock?.disabled ?? false) },
+        ...[...clockSources.entries()].map(([name, definition]) => ({ name, rate: definition.rate, jitter: definition.jitter, drift: definition.drift, enabled: !definition.disabled })),
+        ...whenHandlers.filter((handler) => handler.sourceName !== 'Clock').map((handler) => ({ name: handler.sourceName, rate: handler.rate, jitter: masterJitter, drift: masterTimingDrift, enabled: true })),
       ],
       oscillators: [...oscillators.entries()].map(([name, definition]) => ({
         name,
@@ -2594,7 +2806,9 @@ export class SonusRuntime {
         .filter(([, definition]) => definition.engine === 'matter')
         .map(([name, definition]) => ({
           name,
+          enabled: !definition.disabled,
           note: 69 + 12 * Math.log2(definition.frequency / 440),
+          dynamicPitch: languageSequences.has(name) || languageTuringVoiceSources.has(name),
           level: definition.level,
           drive: definition.drive,
           bowLevel: definition.bow,
@@ -2616,9 +2830,11 @@ export class SonusRuntime {
         .filter(([, definition]) => definition.engine === 'resonator')
         .map(([name, definition]) => ({
           name,
+          enabled: !definition.disabled,
           model: definition.model,
           polyphony: definition.polyphony,
           note: 69 + 12 * Math.log2(definition.frequency / 440),
+          dynamicPitch: languageSequences.has(name) || languageTuringVoiceSources.has(name),
           level: definition.level,
           structure: definition.structure,
           brightness: definition.brightness,
@@ -2629,10 +2845,12 @@ export class SonusRuntime {
         .filter(([, definition]) => definition.engine === 'macro')
         .map(([name, definition]) => ({
           name,
+          enabled: !definition.disabled,
           model: definition.model,
           lpg: definition.lpg,
           level: definition.level,
           frequency: definition.frequency,
+          dynamicPitch: languageSequences.has(name) || languageTuringVoiceSources.has(name),
           harmo: definition.harmo,
           timbre: definition.timbre,
           morph: definition.morph,
@@ -2652,6 +2870,7 @@ export class SonusRuntime {
         .filter(([name]) => languageFxMeta.get(name)?.modelId !== 'sky')
         .map(([name, definition]) => ({
           name,
+          bypassed: definition.disabled,
           position: definition.position,
           size: definition.size,
           pitch: definition.pitch,
@@ -2669,6 +2888,7 @@ export class SonusRuntime {
         .filter(([name]) => languageFxMeta.get(name)?.modelId === 'sky')
         .map(([name, definition]) => ({
           name,
+          bypassed: definition.disabled,
           size: definition.size,
           decay: definition.feedback,
           damp: definition.texture,
@@ -2681,6 +2901,7 @@ export class SonusRuntime {
         })),
       filters: [...filters.entries()].map(([name, definition]) => ({
         name,
+        bypassed: definition.disabled,
         model: definition.model,
         ownerVoice: definition.ownerVoice,
         displayName: definition.displayName,
@@ -2819,6 +3040,45 @@ export class SonusRuntime {
       }
     }
 
+    if (hotReload) {
+      for (const [name, seq] of languageLives) {
+        const previous = this.lifeState.get(name);
+        if (previous && previous.size === seq.size) seq.cells = [...previous.cells];
+      }
+    }
+
+    const capLifeDensity = (cells: boolean[], maxDensity: number | null): boolean[] => {
+      if (maxDensity === null) return cells;
+      const maxAlive = Math.floor(cells.length * (maxDensity / 100));
+      const live = cells.map((alive, index) => alive ? index : -1).filter((index) => index >= 0);
+      if (live.length <= maxAlive) return cells;
+      const next = [...cells];
+      for (let i = live.length - 1; i > 0; i -= 1) {
+        const j = Math.floor(random() * (i + 1));
+        [live[i], live[j]] = [live[j], live[i]];
+      }
+      for (let i = maxAlive; i < live.length; i += 1) next[live[i]] = false;
+      return next;
+    };
+
+    const initializeLife = (seq: LanguageLifeDefinition): void => {
+      const total = seq.size * seq.size;
+      seq.cells = Array.from({ length: total }, () => random() < seq.density / 100);
+      seq.cells = capLifeDensity(seq.cells, seq.maxDensity);
+      if (!seq.cells.some(Boolean) && total > 0 && seq.density > 0 && (seq.maxDensity === null || seq.maxDensity > 0)) {
+        seq.cells[Math.floor(random() * total)] = true;
+      }
+    };
+
+    for (const seq of languageLives.values()) if (seq.cells.length !== seq.size * seq.size) initializeLife(seq);
+
+    const lifeViews = new Map<string, LifeViewState>();
+    for (const name of languageTuringViews) {
+      const seq = languageLives.get(name);
+      if (!seq) continue;
+      lifeViews.set(name, { name, size: seq.size, cells: [...seq.cells], revision: 0 });
+    }
+
     const turingViews = new Map<string, TuringViewState>();
     const turingBits = (value: number, length: number): number[] =>
       Array.from({ length }, (_, index) => (value >>> index) & 1);
@@ -2846,6 +3106,7 @@ export class SonusRuntime {
     }
 
     this.turingViews = turingViews;
+    this.lifeViews = lifeViews;
     this.inlineViews = inlineViews;
     this.parameterViews = [...parameterViews.values()];
     this.variableViews = variableViews;
@@ -2855,10 +3116,119 @@ export class SonusRuntime {
     this.moduleViews = new Set(moduleViews);
     if (applyAudio) {
       this.stopSchedulers(hotReload);
-      this.audio.applyProgram(program);
+      this.audio.applyProgram(program, { hotReload });
+
+    const envelopeTriggers = new Map<string, Array<() => void>>();
+    const applyEnvelopeValue = (definition: LanguageEnvelopeDefinition, value: number): void => {
+      const [min, max] = definition.spec.range;
+      const checked = Math.max(min, Math.min(max, value));
+      if (definition.ownerKind === 'voice') {
+        const parameter = definition.parameter as VoiceParameterName;
+        const voice = voices.get(definition.owner);
+        if (!voice || !(parameter in voice)) return;
+        (voice as unknown as Record<string, unknown>)[parameter] = checked;
+        this.audio.setVoiceParameter(definition.owner, parameter, checked);
+      } else if (definition.ownerKind === 'fx') {
+        const parameter = definition.parameter as LanguageFxParameter;
+        const fx = mists.get(definition.owner);
+        if (!fx) return;
+        (fx as unknown as Record<string, unknown>)[parameter] = checked;
+        this.audio.setMistParameter(definition.owner, parameter, checked);
+      } else {
+        const filter = filters.get(definition.owner);
+        if (!filter) return;
+        if (definition.parameter === 'cutoff') {
+          const percent = Math.max(0, Math.min(100, checked));
+          filter.cutoffPercent = percent;
+          const cutoff = 20 * (1000 ** (percent / 100));
+          filter.cutoff = cutoff;
+          this.audio.setFilterCutoff(definition.owner, cutoff);
+        } else if (definition.parameter === 'resonance') {
+          filter.resonance = checked;
+          this.audio.setFilterResonance(definition.owner, checked);
+        } else if (definition.parameter === 'drive') {
+          filter.drive = checked;
+          this.audio.setFilterDrive(definition.owner, checked);
+        }
+      }
+      updateInlineScalar(definition.ownerKind, definition.owner, definition.parameter, checked);
+    };
+
+    for (const definition of languageEnvelopes) {
+      const spec = definition.spec;
+      const low = spec.range[0], high = spec.range[1];
+      const sustainValue = spec.sustain === null ? low : low + (high - low) * spec.sustain;
+      let active = false;
+      let stage = 0;
+      let stageElapsed = 0;
+      let stageStart = low;
+      let lastAt = performance.now();
+      const stages: Array<{ kind: string; time: LanguageEnvelopeStage | null; target: number }> = [];
+      if (spec.delay) stages.push({ kind: 'delay', time: spec.delay, target: low });
+      if (spec.attack) stages.push({ kind: 'attack', time: spec.attack, target: high });
+      if (spec.hold) stages.push({ kind: 'hold', time: spec.hold, target: high });
+      if (spec.decay) stages.push({ kind: 'decay', time: spec.decay, target: spec.sustain === null ? low : sustainValue });
+      if (spec.sustain !== null) stages.push({ kind: 'sustain', time: null, target: sustainValue });
+      else if (spec.release) stages.push({ kind: 'release', time: spec.release, target: low });
+
+      const trigger = (): void => {
+        if (definition.chance < 100 && random() * 100 >= definition.chance) return;
+        active = true; stage = 0; stageElapsed = 0; stageStart = low; lastAt = performance.now();
+        applyEnvelopeValue(definition, low);
+      };
+      const key = definition.ownerKind === 'voice' ? definition.owner : `${definition.ownerKind}:${definition.owner}`;
+      const list = envelopeTriggers.get(key) ?? [];
+      list.push(trigger); envelopeTriggers.set(key, list);
+
+      this.scheduler.addWallJob(`envelope-run:${definition.ownerKind}:${definition.owner}:${definition.parameter}:${definition.line}`, 10, () => {
+        if (!active || stages.length === 0) return;
+        const now = performance.now();
+        const deltaMs = Math.max(0, now - lastAt); lastAt = now;
+        const current = stages[stage];
+        if (!current) { active = false; applyEnvelopeValue(definition, low); return; }
+        if (current.kind === 'sustain') { applyEnvelopeValue(definition, current.target); return; }
+        const time = current.time!;
+        let deltaProgress = 0;
+        if (time.unit === 'beat') {
+          const timing = this.audio.getClockTiming(definition.clockSource);
+          if (!timing.running || !Number.isFinite(timing.beatDurationMs)) return;
+          deltaProgress = deltaMs / (timing.beatDurationMs * time.amount);
+        } else {
+          const durationMs = time.unit === 'sec' ? time.amount * 1000 : time.amount;
+          deltaProgress = durationMs > 0 ? deltaMs / durationMs : 1;
+        }
+        stageElapsed += deltaProgress;
+        const p = Math.max(0, Math.min(1, stageElapsed));
+        const curved = time.curve === 'log' ? Math.log1p(9 * p) / Math.log(10) : p;
+        const value = current.kind === 'delay' || current.kind === 'hold'
+          ? current.target
+          : stageStart + (current.target - stageStart) * curved;
+        applyEnvelopeValue(definition, value);
+        if (stageElapsed >= 1) {
+          applyEnvelopeValue(definition, current.target);
+          stageStart = current.target; stage += 1; stageElapsed = 0;
+          if (stage >= stages.length) active = false;
+        }
+      });
+
+      if (definition.interval > 0) {
+        if (definition.unit === 'beat') this.scheduler.addBeatJob(`envelope-trigger:${definition.ownerKind}:${definition.owner}:${definition.parameter}:${definition.line}`, definition.interval, trigger, definition.loose, definition.clockSource);
+        else {
+          const baseMs = definition.unit === 'sec' ? definition.interval * 1000 : definition.interval;
+          this.scheduler.addWallJob(`envelope-trigger:${definition.ownerKind}:${definition.owner}:${definition.parameter}:${definition.line}`, baseMs, trigger);
+        }
+      }
+    }
+
+    const triggerVoiceEvent = (name: string): void => {
+      for (const trigger of envelopeTriggers.get(name) ?? []) trigger();
+      const voice = voices.get(name);
+      if (voice && (voice.lpg || voice.engine === 'resonator' || (voice.engine === 'matter' && !languageDriveEvery.has(name)))) this.audio.triggerVoice(name);
+    };
+
     if (!hotReload) {
-      for (const [name, voice] of voices) {
-        if (voice.lpg || voice.engine === 'resonator' || (voice.engine === 'matter' && !languageDriveEvery.has(name))) this.audio.triggerVoice(name);
+      for (const [name] of voices) {
+        triggerVoiceEvent(name);
       }
     }
 
@@ -3315,6 +3685,57 @@ export class SonusRuntime {
       });
     }
 
+    const LIFE_RULES: Record<LifeVariant, { birth: ReadonlySet<number>; survive: ReadonlySet<number> }> = {
+      conway: { birth: new Set([3]), survive: new Set([2, 3]) },
+      highlife: { birth: new Set([3, 6]), survive: new Set([2, 3]) },
+      seeds: { birth: new Set([2]), survive: new Set() },
+      'day-night': { birth: new Set([3, 6, 7, 8]), survive: new Set([3, 4, 6, 7, 8]) },
+      morley: { birth: new Set([3, 6, 8]), survive: new Set([2, 4, 5]) },
+    };
+
+    const evolveLife = (cells: boolean[], size: number, variant: LifeVariant): boolean[] => {
+      const rule = LIFE_RULES[variant];
+      const next = new Array<boolean>(cells.length).fill(false);
+      const at = (x: number, y: number): boolean => {
+        if (x < 0 || x >= size || y < 0 || y >= size) return false;
+        return cells[y * size + x] ?? false;
+      };
+      for (let y = 0; y < size; y += 1) {
+        for (let x = 0; x < size; x += 1) {
+          let neighbors = 0;
+          for (let dy = -1; dy <= 1; dy += 1) {
+            for (let dx = -1; dx <= 1; dx += 1) {
+              if ((dx !== 0 || dy !== 0) && at(x + dx, y + dy)) neighbors += 1;
+            }
+          }
+          const alive = at(x, y);
+          next[y * size + x] = alive ? rule.survive.has(neighbors) : rule.birth.has(neighbors);
+        }
+      }
+      return next;
+    };
+
+    this.lifeDefinitions = new Map(languageLives);
+
+    for (const [name, seq] of languageLives) {
+      this.lifeState.set(name, { size: seq.size, cells: [...seq.cells] });
+      const timing = languageLifeEvolve.get(name);
+      if (!timing) continue;
+      const advance = (): void => {
+        if (timing.chance < 100 && random() * 100 >= timing.chance) return;
+        seq.cells = capLifeDensity(evolveLife(seq.cells, seq.size, seq.variant), seq.maxDensity);
+        if (seq.respawn && !seq.cells.some(Boolean)) initializeLife(seq);
+        this.lifeState.set(name, { size: seq.size, cells: [...seq.cells] });
+        const view = lifeViews.get(name);
+        if (view) { view.cells = [...seq.cells]; view.revision += 1; }
+      };
+      if (timing.unit === 'beat') this.scheduler.addBeatJob(`life:${name}`, timing.amount, advance, timing.loose, timing.clockSource);
+      else {
+        const baseMs = timing.unit === 'sec' ? timing.amount * 1000 : timing.amount;
+        this.scheduler.addWallJob(`life:${name}`, baseMs, advance);
+      }
+    }
+
     for (const [name, seq] of languageTurings) {
       this.turingState.set(name, { register: seq.register, current: seq.current, length: seq.length });
       const timing = languageObjectEvery.get(name);
@@ -3345,6 +3766,24 @@ export class SonusRuntime {
       }
     }
 
+    for (const [voiceName, reader] of languageLifeReaders) {
+      const voice = voices.get(voiceName);
+      const life = languageLives.get(reader.seq);
+      if (!voice || !life || life.values.length === 0) continue;
+      const live = life.cells.map((alive, index) => alive ? index : -1).filter((index) => index >= 0);
+      if (live.length === 0) continue;
+      const cell = live[0];
+      this.lifeReaderState.set(voiceName, { seq: reader.seq, cell, direction: 1 });
+      // A Life cell represents a scale degree directly. Cycling the scale
+      // across the grid avoids large horizontal/vertical bands of cells all
+      // resolving to the same note (the previous normalized mapping could
+      // make a 16x16 grid collapse perceptually toward the range edges).
+      const valueIndex = ((cell % life.values.length) + life.values.length) % life.values.length;
+      const frequency = life.values[valueIndex] ?? voice.frequency;
+      voice.frequency = frequency;
+      this.audio.setVoiceParameter(voiceName, 'freq', frequency);
+    }
+
     for (const [name, cycle] of languageCycles) {
       const voice = voices.get(name);
       if (!voice) continue;
@@ -3370,7 +3809,42 @@ export class SonusRuntime {
       let repeatRemaining = 0;
       let repeatedValue = sequence?.values[0] ?? voice.frequency;
 
+      const nextLifeFrequency = (reader: LanguageLifeReaderDefinition): number => {
+        const life = languageLives.get(reader.seq);
+        if (!life || life.values.length === 0 || life.cells.length === 0) return voice.frequency;
+        const live = life.cells.map((alive, index) => alive ? index : -1).filter((index) => index >= 0);
+        if (live.length === 0) return voice.frequency;
+        const previous = this.lifeReaderState.get(name);
+        let cell = previous?.cell ?? live[0];
+        let direction = previous?.direction ?? 1;
+        const sorted = live;
+        const nextAfter = (origin: number, dir: number): number => {
+          if (dir >= 0) return sorted.find((candidate) => candidate > origin) ?? sorted[0];
+          for (let i = sorted.length - 1; i >= 0; i -= 1) if (sorted[i] < origin) return sorted[i];
+          return sorted[sorted.length - 1];
+        };
+        if (reader.mode === 'random') cell = sorted[Math.floor(random() * sorted.length)];
+        else if (reader.mode === 'first') cell = sorted[0];
+        else if (reader.mode === 'last') cell = sorted[sorted.length - 1];
+        else if (reader.mode === 'reverse') cell = nextAfter(cell, -1);
+        else if (reader.mode === 'pendulum') {
+          const candidate = nextAfter(cell, direction);
+          const wrapped = direction > 0 ? candidate <= cell : candidate >= cell;
+          if (wrapped) direction *= -1;
+          cell = nextAfter(cell, direction);
+        } else if (reader.mode === 'walk') {
+          direction = random() < 0.5 ? -1 : 1;
+          const steps = Math.max(1, Math.round(reader.amount || 1));
+          for (let i = 0; i < steps; i += 1) cell = nextAfter(cell, direction);
+        } else cell = nextAfter(cell, 1);
+        this.lifeReaderState.set(name, { seq: reader.seq, cell, direction });
+        const valueIndex = ((cell % life.values.length) + life.values.length) % life.values.length;
+        return life.values[valueIndex] ?? voice.frequency;
+      };
+
       const nextFrequency = (): number => {
+        const lifeReader = languageLifeReaders.get(name);
+        if (lifeReader) return nextLifeFrequency(lifeReader);
         const turingSource = languageTuringVoiceSources.get(name);
         if (turingSource) return languageTurings.get(turingSource)?.current ?? voice.frequency;
         if (!sequence || sequence.values.length === 0) return voice.frequency;
@@ -3434,7 +3908,7 @@ export class SonusRuntime {
         voice.frequency = frequency;
         this.audio.setVoiceParameter(name, 'freq', frequency);
         updateInlinePiano('voice', name, frequency);
-        if (voice.lpg || voice.engine === 'resonator' || (voice.engine === 'matter' && !languageDriveEvery.has(name))) this.audio.triggerVoice(name);
+        triggerVoiceEvent(name);
 
         const retrig = sequence
           ? sequenceFavorForValue(frequency, sequence.favor, 'frequency')
@@ -3446,7 +3920,7 @@ export class SonusRuntime {
             ? Math.max(1, 60000 / Math.max(1, this.audio.getClockStatus().bpm) * cycle.amount)
             : cycle.unit === 'sec' ? cycle.amount * 1000 : cycle.amount;
           for (let retrigIndex = 1; retrigIndex < count; retrigIndex += 1) {
-            window.setTimeout(() => this.audio.triggerVoice(name), stepMs * retrigIndex / count);
+            window.setTimeout(() => triggerVoiceEvent(name), stepMs * retrigIndex / count);
           }
         }
       };
@@ -3721,9 +4195,19 @@ function parseLanguageTuringView(line: string): string | null {
   return line.match(/^__seqview\("([A-Za-z_]\w*)"\)$/)?.[1] ?? null;
 }
 
-function parseLanguageTuringModel(line: string): { name: string; model: 'turing' } | null {
-  const match = line.match(/^__seqmodel\("([A-Za-z_]\w*)","(turing)"\)$/);
-  return match ? { name: match[1], model: 'turing' } : null;
+function parseLanguageSeqModel(line: string): { name: string; model: 'turing' | 'life'; variant: LifeVariant } | null {
+  const match = line.match(/^__seqmodel\("([A-Za-z_]\w*)","(turing|life)","(conway|highlife|seeds|day-night|morley)"\)$/);
+  return match ? { name: match[1], model: match[2] as 'turing' | 'life', variant: match[3] as LifeVariant } : null;
+}
+function parseLanguageSeqSize(line: string): { name: string; size: 8 | 16 } | null {
+  const match = line.match(/^__seqsize\("([A-Za-z_]\w*)",(8|16)\)$/);
+  return match ? { name: match[1], size: Number(match[2]) as 8 | 16 } : null;
+}
+function parseLanguageLifeDensity(line: string): { name: string; density: number; maxDensity: number | null; respawn: boolean } | null {
+  const match = line.match(/^__lifedensity\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?),(true|false)\)$/);
+  if (!match) return null;
+  const maxDensity = Number(match[3]);
+  return { name: match[1], density: Number(match[2]), maxDensity: maxDensity < 0 ? null : maxDensity, respawn: match[4] === 'true' };
 }
 function parseLanguageTuringLength(line: string): { name: string; length: number } | null {
   const match = line.match(/^__seqlength\("([A-Za-z_]\w*)",(\d+)\)$/);
@@ -3740,6 +4224,15 @@ function parseLanguageTuringValues(line: string): { name: string; values: number
 function parseLanguageTuringVoice(line: string): { voice: string; seq: string } | null {
   const match = line.match(/^__seqvoice\("([A-Za-z_]\w*)","([A-Za-z_]\w*)"\)$/);
   return match ? { voice: match[1], seq: match[2] } : null;
+}
+function parseLanguageLifeReader(line: string): LanguageLifeReaderDefinition | null {
+  const match = line.match(/^__lifereader\("([A-Za-z_]\w*)","([A-Za-z_]\w*)","(order|random|walk|reverse|pendulum|first|last)",(\d+(?:\.\d+)?),(true|false)\)$/);
+  return match ? { voice: match[1], seq: match[2], mode: match[3] as LifeReaderMode, amount: Number(match[4]), view: match[5] === 'true' } : null;
+}
+function parseLanguageLifeEvolve(line: string): { name: string; timing: LanguageCycleDefinition } | null {
+  const match = line.match(/^__lifeevolve\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/);
+  if (!match) return null;
+  return { name: match[1], timing: { amount: Number(match[2]), unit: match[3] as 'ms'|'sec'|'beat', chance: Number(match[4]), drift: match[5] === 'true', loose: match[6] === 'true', clockSource: match[7] } };
 }
 
 function parseLanguageSequenceDirective(
@@ -3978,7 +4471,7 @@ function parseLanguageClockFeelDirective(line: string): { name: string; kind: 'j
 }
 
 function parseLanguageMasterClockDirective(line: string, lineNumber: number): LanguageMasterClockDefinition | null {
-  const match = line.match(/^__masterclock\("((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(true|false),(\d+(?:\.\d+)?),(\d+(?:\.\d+)?)\)$/);
+  const match = line.match(/^__masterclock\("((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(true|false),(\d+(?:\.\d+)?),(\d+(?:\.\d+)?)(?:,(true|false))?\)$/);
   if (!match) return null;
   let expression: string;
   try { expression = JSON.parse(`"${match[1]}"`) as string; } catch { return null; }
@@ -3989,7 +4482,34 @@ function parseLanguageMasterClockDirective(line: string, lineNumber: number): La
     drift: match[4] === 'true',
     jitter: Number(match[5]),
     timingDrift: Number(match[6]),
+    disabled: match[7] === 'true',
     line: lineNumber,
+  };
+}
+
+function parseLanguageEnvelopeDirective(line: string, lineNumber: number): LanguageEnvelopeDefinition | null {
+  const match = line.match(/^__envelopeparam\("(voice|fx|filter)","([A-Za-z_]\w*)","([A-Za-z_]\w*)","((?:[^"\\]|\\.)*)",(\d+),(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/);
+  if (!match) return null;
+  let raw: string;
+  let spec: LanguageEnvelopeSpec;
+  try {
+    raw = JSON.parse(`"${match[4]}"`) as string;
+    spec = JSON.parse(raw) as LanguageEnvelopeSpec;
+  } catch {
+    return null;
+  }
+  return {
+    ownerKind: match[1] as LanguageEnvelopeDefinition['ownerKind'],
+    owner: match[2],
+    parameter: match[3],
+    spec,
+    line: Number(match[5]) || lineNumber,
+    interval: Number(match[6]),
+    unit: match[7] as LanguageEnvelopeDefinition['unit'],
+    chance: Number(match[8]),
+    drift: match[9] === 'true',
+    loose: match[10] === 'true',
+    clockSource: match[11],
   };
 }
 
@@ -4394,6 +4914,12 @@ function applyFilterCall(
   evaluate: (expression: string) => ScalarValue | undefined,
 ): string | null {
   switch (call.name) {
+    case 'disabled': {
+      const value = evaluate(call.argument);
+      if (typeof value !== 'boolean') return 'disabled expects true or false';
+      definition.disabled = value;
+      return null;
+    }
     case 'model': {
       const value = evaluate(call.argument);
       if (value !== 'svf') return 'FILTER model expects svf';
@@ -4467,6 +4993,12 @@ function applyMistCall(
   };
 
   switch (call.name) {
+    case 'disabled': {
+      const value = evaluate(call.argument);
+      if (typeof value !== 'boolean') return 'disabled expects true or false';
+      definition.disabled = value;
+      return null;
+    }
     case 'position': return percent('position');
     case 'size': return percent('size');
     case 'density': return percent('density');
@@ -4721,6 +5253,12 @@ function applyVoiceCall(
   evaluate: (expression: string) => ScalarValue | undefined,
 ): string | null {
   switch (call.name) {
+    case 'disabled': {
+      const value = evaluate(call.argument);
+      if (typeof value !== 'boolean') return 'disabled expects true or false';
+      voice.disabled = value;
+      return null;
+    }
     case 'model': {
       const value = evaluate(call.argument);
       if (value === undefined) return null;

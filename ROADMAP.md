@@ -9,8 +9,7 @@ This roadmap is directional rather than a release commitment. Features may move,
 The first tagged development release establishes the current high-level
 language and DSP architecture:
 
-- `VOICE` objects with model-specific sound engines, per-object level, note /
-  frequency / scale sequencing, LPG option, and parameter modulation.
+- `VOICE` objects with model-specific sound engines, per-object level, unified `PITCH` material (`SCALE`, `NOTES`, `FREQS`) sequencing, LPG option, and parameter modulation.
 - `MOD` objects with four related outputs, local declaration inside `VOICE` and
   `FX`, shared transport semantics, and optional scope views.
 - `FX` objects with the current `mist.*` model family, stereo routing, dynamic
@@ -85,6 +84,7 @@ Current direction:
 - `FX` processors backed by Mist / SuperParasites plus the MIT-licensed `sky` ambient reverb based on CloudSeedCore.
 - `FILTER` processors backed by modular permissively licensed DSP areas; the first implementation is DaisySP `svf` with simultaneous multimode outputs.
 - Additional DaisySP areas may be introduced as separate WASM modules rather than one monolithic library.
+- LIVE performance controls now cover scalar sliders and note piano views; future work can add direct note-list editing and scheduled mute/bypass state changes.
 - Additional permissively licensed DSP where appropriate.
 - [x] Consolidate the active DSP build around permissive licenses only.
 - Original Sonus Umbrae DSP modules.
@@ -100,8 +100,9 @@ The language should not depend on the identity of any one upstream hardware modu
 
 Planned directions include:
 
-- Master BPM with per-clock `jitter` and slow correlated `drift`.
-- Named hierarchical clock sources derived from `MASTER` or another clock, with ratios such as `/2`, `/4`, `*2`, and non-binary ratios.
+- [x] Master BPM with per-clock `jitter` and slow correlated `drifter` behaviour.
+- [x] Named clock objects with optional `RATE` relative to the master, local `JITTER`/`DRIFTER`, optional `WITH VIEW`, immediate live pause via `_CLOCK`, and master pause cascading through the full musical clock tree while wall-clock scheduling continues.
+- [x] Keep `SET` reserved for typed values: persistent clock objects are declared with `CLOCK`, with omitted `RATE` meaning master rate `*1`.
 - Meter information.
 - Phase offsets.
 - Swing.
@@ -376,7 +377,7 @@ Sonus Umbrae should continue to follow these principles:
 - [x] Compile Mutable Instruments Elements DSP into a dedicated `matter.wasm`.
 - [x] Run Elements in an AudioWorklet with host-rate resampling while preserving the original 32 kHz DSP contract.
 - [x] Expose Elements as one high-level `matter` VOICE engine with mixed BOW/BLOW/STRIKE exciters and stereo output.
-- [x] Integrate Matter voices with note/scale sequencing, routing, levels, hot reload, Scheme, and musical transport stop.
+- [x] Integrate Matter voices with unified PITCH sequencing, routing, levels, hot reload, Scheme, and musical transport stop.
 - [x] Add typed AD/ADR/ASR/ADSR/DAHDSR envelope values, SET/FROM compatibility, and Matter DRIVE triggering through the global scheduler.
 - [ ] Evaluate future audio-rate modulation inputs for selected Matter parameters without exposing the original Eurorack panel semantics.
 
@@ -386,7 +387,18 @@ Sonus Umbrae should continue to follow these principles:
 - [x] Compile Mutable Instruments Rings DSP into a dedicated `resonator.wasm`.
 - [x] Expose the three primary Rings resonator models as `resonator.modal`, `resonator.sympathetic`, and `resonator.string`.
 - [x] Support Rings 1/2/4-note internal polyphony through `SOUND ... WITH N NOTES`.
-- [x] Automatically strum on VOICE note events.
+- [x] Automatically strum on VOICE pitch events.
 - [x] Treat MAIN/AUX as a logical stereo output (MAIN -> L, AUX -> R) while allowing explicit `.main` / `.aux` mono routing.
 - [x] Expose the original mono audio input so a Resonator VOICE can also process another source in `PLAY ... THROUGH resonator THEN ...` chains.
 - [ ] Evaluate explicit strum/pitch decoupling only after the initial note-driven workflow has been tested musically.
+
+### Capability-gated runtime
+
+The language now reserves a single top-of-file `USE` directive for optional live capabilities (`visual`, `midi`, `audioin`, `osc`). Capability-set changes have an explicit confirmed runtime-restart lifecycle so future heavy subsystems can be dynamically loaded only when requested. Editor/debug facilities remain environment configuration rather than program capabilities.
+
+
+### Keyboard-first environment controls
+
+The 0.2.x environment now treats `Esc` as a compact live-performance menu and `>` as the explicit command prompt. Configuration navigation is keyboard-first and includes browser-supported audio-output selection, requested Web Audio sample rate, effective rate/latency reporting, and a confirmed audio-engine restart lifecycle for structural audio changes. Hardware bit depth is intentionally not reported because Web Audio does not expose it reliably.
+
+- CONFIG audio settings now include output device, requested sample rate and LATENCY MODE (`INTERACTIVE`, `BALANCED`, `PLAYBACK`), with effective latency readout and restart confirmation.
