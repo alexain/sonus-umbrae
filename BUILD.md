@@ -381,3 +381,31 @@ npm run dsp:build
 ```
 
 The Dices WebAssembly artifact is generated locally and remains ignored by Git.
+
+
+<!-- SONUS-GITHUB-PAGES-BUILD -->
+## GitHub Pages deployment
+
+GitHub Pages is deployed automatically from `main` by `.github/workflows/pages.yml`.
+
+The release strategy intentionally keeps precompiled WebAssembly files in:
+
+```text
+public/dsp/*.wasm
+```
+
+This avoids installing Emscripten and rebuilding every DSP dependency during each Pages deployment. DSP source remains authoritative; whenever C++ DSP changes, rebuild locally before merging to `main`:
+
+```bash
+npm run dsp:setup
+npm run dsp:build
+git add public/dsp/*.wasm
+```
+
+The Vite production build uses the repository subpath `/sonus-umbrae/`. Runtime DSP and AudioWorklet asset URLs use `import.meta.env.BASE_URL`, so local development continues to work at `/` while GitHub Pages works under the repository path.
+
+For a local release check:
+
+```bash
+npm run pages:check
+```

@@ -9,7 +9,8 @@
     "preview": "vite preview --port 4173 --strictPort",
     "dsp:setup": "bash scripts/setup-dsp.sh",
     "dsp:build": "bash scripts/build-dsp.sh",
-    "mist:harness:build": "bash scripts/build-mist-harness.sh"
+    "mist:harness:build": "bash scripts/build-mist-harness.sh",
+    "pages:check": "find public/dsp -maxdepth 1 -name \"*.wasm\" -print -quit | grep -q . && npm run build"
   },
   "devDependencies": {
     "typescript": "^5.9.2",

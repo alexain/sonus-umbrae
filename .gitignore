@@ -4,3 +4,7 @@ dist
 *.local
 vendor/eurorack/
 public/dsp/*.wasm
+
+# Sonus Pages: keep release WASM artifacts versioned
+!public/dsp/
+!public/dsp/*.wasm

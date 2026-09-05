@@ -10,6 +10,13 @@ export interface AudioEngineSnapshot {
 
 export type SignalKind = 'signal' | 'gate' | 'trigger';
 
+function publicAssetUrl(path: string): string {
+  const base = import.meta.env.BASE_URL || '/';
+  const cleanBase = base.endsWith('/') ? base : `${base}/`;
+  const cleanPath = path.replace(/^\/+/, '');
+  return `${cleanBase}${cleanPath}`;
+}
+
 const DEFAULT_HARDWARE_OUTPUT_GAIN = 0.12;
 const DEFAULT_HARDWARE_OUTPUT_LEVEL = 100;
 
@@ -2527,12 +2534,12 @@ export class AudioEngine {
   private async ensureSwellRuntime(): Promise<void> {
     if (this.swellWorkletLoaded && this.swellWasmBytes) return;
     const context = this.ensureContext();
-    const response = await fetch('/dsp/swell.wasm');
+    const response = await fetch(publicAssetUrl('/dsp/swell.wasm'));
     if (!response.ok) {
       throw new Error('Swell DSP missing. Run npm run dsp:setup and npm run dsp:build.');
     }
     this.swellWasmBytes = await response.arrayBuffer();
-    await context.audioWorklet.addModule('/worklets/swell-processor.js');
+    await context.audioWorklet.addModule(publicAssetUrl('/worklets/swell-processor.js'));
     this.swellWorkletLoaded = true;
   }
 
@@ -2540,82 +2547,82 @@ export class AudioEngine {
   private async ensureDicesRuntime(): Promise<void> {
     if (this.dicesWorkletLoaded && this.dicesWasmBytes) return;
     const context = this.ensureContext();
-    const response = await fetch('/dsp/dices.wasm');
+    const response = await fetch(publicAssetUrl('/dsp/dices.wasm'));
     if (!response.ok) {
       throw new Error('Dices DSP missing. Run npm run dsp:setup and npm run dsp:build.');
     }
     this.dicesWasmBytes = await response.arrayBuffer();
-    await context.audioWorklet.addModule('/worklets/dices-processor.js');
+    await context.audioWorklet.addModule(publicAssetUrl('/worklets/dices-processor.js'));
     this.dicesWorkletLoaded = true;
   }
 
   private async ensureMistRuntime(): Promise<void> {
     if (this.mistWorkletLoaded && this.mistWasmBytes) return;
     const context = this.ensureContext();
-    const response = await fetch('/dsp/mist.wasm');
+    const response = await fetch(publicAssetUrl('/dsp/mist.wasm'));
     if (!response.ok) {
       throw new Error('Mist DSP missing. Run npm run dsp:setup and npm run dsp:build.');
     }
     this.mistWasmBytes = await response.arrayBuffer();
-    await context.audioWorklet.addModule('/worklets/mist-processor.js');
+    await context.audioWorklet.addModule(publicAssetUrl('/worklets/mist-processor.js'));
     this.mistWorkletLoaded = true;
   }
 
   private async ensureSkyRuntime(): Promise<void> {
     if (this.skyWorkletLoaded && this.skyWasmBytes) return;
     const context=this.ensureContext();
-    const response=await fetch('/dsp/sky.wasm');
+    const response=await fetch(publicAssetUrl('/dsp/sky.wasm'));
     if (!response.ok) throw new Error('Sky DSP missing. Run npm run dsp:setup and npm run dsp:build.');
     this.skyWasmBytes=await response.arrayBuffer();
-    await context.audioWorklet.addModule('/worklets/sky-processor.js');
+    await context.audioWorklet.addModule(publicAssetUrl('/worklets/sky-processor.js'));
     this.skyWorkletLoaded=true;
   }
 
   private async ensureDelayRuntime(): Promise<void> {
     if (this.delayWorkletLoaded && this.delayWasmBytes) return;
-    const context=this.ensureContext(); const response=await fetch('/dsp/delay.wasm');
+    const context=this.ensureContext(); const response=await fetch(publicAssetUrl('/dsp/delay.wasm'));
     if (!response.ok) throw new Error('Delay DSP missing. Run npm run dsp:setup and npm run dsp:build.');
-    this.delayWasmBytes=await response.arrayBuffer(); await context.audioWorklet.addModule('/worklets/delay-processor.js'); this.delayWorkletLoaded=true;
+    this.delayWasmBytes=await response.arrayBuffer(); await context.audioWorklet.addModule(publicAssetUrl('/worklets/delay-processor.js')); this.delayWorkletLoaded=true;
   }
 
   private async ensureDaisyFiltersRuntime(): Promise<void> {
     if (this.daisyFiltersWorkletLoaded && this.daisyFiltersWasmBytes) return;
     const context = this.ensureContext();
-    const response = await fetch('/dsp/daisy-filters.wasm');
+    const response = await fetch(publicAssetUrl('/dsp/daisy-filters.wasm'));
     if (!response.ok) throw new Error('DaisySP filter DSP missing. Run npm run dsp:setup and npm run dsp:build.');
     this.daisyFiltersWasmBytes = await response.arrayBuffer();
-    await context.audioWorklet.addModule('/worklets/daisy-filters-processor.js');
+    await context.audioWorklet.addModule(publicAssetUrl('/worklets/daisy-filters-processor.js'));
     this.daisyFiltersWorkletLoaded = true;
   }
 
   private async ensureClockRuntime(): Promise<void> {
     if (this.clockWorkletLoaded) return;
     const context = this.ensureContext();
-    await context.audioWorklet.addModule('/worklets/clock-processor.js');
+    await context.audioWorklet.addModule(publicAssetUrl('/worklets/clock-processor.js'));
     this.clockWorkletLoaded = true;
   }
 
   private async ensureMatterRuntime(): Promise<void> {
     if (this.matterWorkletLoaded && this.matterWasmBytes) return;
     const context = this.ensureContext();
-    const response = await fetch('/dsp/matter.wasm');
+    const response = await fetch(publicAssetUrl('/dsp/matter.wasm'));
     if (!response.ok) {
       throw new Error('Matter DSP missing. Run npm run dsp:setup and npm run dsp:build.');
     }
     this.matterWasmBytes = await response.arrayBuffer();
-    await context.audioWorklet.addModule('/worklets/matter-processor.js');
+    await context.audioWorklet.addModule(publicAssetUrl('/worklets/matter-processor.js'));
     this.matterWorkletLoaded = true;
   }
 
   private async ensureResonatorRuntime(): Promise<void> {
     if (this.resonatorWorkletLoaded && this.resonatorWasmBytes) return;
     const context = this.ensureContext();
-    const response = await fetch('/dsp/resonator.wasm');
+    const response = await fetch(publicAssetUrl('/dsp/resonator.wasm'));
     if (!response.ok) {
       throw new Error('Resonator DSP missing. Run npm run dsp:setup and npm run dsp:build.');
     }
     this.resonatorWasmBytes = await response.arrayBuffer();
-    await context.audioWorklet.addModule('/worklets/resonator-processor.js');
+    await context.audioWorklet.addModule(publicAssetUrl('/worklets/resonator-processor.js'));
     this.resonatorWorkletLoaded = true;
   }
 
@@ -2623,12 +2630,12 @@ export class AudioEngine {
     if (this.voiceWorkletLoaded && this.voiceWasmBytes) return;
 
     const context = this.ensureContext();
-    const response = await fetch('/dsp/voice.wasm');
+    const response = await fetch(publicAssetUrl('/dsp/voice.wasm'));
     if (!response.ok) {
       throw new Error('Voice DSP missing. Run npm run dsp:setup and npm run dsp:build.');
     }
     this.voiceWasmBytes = await response.arrayBuffer();
-    await context.audioWorklet.addModule('/worklets/voice-processor.js');
+    await context.audioWorklet.addModule(publicAssetUrl('/worklets/voice-processor.js'));
     this.voiceWorkletLoaded = true;
   }
 
