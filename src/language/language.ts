@@ -74,7 +74,7 @@ export function parseProgramCapabilities(source: string): ProgramCapabilitySet {
   return { capabilities, directiveLine, directiveText };
 }
 
-type SourceKind = 'voice' | 'note' | 'freq' | 'time' | 'clock' | 'trigger' | 'scalar' | 'scale' | 'seq' | 'register' | 'envelope';
+type SourceKind = 'voice' | 'note' | 'freq' | 'time' | 'clock' | 'trigger' | 'scalar' | 'scale' | 'seq' | 'register' | 'envelope' | 'kit';
 
 type SourceDefinition =
   | { kind: 'scalar'; internalName?: string }
@@ -85,7 +85,8 @@ type SourceDefinition =
   | { kind: 'scale'; values: number[]; display: string; internalName?: string }
   | { kind: 'seq'; model: 'turing' | 'life' | null; values: number[]; display: string; internalName?: string }
   | { kind: 'register'; size: number; display: string; internalName?: string }
-  | { kind: 'envelope'; spec: EnvelopeSpec; display: string; internalName?: string };
+  | { kind: 'envelope'; spec: EnvelopeSpec; display: string; internalName?: string }
+  | { kind: 'kit'; kit: DrumKitDefinition; display: string; internalName?: string };
 
 
 type EnvelopeCurve = 'lin' | 'log';
@@ -105,6 +106,96 @@ type EnvelopeSpec = {
   range: [number, number];
   display: string;
 };
+
+type DrumVoiceId = 'kick' | 'snare' | 'clap' | 'hihat' | 'openhat' | 'lowtom' | 'hightom';
+
+type DrumSlotDefaults = {
+  level: number;
+  pan: number;
+  tune: number;
+  decay: number;
+  transient: number;
+  snappy: number;
+  color: number;
+  noise: number;
+  humanize: number;
+};
+
+type DrumKitEntry = { source: DrumVoiceId; alias: string; defaults: DrumSlotDefaults };
+type DrumKitDefinition = { entries: Map<string, DrumKitEntry> };
+type DrumkitState = { name: string; line: number; indentation: number; kit: DrumKitDefinition | null };
+
+const DRUM_DEFAULTS: DrumSlotDefaults = {
+  level: 100, pan: 0, tune: 0, decay: 70,
+  transient: 30, snappy: 75, color: 50, noise: 50, humanize: 0,
+};
+
+const SONUS606_KIT: DrumKitDefinition = {
+  entries: new Map<string, DrumKitEntry>([
+    ['kick', { source: 'kick', alias: 'kick', defaults: { ...DRUM_DEFAULTS } }],
+    ['snare', { source: 'snare', alias: 'snare', defaults: { ...DRUM_DEFAULTS } }],
+    ['clap', { source: 'clap', alias: 'clap', defaults: { ...DRUM_DEFAULTS } }],
+    ['hihat', { source: 'hihat', alias: 'hihat', defaults: { ...DRUM_DEFAULTS, decay: 30 } }],
+    ['openhat', { source: 'openhat', alias: 'openhat', defaults: { ...DRUM_DEFAULTS, decay: 75 } }],
+    ['lowtom', { source: 'lowtom', alias: 'lowtom', defaults: { ...DRUM_DEFAULTS } }],
+    ['hightom', { source: 'hightom', alias: 'hightom', defaults: { ...DRUM_DEFAULTS } }],
+  ]),
+};
+
+function cloneDrumKit(kit: DrumKitDefinition): DrumKitDefinition {
+  return { entries: new Map([...kit.entries].map(([alias, entry]) => [alias, {
+    source: entry.source, alias: entry.alias, defaults: { ...entry.defaults },
+  }])) };
+}
+
+function drumParameterDefaults(source: DrumVoiceId, raw: string, line: number, base: DrumSlotDefaults = DRUM_DEFAULTS): DrumSlotDefaults {
+  const result = { ...base };
+  const modifiers = raw.trim() ? raw.split(',').map((item) => item.trim()).filter(Boolean) : [];
+  for (const modifier of modifiers) {
+    const match = modifier.match(/^([A-Za-z_][A-Za-z0-9_]*)\s+(-?\d+(?:\.\d+)?)$/);
+    if (!match) throw new LanguageError([{ line, message: `invalid drum WITH parameter '${modifier}'` }]);
+    const key = match[1].toLowerCase() as keyof DrumSlotDefaults;
+    const value = Number(match[2]);
+    if (key === 'level' || key === 'decay' || key === 'transient' || key === 'snappy' || key === 'color' || key === 'noise' || key === 'humanize') {
+      if (value < 0 || value > 100) throw new LanguageError([{ line, message: `drum ${key} expects 0..100` }]);
+    } else if (key === 'pan') {
+      if (value < -100 || value > 100) throw new LanguageError([{ line, message: 'drum pan expects -100..100' }]);
+    } else if (key === 'tune') {
+      if (value < -24 || value > 24) throw new LanguageError([{ line, message: 'drum tune expects -24..24 semitones' }]);
+    } else throw new LanguageError([{ line, message: `unknown drum parameter '${match[1]}'` }]);
+    if (key === 'transient' && source !== 'kick') throw new LanguageError([{ line, message: 'transient is available only for drum.kick' }]);
+    if ((key === 'snappy' || key === 'color') && source !== 'snare') throw new LanguageError([{ line, message: `${key} is available only for drum.snare` }]);
+    if (key === 'noise' && source !== 'clap') throw new LanguageError([{ line, message: 'noise is available only for drum.clap' }]);
+    result[key] = value;
+  }
+  return result;
+}
+
+function parseDrumKitEntry(raw: string, line: number, kit: DrumKitDefinition): DrumKitEntry {
+  const sourceEntry = raw.match(/^drum\.(kick|snare|clap|hihat|openhat|lowtom|hightom)\s+as\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(.+))?$/i);
+  if (sourceEntry) {
+    const source = sourceEntry[1].toLowerCase() as DrumVoiceId;
+    return { source, alias: sourceEntry[2], defaults: drumParameterDefaults(source, sourceEntry[3] ?? '', line) };
+  }
+  const override = raw.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(.+))?$/i);
+  if (override) {
+    const previous = kit.entries.get(override[1]);
+    if (!previous) throw new LanguageError([{ line, message: `unknown KIT alias '${override[1]}'` }]);
+    return { source: previous.source, alias: previous.alias, defaults: drumParameterDefaults(previous.source, override[2] ?? '', line, previous.defaults) };
+  }
+  throw new LanguageError([{ line, message: `invalid KIT entry '${raw}'` }]);
+}
+
+function applyDrumKitEntries(base: DrumKitDefinition, body: string, line: number): DrumKitDefinition {
+  const result = cloneDrumKit(base);
+  for (const raw of body.split(/\s*;\s*/).map((item) => item.trim()).filter(Boolean)) {
+    const entry = parseDrumKitEntry(raw, line, result);
+    result.entries.set(entry.alias, entry);
+  }
+  return result;
+}
+
+function serializeDrumParams(params: DrumSlotDefaults): string { return JSON.stringify(params); }
 
 type VoiceState = {
   name: string;
@@ -1306,19 +1397,16 @@ function parseEverySpec(
   }
 
   if (amount <= 0) throw new LanguageError([{ line, message: 'every interval must be greater than 0' }]);
-  if (unit === 'beat' && !Number.isInteger(amount)) {
-    throw new LanguageError([{ line, message: 'beat timing currently requires a whole number of beats' }]);
-  }
 
   let clockSource = 'Clock';
   let clockPrelude = '';
   const timingModifiers: string[] = [];
 
   for (const modifier of modifiers) {
-    const rotate = modifier.match(/^rotate\s+(-?\d+)$/i);
+    const rotate = modifier.match(/^(?:rotate|shift)\s+(-?\d+)$/i);
     if (rotate) {
       if (!euclidean) {
-        throw new LanguageError([{ line, message: 'ROTATE is available only for EVERY EUCLIDEAN' }]);
+        throw new LanguageError([{ line, message: 'ROTATE/SHIFT is available only for EVERY EUCLIDEAN' }]);
       }
       const rawRotate = Number(rotate[1]);
       euclidean.rotate = ((rawRotate % euclidean.steps) + euclidean.steps) % euclidean.steps;
@@ -1836,9 +1924,6 @@ function compileSet(
   }
 
   const unit = normalizeCycleUnit(cycleMatch[3], line);
-  if (unit === 'beat' && !Number.isInteger(amount)) {
-    throw new LanguageError([{ line, message: 'beat cycles currently require a whole number of beats' }]);
-  }
 
   const modifiers = (cycleMatch[4] ?? '')
     .split(',')
@@ -2500,7 +2585,7 @@ type PlayEndpoint = {
   amount: number;
 };
 
-type PlayObjectKind = 'voice' | 'matter' | 'resonator' | 'fx' | 'filter' | 'main';
+type PlayObjectKind = 'voice' | 'matter' | 'resonator' | 'drumkit' | 'fx' | 'filter' | 'main';
 
 type PlaySignal =
   | { stereo: false; mono: string }
@@ -2528,6 +2613,7 @@ function compilePlay(
   voices: Set<string>,
   fxs: Set<string>,
   filters: Set<string>,
+  drumkits: Set<string>,
   voiceEmbeddedFilters: Map<string, string>,
   voiceSoundIds: Map<string, string>,
 ): string {
@@ -2557,6 +2643,7 @@ function compilePlay(
       return 'voice';
     }
     if (fxs.has(name)) return 'fx';
+    if (drumkits.has(name)) return 'drumkit';
     if (filters.has(name)) return 'filter';
     if (name.toUpperCase() === 'MAIN') return 'main';
     throw new LanguageError([{ line, message: `unknown PLAY object '${name}'` }]);
@@ -2576,7 +2663,7 @@ function compilePlay(
       return { stereo: false, mono: `${endpoint.name}.${endpoint.port ?? 'lp'}` };
     }
 
-    if (kind === 'fx') {
+    if (kind === 'fx' || kind === 'drumkit') {
       if (endpoint.port) throw new LanguageError([{ line, message: 'FX outputs use .L/.R, not named mono ports' }]);
       if (endpoint.channel) {
         return { stereo: false, mono: `${endpoint.name}.${endpoint.channel === 'R' ? 'out_R' : 'out_L'}` };
@@ -2636,6 +2723,8 @@ function compilePlay(
     if (kind === 'voice') {
       throw new LanguageError([{ line, message: `object '${endpoint.name}' does not expose an audio input` }]);
     }
+
+    if (kind === 'drumkit') throw new LanguageError([{ line, message: `DRUMKIT '${endpoint.name}' does not expose an audio input` }]);
 
     if (kind === 'filter') {
       if (endpoint.channel) throw new LanguageError([{ line, message: 'FILTER input is mono; .L/.R are not valid' }]);
@@ -2955,6 +3044,29 @@ export function compileLanguageSource(source: string): string {
   const capabilitySet = parseProgramCapabilities(source);
   const lines = source.replace(/\r\n/g, '\n').split('\n');
 
+  // Collapse multiline KIT lists while preserving physical line count.
+  for (let index = 0; index < lines.length; index += 1) {
+    const raw = stripComment(lines[index]);
+    const trimmed = raw.trim();
+    const start = trimmed.match(/^(SET\s+[A-Za-z_][A-Za-z0-9_]*\s*:\s*KIT(?:\s+[A-Za-z_][A-Za-z0-9_]*)?|KIT\s+[A-Za-z_][A-Za-z0-9_]*)\s*\[\s*$/i);
+    if (!start) continue;
+    const indentation = raw.length - raw.trimStart().length;
+    const entries: string[] = [];
+    let next = index + 1;
+    let closed = false;
+    while (next < lines.length) {
+      const childRaw = stripComment(lines[next]);
+      const childTrimmed = childRaw.trim();
+      if (!childTrimmed) { lines[next] = ''; next += 1; continue; }
+      if (childTrimmed === ']') { lines[next] = ''; closed = true; break; }
+      const childIndentation = childRaw.length - childRaw.trimStart().length;
+      if (childIndentation <= indentation) break;
+      entries.push(childTrimmed); lines[next] = ''; next += 1;
+    }
+    if (!closed) throw new LanguageError([{ line: index + 1, message: 'KIT list requires a closing ]' }]);
+    lines[index] = `${' '.repeat(indentation)}${start[1]} [${entries.join('; ')}]`;
+  }
+
   // Multiline structured SET values are collapsed to a single synthetic line
   // before the normal statement pass. The physical child lines remain empty so
   // diagnostics and editor line numbering stay stable.
@@ -3013,6 +3125,9 @@ export function compileLanguageSource(source: string): string {
   const localSourceDefinitions = new Map<string, Map<string, SourceDefinition>>();
   const localSourceKinds = new Map<string, Map<string, SourceKind>>();
   const modSources = new Map<string, ModSourceDefinition>();
+  const drumkits = new Set<string>();
+  const kitDefinitions = new Map<string, DrumKitDefinition>([['sonus606', cloneDrumKit(SONUS606_KIT)]]);
+  const localKitDefinitions = new Map<string, Map<string, DrumKitDefinition>>();
 
   const scopedDefinitions = (scope: string | null, parentScope: string | null = null): Map<string, SourceDefinition> => {
     const result = new Map(sourceDefinitions);
@@ -3049,6 +3164,7 @@ export function compileLanguageSource(source: string): string {
   let currentFx: FxState | null = null;
   let currentFilter: FilterState | null = null;
   let currentMod: ModState | null = null;
+  let currentDrumkit: DrumkitState | null = null;
 
   for (let index = 0; index < lines.length; index += 1) {
     const lineNumber = index + 1;
@@ -3070,12 +3186,26 @@ export function compileLanguageSource(source: string): string {
 
     try {
       if (currentMod && indentation <= currentMod.indentation) currentMod = null;
+      if (currentDrumkit && indentation <= currentDrumkit.indentation) { if (!currentDrumkit.kit) diagnostics.push({ line: currentDrumkit.line, message: `DRUMKIT '${currentDrumkit.name}' requires KIT` }); currentDrumkit = null; }
       if (currentSeq && indentation <= currentSeq.indentation) { requireSeqReady(currentSeq, diagnostics); currentSeq = null; }
       if (currentRegister && indentation <= currentRegister.indentation) { requireRegisterReady(currentRegister, diagnostics); currentRegister = null; }
       if (currentClock && indentation <= currentClock.indentation) { requireClockReady(currentClock, diagnostics); currentClock = null; }
       if (currentFilter && indentation <= currentFilter.indentation) {
         requireFilterModel(currentFilter, diagnostics);
         currentFilter = null;
+      }
+
+      const drumkitBlockMatch = trimmed.match(/^(_)?DRUMKIT\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*$/i);
+      if (drumkitBlockMatch) {
+        if (indentation > 0) throw new LanguageError([{ line: lineNumber, message: 'DRUMKIT is currently a top-level object' }]);
+        const disabled = Boolean(drumkitBlockMatch[1]);
+        const name = drumkitBlockMatch[2];
+        if (drumkits.has(name) || voices.has(name) || fxs.has(name) || filters.has(name)) throw new LanguageError([{ line: lineNumber, message: `duplicate object: ${name}` }]);
+        drumkits.add(name);
+        currentDrumkit = { name, line: lineNumber, indentation, kit: null };
+        currentVoice = null; currentFx = null; currentFilter = null; currentMod = null;
+        output[index] = `__drumkit(${JSON.stringify(name)},${disabled});`;
+        continue;
       }
 
       const clockBlockMatch = trimmed.match(/^(_)?CLOCK\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
@@ -3333,6 +3463,21 @@ export function compileLanguageSource(source: string): string {
       }
 
       if (/^SET\b/i.test(trimmed)) {
+        const setKit = trimmed.match(/^SET\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*KIT(?:\s+([A-Za-z_][A-Za-z0-9_]*))?\s*\[(.*)\]\s*$/i);
+        if (setKit) {
+          const setName = setKit[1];
+          const local = currentDrumkit !== null && indentation > currentDrumkit.indentation;
+          const scoped = local ? (localKitDefinitions.get(currentDrumkit!.name) ?? new Map<string, DrumKitDefinition>()) : null;
+          if (local && scoped && !localKitDefinitions.has(currentDrumkit!.name)) localKitDefinitions.set(currentDrumkit!.name, scoped);
+          if (!local && indentation > 0) throw new LanguageError([{ line: lineNumber, message: 'local KIT SET is currently supported inside DRUMKIT' }]);
+          const baseName = setKit[2];
+          const base = baseName ? (scoped?.get(baseName) ?? kitDefinitions.get(baseName.toLowerCase()) ?? kitDefinitions.get(baseName)) : { entries: new Map<string, DrumKitEntry>() };
+          if (!base) throw new LanguageError([{ line: lineNumber, message: `unknown KIT '${baseName}'` }]);
+          const defined = applyDrumKitEntries(base, setKit[3], lineNumber);
+          if (local) scoped!.set(setName, defined); else kitDefinitions.set(setName, defined);
+          output[index] = '';
+          continue;
+        }
         const localOwner = indentation > 0
           ? (currentFilter ? `filter:${currentFilter.internalName}` : currentVoice ? `voice:${currentVoice.name}` : currentFx ? `fx:${currentFx.name}` : null)
           : null;
@@ -3390,7 +3535,36 @@ export function compileLanguageSource(source: string): string {
         requireFxModel(currentFx, diagnostics);
         currentVoice = null;
         currentFx = null;
-        output[index] = compilePlay(trimmed, lineNumber, voices, fxs, filters, voiceEmbeddedFilters, voiceSoundIds);
+        output[index] = compilePlay(trimmed, lineNumber, voices, fxs, filters, drumkits, voiceEmbeddedFilters, voiceSoundIds);
+        continue;
+      }
+
+      if (currentDrumkit && indentation > currentDrumkit.indentation) {
+        const kitLine = trimmed.match(/^KIT\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s*\[(.*)\])?\s*$/i);
+        if (kitLine) {
+          const local = localKitDefinitions.get(currentDrumkit.name);
+          const base = local?.get(kitLine[1]) ?? kitDefinitions.get(kitLine[1].toLowerCase()) ?? kitDefinitions.get(kitLine[1]);
+          if (!base) throw new LanguageError([{ line: lineNumber, message: `unknown KIT '${kitLine[1]}'` }]);
+          currentDrumkit.kit = kitLine[2] === undefined ? cloneDrumKit(base) : applyDrumKitEntries(base, kitLine[2], lineNumber);
+          output[index] = `__drumkitmeta(${JSON.stringify(currentDrumkit.name)},${JSON.stringify(kitLine[1])});`;
+          continue;
+        }
+        if (/^SET\b/i.test(trimmed)) throw new LanguageError([{ line: lineNumber, message: 'inside DRUMKIT, SET currently supports only KIT values' }]);
+        if (!currentDrumkit.kit) throw new LanguageError([{ line: lineNumber, message: `DRUMKIT '${currentDrumkit.name}' requires KIT before instrument lines` }]);
+        const split = splitEveryClause(trimmed);
+        const soundPart = split.base.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(.+))?$/i);
+        if (!soundPart) throw new LanguageError([{ line: lineNumber, message: `invalid DRUMKIT instrument line '${trimmed}'` }]);
+        const alias = soundPart[1];
+        const entry = currentDrumkit.kit.entries.get(alias);
+        if (!entry) throw new LanguageError([{ line: lineNumber, message: `unknown KIT alias '${alias}'` }]);
+        const params = drumParameterDefaults(entry.source, soundPart[2] ?? '', lineNumber, entry.defaults);
+        if (!split.every) {
+          output[index] = `__drumslot(${JSON.stringify(currentDrumkit.name)},${JSON.stringify(alias)},${JSON.stringify(entry.source)},${JSON.stringify(serializeDrumParams(params))},0,"ms",100,false,false,"Clock");`;
+          continue;
+        }
+        const timing = parseEverySpec(split.every, lineNumber, scopedDefinitions(null));
+        const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+        output[index] = `${prefix}__drumslot(${JSON.stringify(currentDrumkit.name)},${JSON.stringify(alias)},${JSON.stringify(entry.source)},${JSON.stringify(serializeDrumParams(params))},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
         continue;
       }
 
@@ -3420,12 +3594,12 @@ export function compileLanguageSource(source: string): string {
       }
 
       if (/^[A-Za-z_][A-Za-z0-9_]*\s*:/.test(trimmed)) {
-        throw new LanguageError([{ line: lineNumber, message: 'only VOICE, FX, FILTER, MOD, SEQ, REGISTER and CLOCK blocks are supported' }]);
+        throw new LanguageError([{ line: lineNumber, message: 'only VOICE, FX, FILTER, MOD, SEQ, REGISTER, DRUMKIT and CLOCK blocks are supported' }]);
       }
 
       throw new LanguageError([{
         line: lineNumber,
-        message: 'each top-level statement must begin with VOICE, FX, FILTER, MOD, SEQ, REGISTER, SET, CLOCK, MAIN, or PLAY',
+        message: 'each top-level statement must begin with VOICE, FX, FILTER, MOD, SEQ, REGISTER, DRUMKIT, SET, CLOCK, MAIN, or PLAY',
       }]);
     } catch (error) {
       if (error instanceof LanguageError) diagnostics.push(...error.diagnostics);
@@ -3438,6 +3612,7 @@ export function compileLanguageSource(source: string): string {
   requireFilterModel(currentFilter, diagnostics);
   requireSeqReady(currentSeq, diagnostics);
   requireRegisterReady(currentRegister, diagnostics);
+  if (currentDrumkit && !currentDrumkit.kit) diagnostics.push({ line: currentDrumkit.line, message: `DRUMKIT '${currentDrumkit.name}' requires KIT` });
 
   if (diagnostics.length > 0) throw new LanguageError(diagnostics);
   return output.join('\n');

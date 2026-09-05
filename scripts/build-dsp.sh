@@ -241,3 +241,21 @@ em++ \
   -o "$DAISY_FILTERS_OUTPUT"
 
 echo "Built $DAISY_FILTERS_OUTPUT (Electrosmith DaisySP SVF backend)"
+
+
+DRUMKIT_OUTPUT="$ROOT/public/dsp/drumkit.wasm"
+em++ \
+  -std=c++14 \
+  -O3 \
+  -I"$VENDOR/drums606/Source" \
+  "$ROOT/dsp/drumkit_bridge.cc" \
+  -s STANDALONE_WASM=1 \
+  -s ALLOW_MEMORY_GROWTH=0 \
+  -s INITIAL_MEMORY=16777216 \
+  -s FILESYSTEM=0 \
+  -s EXPORTED_FUNCTIONS='["_su_drumkit_create","_su_drumkit_destroy","_su_drumkit_set_sample_rate","_su_drumkit_trigger_kick","_su_drumkit_trigger_snare","_su_drumkit_trigger_clap","_su_drumkit_trigger_hihat","_su_drumkit_trigger_openhat","_su_drumkit_trigger_lowtom","_su_drumkit_trigger_hightom","_su_drumkit_process","_su_drumkit_left","_su_drumkit_right"]' \
+  -Wl,--export-if-defined=_initialize \
+  -Wl,--export-if-defined=__wasm_call_ctors \
+  -Wl,--no-entry \
+  -o "$DRUMKIT_OUTPUT"
+echo "Built $DRUMKIT_OUTPUT (MIT 606-inspired synth drums)"

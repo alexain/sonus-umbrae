@@ -2894,7 +2894,7 @@ function renderSyntaxLayer(): void {
     const trimmedCode = codePart.trim();
     const indentation = codePart.length - codePart.trimStart().length;
     if (trimmedCode && disabledBlockIndent !== null && indentation <= disabledBlockIndent) disabledBlockIndent = null;
-    const disabledHeader = /^_(?:VOICE|FILTER|FX|CLOCK)\b/i.test(trimmedCode);
+    const disabledHeader = /^_(?:VOICE|FILTER|FX|CLOCK|DRUMKIT)\b/i.test(trimmedCode);
     if (disabledHeader) disabledBlockIndent = indentation;
     if (disabledHeader || (disabledBlockIndent !== null && (!trimmedCode || indentation > disabledBlockIndent))) {
       row.classList.add('syntax-disabled-object');
@@ -3289,7 +3289,7 @@ audioStartButton.addEventListener('click', () => {
 });
 
 type LiveDisableDescriptor = {
-  kind: 'voice' | 'filter' | 'fx' | 'clock';
+  kind: 'voice' | 'filter' | 'fx' | 'clock' | 'drumkit';
   name: string;
   disabled: boolean;
 };
@@ -3315,6 +3315,12 @@ function liveDisableDescriptors(source: string): LiveDisableDescriptor[] {
     const namedClock = trimmed.match(/^(_)?CLOCK\s+([A-Za-z_][A-Za-z0-9_]*)\b/i);
     if (namedClock && !/^set$/i.test(namedClock[2])) {
       descriptors.push({ kind: 'clock', name: namedClock[2], disabled: Boolean(namedClock[1]) });
+      continue;
+    }
+    const drumkit = trimmed.match(/^(_)?DRUMKIT\s+([A-Za-z_][A-Za-z0-9_]*)\s*:/i);
+    if (drumkit) {
+      descriptors.push({ kind: 'drumkit', name: drumkit[2], disabled: Boolean(drumkit[1]) });
+      scopes.push({ indent, kind: 'drumkit', name: drumkit[2] });
       continue;
     }
     const voice = trimmed.match(/^(_)?VOICE\s+([A-Za-z_][A-Za-z0-9_]*)\s*:/i);
@@ -3358,7 +3364,8 @@ function applyImmediateLiveDisableEdits(): void {
     if (descriptor.kind === 'clock' && descriptor.name === 'Clock' && previous && !descriptor.disabled) {
       runtime.restartMusicalEpoch();
     }
-    audioEngine.setLiveObjectDisabled(descriptor.kind, descriptor.name, descriptor.disabled);
+    if (descriptor.kind === 'drumkit') runtime.setLiveDrumkitDisabled(descriptor.name, descriptor.disabled);
+    else audioEngine.setLiveObjectDisabled(descriptor.kind, descriptor.name, descriptor.disabled);
   }
   liveDisableSnapshot = nextSnapshot;
 }

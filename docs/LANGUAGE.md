@@ -47,6 +47,7 @@ The current high-level language uses these main statement families:
 SET
 CLOCK
 VOICE
+DRUMKIT
 MOD
 FX
 PLAY
@@ -514,6 +515,38 @@ property value [with property modifiers] every time [on timing modifiers]
 
 `every` stays at the end of the property expression.
 
+<!-- SONUS-FRACTIONAL-BEATS -->
+
+Beat durations accept positive fractions wherever the normal Sonus time grammar
+is used:
+
+```text
+EVERY 1/2 beat
+EVERY 1/4 beat
+EVERY 3/2 beat
+```
+
+This applies to property-level `EVERY`, object-level `EVERY`, `SEQ`/`REGISTER`
+timing, `EVOLVE`, drum triggers, envelope triggers, and any other construct
+that delegates to the common `EVERY` parser.
+
+Fractions can also be stored as typed time values:
+
+```text
+SET eighth: 1/2 beat
+SET sixteenth: 1/4 beat
+```
+
+and then reused normally:
+
+```text
+hihat EVERY eighth
+```
+
+Fractional beat timing remains musical beat timing: it follows the selected
+master/named clock and transport rather than becoming a wall-clock `ms` timer.
+
+
 ### Euclidean every
 
 `EVERY EUCLIDEAN hits/steps` is a beat-synchronous timing mode. It distributes
@@ -596,6 +629,77 @@ VOICE lead:
 ```
 
 All jobs remain synchronized to the shared runtime scheduler.
+
+## DRUMKIT
+
+`DRUMKIT` is a stereo synthesized-drum object. `KIT` is mandatory, like `SOUND` for `VOICE`.
+
+```text
+DRUMKIT drums:
+    KIT sonus606
+    kick EVERY 1 beat
+    snare EVERY EUCLIDEAN 5/16
+    hihat WITH decay 25 EVERY 1/2 beat
+```
+
+`sonus606` is a built-in KIT value containing `kick`, `snare`, `clap`, `hihat`, `openhat`, `lowtom`, and `hightom` aliases. It uses the same KIT semantics as user-defined kits.
+
+Reusable custom kit:
+
+```text
+SET mykit: KIT [
+    drum.kick as bd WITH tune -8, level 70, decay 80
+    drum.snare as sd WITH snappy 40
+    drum.hihat as hh WITH decay 18
+]
+
+DRUMKIT drums:
+    KIT mykit
+    bd EVERY 1 beat
+    sd EVERY EUCLIDEAN 5/16
+    hh EVERY 1/2 beat
+```
+
+A kit can derive from another kit and override selected aliases:
+
+```text
+SET dark606: KIT sonus606 [
+    kick WITH tune -6, decay 85
+    snare WITH snappy 35
+]
+```
+
+The same SET may be local to a DRUMKIT and follows the existing local-SET scope:
+
+```text
+DRUMKIT drums:
+    SET local606: KIT sonus606 [
+        kick WITH tune -5
+        hihat WITH decay 15
+    ]
+    KIT local606
+    kick EVERY 1 beat
+    hihat EVERY 1/2 beat
+```
+
+One-off inline overrides are also valid:
+
+```text
+DRUMKIT drums:
+    KIT sonus606 [
+        kick WITH level 75, tune -3
+        hihat WITH decay 20
+    ]
+    kick EVERY 1 beat
+```
+
+Precedence is `drum model defaults < KIT defaults < derived/inline KIT overrides < WITH on the played alias`.
+
+Common `WITH` parameters are `level 0..100`, `pan -100..100`, `tune -24..24`, and `decay 0..100`. Model-specific parameters are `transient` for kick, `snappy`/`color` for snare, and `noise` for clap.
+
+The canonical order is `alias [WITH sound parameters] [EVERY timing]`. If `EVERY` is absent, the alias remains configured but silent. `EVERY` reuses the normal Sonus scheduler, including Euclidean timing and named/derived clocks.
+
+`DRUMKIT` is stereo, so `PLAY drums THROUGH MAIN` preserves left/right placement. The first backend is synthesized only; samples and explicit pattern syntax remain future extensions of the same abstraction.
 
 ## MOD
 

@@ -44,3 +44,11 @@ Utility library: https://github.com/pichenettes/stmlib
 The Sonus integration intentionally omits Marbles' T/gate section and internal musical quantizer. Sonus Umbrae supplies its own timing, routing, language, visualization and macro-control layer and exposes the integration under the independent model name `dices`.
 
 Mutable Instruments is a registered trademark. Sonus Umbrae is independent and is not affiliated with or endorsed by Mutable Instruments.
+
+## 606-Inspired-Synth-Drums
+Sonus Umbrae uses the header-only **606-Inspired-Synth-Drums** DSP by Matthew Fecher / AudioKit Pro for the experimental `sonus606` synthesis backend.
+
+Upstream: https://github.com/analogcode/606-Inspired-Synth-Drums
+License: MIT
+
+Sonus supplies its own WASM bridge, stereo mixing, scheduling, language and visualization layers.
