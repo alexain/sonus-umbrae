@@ -900,7 +900,7 @@ function notify(text: string): void {
 function normalizeLanguageCommandCase(): void {
   const normalized = editor.value
     .replace(
-      /^(\s*)(use|voice|fx|filter|seq|register|play|set|clock|main)(?=\s|$)/gim,
+      /^(\s*)(use|voice|fx|filter|seq|register|out|set|clock|main)(?=\s|$)/gim,
       (_match, indentation: string, commandName: string) => `${indentation}${commandName.toUpperCase()}`,
     )
     .replace(
@@ -916,18 +916,7 @@ function normalizeLanguageCommandCase(): void {
       (_match, indentation: string) => `${indentation}model`,
     )
     .replace(
-      /^(\s*PLAY\s+[A-Za-z_]\w*(?:\.(?:out|aux))?\s+through\s+)main(?:\.([lr]))?/gim,
-      (_match, prefix: string, channel: string | undefined) =>
-        `${prefix}MAIN${channel ? `.${channel.toUpperCase()}` : ''}`,
-    )
-    .replace(
-      /^(\s*PLAY\b.*)$/gim,
-      (line: string) => line
-        .replace(/\bmain\b/gi, 'MAIN')
-        .replace(/\.([lr])\b/gi, (_match, channel: string) => `.${channel.toUpperCase()}`),
-    )
-    .replace(
-      /^(\s*(?:through|then)\b.*)$/gim,
+      /^(\s*OUT\b.*)$/gim,
       (line: string) => line
         .replace(/\bmain\b/gi, 'MAIN')
         .replace(/\.([lr])\b/gi, (_match, channel: string) => `.${channel.toUpperCase()}`),
@@ -2530,7 +2519,7 @@ function statementLabels(source: string): string[] {
   for (let index = 0; index < lines.length; index += 1) {
     const trimmed = lines[index].trim();
     if (!trimmed || trimmed.startsWith('//')) continue;
-    if (/^_?(VOICE|FX|FILTER|MOD|SEQ|SET|CLOCK|PLAY)\b/i.test(trimmed)) {
+    if (/^_?(VOICE|FX|FILTER|MOD|SEQ|SET|CLOCK|OUT)\b/i.test(trimmed)) {
       statement += 1;
       labels[index] = String(statement);
     }
@@ -3492,8 +3481,6 @@ editor.addEventListener('keydown', (event) => {
     let indentation = currentIndent;
     if (!trimmed) indentation = currentIndent.length >= 4 ? currentIndent.slice(0, -4) : '';
     else if (/^_?(VOICE|FX|FILTER|MOD|SEQ|CLOCK)\b.*:\s*$/i.test(trimmed)) indentation = `${currentIndent}    `;
-    else if (/^PLAY\b/i.test(trimmed) && !/\bthrough\b/i.test(trimmed)) indentation = `${currentIndent}    `;
-    else if (currentIndent.length > 0 && /^(through|then)\b/i.test(trimmed)) indentation = currentIndent;
 
     editor.setRangeText(`\n${indentation}`, start, end, 'end');
 

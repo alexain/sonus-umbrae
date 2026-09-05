@@ -2211,7 +2211,12 @@ export class SonusRuntime {
             : 'signal';
 
         const addRoute = (source: string, target: string): void => {
-          routes.set(`${source}->${target}`, { source, target, amount, kind });
+          const key = `${source}->${target}`;
+          if (routes.has(key)) {
+            diagnostics.push({ line: lineNumber, message: `duplicate audio route: ${source} -> ${target}` });
+            return;
+          }
+          routes.set(key, { source, target, amount, kind });
         };
 
         const sourceIsStereoShorthand =
