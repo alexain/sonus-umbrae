@@ -6,13 +6,16 @@ VENDOR="$ROOT/vendor/eurorack"
 SUPERPARASITES="$ROOT/vendor/superparasites"
 CLOUDSEED="$ROOT/vendor/cloudseed-core"
 DAISYSP="$ROOT/vendor/daisysp"
+DSPARK="$ROOT/vendor/dspark"
 VOICE_OUTPUT="$ROOT/public/dsp/voice.wasm"
 SWELL_OUTPUT="$ROOT/public/dsp/swell.wasm"
+DICES_OUTPUT="$ROOT/public/dsp/dices.wasm"
 MIST_OUTPUT="$ROOT/public/dsp/mist.wasm"
 DAISY_FILTERS_OUTPUT="$ROOT/public/dsp/daisy-filters.wasm"
 SKY_OUTPUT="$ROOT/public/dsp/sky.wasm"
 MATTER_OUTPUT="$ROOT/public/dsp/matter.wasm"
 RESONATOR_OUTPUT="$ROOT/public/dsp/resonator.wasm"
+DELAY_OUTPUT="$ROOT/public/dsp/delay.wasm"
 
 if ! command -v em++ >/dev/null 2>&1; then
   echo "em++ not found. Install/activate Emscripten (emsdk) before building the DSP." >&2
@@ -127,6 +130,26 @@ em++ \
 echo "Built $SWELL_OUTPUT"
 
 
+em++ \
+  -std=c++17 \
+  -O3 \
+  -DTEST \
+  -I"$VENDOR" \
+  "$ROOT/dsp/dices_bridge.cc" \
+  "$VENDOR/marbles/random/lag_processor.cc" \
+  "$VENDOR/marbles/resources.cc" \
+  "$VENDOR/stmlib/dsp/units.cc" \
+  -s STANDALONE_WASM=1 \
+  -s ALLOW_MEMORY_GROWTH=0 \
+  -s INITIAL_MEMORY=16777216 \
+  -s FILESYSTEM=0 \
+  -s EXPORTED_FUNCTIONS='["_su_dices_create","_su_dices_destroy","_su_dices_set_sample_rate","_su_dices_set_rate","_su_dices_set_spread","_su_dices_set_bias","_su_dices_set_steps","_su_dices_set_deja","_su_dices_set_length","_su_dices_set_diversity","_su_dices_process","_su_dices_x1","_su_dices_x2","_su_dices_x3","_su_dices_y"]' \
+  -Wl,--no-entry \
+  -o "$DICES_OUTPUT"
+
+echo "Built $DICES_OUTPUT (Marbles random-voltage core)"
+
+
 SUPERPARASITES_DSP=()
 while IFS= read -r source; do
   SUPERPARASITES_DSP+=("$source")
@@ -181,6 +204,25 @@ em++ \
   -o "$SKY_OUTPUT"
 
 echo "Built $SKY_OUTPUT (Ghost Note Audio CloudSeedCore backend)"
+
+
+echo "Building Sonus multi-line delay (DSPark forward core + Sonus reverse windows)..."
+em++ \
+  -std=c++20 \
+  -O3 \
+  -DNDEBUG \
+  -DDSPARK_NO_FILE_IO=1 \
+  -I"$DSPARK" \
+  "$ROOT/dsp/delay_bridge.cc" \
+  -s STANDALONE_WASM=1 \
+  -s ALLOW_MEMORY_GROWTH=0 \
+  -s INITIAL_MEMORY=67108864 \
+  -s FILESYSTEM=0 \
+  -s EXPORTED_FUNCTIONS='["_su_delay_create","_su_delay_destroy","_su_delay_set_sample_rate","_su_delay_set_lines","_su_delay_set_time_ms","_su_delay_set_spread","_su_delay_set_spread_loose","_su_delay_set_feedback","_su_delay_set_reverse","_su_delay_set_pitch_probability","_su_delay_set_pitch_shift_count","_su_delay_set_pitch_shift_value","_su_delay_set_tape","_su_delay_set_diffusion","_su_delay_set_mix","_su_delay_set_pingpong","_su_delay_in_l","_su_delay_in_r","_su_delay_out_l","_su_delay_out_r","_su_delay_process"]' \
+  -Wl,--no-entry \
+  -o "$DELAY_OUTPUT"
+
+echo "Built $DELAY_OUTPUT (DSPark + Sonus reverse/multiline layer)"
 
 echo "Building DaisySP filter module (SVF)..."
 em++ \

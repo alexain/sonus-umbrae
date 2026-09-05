@@ -61,3 +61,7 @@ TypeScript, Vite and their transitive npm dependencies retain their own licenses
 ## Fonts
 
 The UI may prefer locally installed fonts such as Departure Mono. Font binaries are not distributed by this repository.
+
+## DSPark
+
+DSPark is licensed under the MIT License. Copyright (c) Cristian Moresi. See the upstream `vendor/dspark/LICENSE` after running `npm run dsp:setup` for the complete license text retained with the fetched source.

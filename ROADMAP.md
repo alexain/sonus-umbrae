@@ -402,3 +402,11 @@ The language now reserves a single top-of-file `USE` directive for optional live
 The 0.2.x environment now treats `Esc` as a compact live-performance menu and `>` as the explicit command prompt. Configuration navigation is keyboard-first and includes browser-supported audio-output selection, requested Web Audio sample rate, effective rate/latency reporting, and a confirmed audio-engine restart lifecycle for structural audio changes. Hardware bit depth is intentionally not reported because Web Audio does not expose it reliably.
 
 - CONFIG audio settings now include output device, requested sample rate and LATENCY MODE (`INTERACTIVE`, `BALANCED`, `PLAYBACK`), with effective latency readout and restart confirmation.
+
+- [x] Euclidean `EVERY` timing (`hits/steps`, clock selection, rotation, chance/loose composition).
+
+- [x] `REGISTER` object with `model shift`, stateful hot reload, multi-stage pitch outputs, and `write every ...` timing.
+
+- [x] Creative multi-line WASM delay: DSPark forward core, true reverse-window playback, probabilistic non-retroactive reverse capture, spread, feedback, tape colour, diffusion, and live parameter policies.
+
+- [x] Dices random modulator: Marbles-derived X1/X2/X3/Y core with spread, bias, steps, deja, length and diversity.

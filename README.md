@@ -43,3 +43,19 @@ The live environment includes dedicated Configuration, Help, Scheme, and About s
 
 
 The configuration screen can select the browser audio output when supported, request a sample rate, choose a Web Audio latency mode, and display the effective sample rate and reported latency. Audio-structural changes restart the audio engine after confirmation.
+
+
+### Euclidean timing
+
+Any `EVERY`-driven change can use clock-synchronous Euclidean timing, for example `EVERY EUCLIDEAN 5/16 WITH ROTATE 2`. `CLOCK`, `CHANCE`, and `LOOSE` remain composable timing modifiers.
+
+
+### Registers
+
+`REGISTER` provides stateful pitch storage. `model shift` consumes a `SEQ` source on `write every ...` and exposes stages such as `canon.1`, `canon.2`, etc. Life pools can be consumed with readers such as `with random` or `with walk`.
+
+### Creative delay
+
+`FX ... model delay` is a WASM creative multi-line delay. It supports 1..8 lines, musical or absolute delay times, stereo/time spread, feedback, probabilistic true reverse capture, tape-coloured feedback, diffusion, and wet/dry mix. Reverse decisions apply only to newly captured windows and remain attached to those tails through feedback.
+
+Delay `spread` can be loosened without exposing per-line timing: `spread 60 with loose 40`. `loose 0` is regular but unquantized; the default is `25` for more independent line spacing.

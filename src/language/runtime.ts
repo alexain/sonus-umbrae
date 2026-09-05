@@ -1,5 +1,26 @@
 import { AudioEngine, type AudioProgram, type SignalKind } from '../audio/engine';
 import { evaluateExpression, ExpressionError, type ScalarValue } from './expression';
+import { RuntimeScheduler } from './runtime/scheduler';
+import {
+  createShiftRegister,
+  readShiftRegister,
+  resizeShiftRegister,
+  writeShiftRegister,
+} from './runtime/register/shift';
+import {
+  capLifeDensity,
+  evolveLife,
+  initializeLifeCells,
+  type LifeVariant,
+} from './runtime/seq/life';
+import {
+  advanceTuringRegister,
+  initializeTuringRegister,
+  turingBits,
+  turingFrequency,
+  turingMask,
+} from './runtime/seq/turing';
+
 
 
 const RESERVED_IDENTIFIERS = new Set([
@@ -207,6 +228,7 @@ interface VoiceDefinition {
 }
 
 interface SwellDefinition {
+  model: 'swell' | 'dices';
   frequency: number;
   slope: number;
   shape: number;
@@ -215,6 +237,12 @@ interface SwellDefinition {
   mode: number;
   outputMode: number;
   range: number;
+  spread: number;
+  bias: number;
+  steps: number;
+  deja: number;
+  length: number;
+  diversity: number;
   parameters: Map<string, string>;
 }
 
@@ -290,8 +318,6 @@ interface LanguageTuringDefinition {
   current: number;
 }
 
-type LifeVariant = 'conway' | 'highlife' | 'seeds' | 'day-night' | 'morley';
-
 interface LanguageLifeDefinition {
   model: 'life';
   variant: LifeVariant;
@@ -311,6 +337,20 @@ interface LanguageLifeReaderDefinition {
   mode: LifeReaderMode;
   amount: number;
   view: boolean;
+}
+
+interface LanguageRegisterDefinition {
+  model: 'shift';
+  size: number;
+  source: string;
+  mode: 'direct' | LifeReaderMode;
+  amount: number;
+}
+
+interface LanguageRegisterVoiceDefinition {
+  voice: string;
+  register: string;
+  stage: number;
 }
 
 interface LanguageCycleDefinition {
@@ -379,7 +419,7 @@ interface LanguageModMetadata {
 
 interface LanguageModSetDirective {
   internalName: string;
-  parameter: 'freq' | 'slope' | 'shape' | 'smooth' | 'shift' | 'output' | 'range';
+  parameter: 'model' | 'freq' | 'ratebeat' | 'slope' | 'shape' | 'smooth' | 'shift' | 'output' | 'range' | 'spread' | 'bias' | 'steps' | 'deja' | 'length' | 'diversity';
   value: string;
   line: number;
 }
@@ -387,6 +427,13 @@ interface LanguageModSetDirective {
 interface LanguageFxMetadata {
   name: string;
   modelId: string | null;
+}
+
+type LanguageDelayParameter = 'lines' | 'spread' | 'spreadloose' | 'reverse' | 'pitchprob' | 'pitchcount' | 'pitch0' | 'pitch1' | 'pitch2' | 'pitch3' | 'pitch4' | 'pitch5' | 'pitch6' | 'pitch7' | 'pitch8' | 'pitch9' | 'pitch10' | 'pitch11' | 'pitch12' | 'pitch13' | 'pitch14' | 'pitch15' | 'tape' | 'diffusion' | 'pingpong';
+interface LanguageDelayTimeDefinition { name: string; amount: number; unit: 'ms' | 'sec' | 'beat'; }
+interface LanguageDelayParamDefaultDefinition { name: string; parameter: LanguageDelayParameter; expression: string; line: number; }
+interface LanguageDelayParamCycleDefinition extends LanguageDelayParamDefaultDefinition {
+  amount: number; unit: 'ms' | 'sec' | 'beat'; chance: number; drift: boolean; loose: boolean; clockSource: string;
 }
 
 type LanguageFxParameter = 'position' | 'size' | 'pitch' | 'density' | 'texture' | 'mix' | 'spread' | 'feedback' | 'reverb';
@@ -506,187 +553,6 @@ interface LanguageInlineScalarDefinition {
   expression: string;
 }
 
-type RuntimeWallJob = {
-  key: string;
-  intervalMs: number;
-  nextAtMs: number;
-  callback: () => void;
-  intervalFactory?: () => number;
-};
-
-type RuntimeBeatJob = {
-  key: string;
-  sourceName: string;
-  everyBeats: number;
-  counter: number;
-  callback: () => void;
-  loose: boolean;
-};
-
-class RuntimeScheduler {
-  private wallJobs: RuntimeWallJob[] = [];
-  private beatJobs: RuntimeBeatJob[] = [];
-  private deferred: Array<{ dueAtMs: number; callback: () => void }> = [];
-  private epochMs = 0;
-  private timer: ReturnType<typeof setInterval> | null = null;
-  private clockUnsubscribes: Array<() => void> = [];
-  private preservedBeatPhase = new Map<string, { sourceName: string; everyBeats: number; counter: number }>();
-  private preservedWallPhase = new Map<string, { intervalMs: number; remainingMs: number }>();
-
-  constructor(private readonly audio: AudioEngine) {}
-
-  clear(options: { preservePhase?: boolean } = {}): void {
-    if (options.preservePhase) {
-      const elapsed = this.epochMs > 0 ? performance.now() - this.epochMs : 0;
-      this.preservedBeatPhase = new Map(
-        this.beatJobs.map((job) => [
-          job.key,
-          { sourceName: job.sourceName, everyBeats: job.everyBeats, counter: job.counter },
-        ]),
-      );
-      this.preservedWallPhase = new Map(
-        this.wallJobs.map((job) => [
-          job.key,
-          {
-            intervalMs: job.intervalMs,
-            remainingMs: Math.max(1, job.nextAtMs - elapsed),
-          },
-        ]),
-      );
-    } else {
-      this.preservedBeatPhase.clear();
-      this.preservedWallPhase.clear();
-    }
-
-    this.stop();
-    this.wallJobs = [];
-    this.beatJobs = [];
-    this.deferred = [];
-  }
-
-  addWallJob(
-    key: string,
-    intervalMs: number,
-    callback: () => void,
-    intervalFactory?: () => number,
-  ): void {
-    const preserved = this.preservedWallPhase.get(key);
-    const canRestore = preserved && Math.abs(preserved.intervalMs - intervalMs) < 0.001;
-    this.wallJobs.push({
-      key,
-      intervalMs,
-      nextAtMs: canRestore ? Math.min(intervalMs, preserved.remainingMs) : intervalMs,
-      callback,
-      intervalFactory,
-    });
-  }
-
-  addBeatJob(
-    key: string,
-    everyBeats: number,
-    callback: () => void,
-    loose = false,
-    sourceName = 'Clock',
-  ): void {
-    const preserved = this.preservedBeatPhase.get(key);
-    const canRestore = preserved
-      && preserved.sourceName === sourceName
-      && preserved.everyBeats === everyBeats;
-    this.beatJobs.push({
-      key,
-      sourceName,
-      everyBeats,
-      counter: canRestore ? Math.max(0, Math.min(everyBeats - 1, preserved.counter)) : 0,
-      callback,
-      loose,
-    });
-  }
-
-  start(): void {
-    this.stop();
-    this.epochMs = performance.now();
-
-    if (this.wallJobs.length > 0 || this.deferred.length > 0) {
-      this.timer = setInterval(() => this.tickWallClock(), 10);
-    }
-
-    const clockSources = new Set(this.beatJobs.map((job) => job.sourceName));
-    for (const sourceName of clockSources) {
-      this.clockUnsubscribes.push(
-        this.audio.subscribeClockTrigger(sourceName, () => this.tickBeat(sourceName)),
-      );
-    }
-  }
-
-  stop(): void {
-    if (this.timer !== null) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
-    for (const unsubscribe of this.clockUnsubscribes) unsubscribe();
-    this.clockUnsubscribes = [];
-    this.deferred = [];
-  }
-
-  resetBeatPhase(): void {
-    for (const job of this.beatJobs) job.counter = 0;
-    this.preservedBeatPhase.clear();
-    // Deferred callbacks are produced only by loose beat jobs. A fresh master
-    // clock epoch must not fire callbacks that belonged to the previous epoch.
-    this.deferred = [];
-  }
-
-  private tickWallClock(): void {
-    const elapsed = performance.now() - this.epochMs;
-
-    for (const job of this.wallJobs) {
-      if (elapsed < job.nextAtMs) continue;
-      job.callback();
-
-      const nextInterval = Math.max(1, job.intervalFactory?.() ?? job.intervalMs);
-      job.nextAtMs += nextInterval;
-
-      if (job.nextAtMs <= elapsed) {
-        const missed = Math.floor((elapsed - job.nextAtMs) / nextInterval) + 1;
-        job.nextAtMs += missed * nextInterval;
-      }
-    }
-
-    if (this.deferred.length > 0) {
-      const now = performance.now();
-      const ready = this.deferred.filter((entry) => entry.dueAtMs <= now);
-      this.deferred = this.deferred.filter((entry) => entry.dueAtMs > now);
-      for (const entry of ready) entry.callback();
-    }
-  }
-
-  private tickBeat(sourceName: string): void {
-    for (const job of this.beatJobs) {
-      if (job.sourceName !== sourceName) continue;
-      job.counter += 1;
-      if (job.counter < job.everyBeats) continue;
-      job.counter = 0;
-
-      if (!job.loose) {
-        job.callback();
-        continue;
-      }
-
-      const bpm = this.audio.getClockStatus().bpm;
-      const beatMs = bpm > 0 ? 60000 / bpm : 0;
-      this.deferred.push({
-        dueAtMs: performance.now() + beatMs * 0.08 * Math.random(),
-        callback: job.callback,
-      });
-
-      if (this.timer === null) {
-        this.timer = setInterval(() => this.tickWallClock(), 10);
-      }
-    }
-
-  }
-}
-
 export class SonusRuntime {
   private parameterViews: ParameterViewState[] = [];
   private variableViews: VariableViewState[] = [];
@@ -707,6 +573,8 @@ export class SonusRuntime {
   private lifeState = new Map<string, { size: number; cells: boolean[] }>();
   private lifeDefinitions = new Map<string, LanguageLifeDefinition>();
   private lifeReaderState = new Map<string, { seq: string; cell: number; direction: number }>();
+  private registerState = new Map<string, number[]>();
+  private registerReaderState = new Map<string, { seq: string; cell: number; direction: number }>();
   private voiceSequenceState = new Map<string, { cursor: number; walkCursor: number; direction: number; shuffleCursor: number }>();
   private whenEventState = new Map<string, number>();
   private randomState = 0x6d2b79f5;
@@ -791,22 +659,12 @@ export class SonusRuntime {
     for (const target of targets) {
       const seq = this.lifeDefinitions.get(target);
       if (!seq) continue;
-      const total = seq.size * seq.size;
-      let cells = Array.from({ length: total }, () => this.nextRandom() < seq.density / 100);
-
-      if (seq.maxDensity !== null) {
-        const maxAlive = Math.floor(total * (seq.maxDensity / 100));
-        const live = cells.map((alive, index) => alive ? index : -1).filter((index) => index >= 0);
-        for (let i = live.length - 1; i > 0; i -= 1) {
-          const j = Math.floor(this.nextRandom() * (i + 1));
-          [live[i], live[j]] = [live[j], live[i]];
-        }
-        for (let i = maxAlive; i < live.length; i += 1) cells[live[i]] = false;
-      }
-
-      if (!cells.some(Boolean) && total > 0 && seq.density > 0 && (seq.maxDensity === null || seq.maxDensity > 0)) {
-        cells[Math.floor(this.nextRandom() * total)] = true;
-      }
+      const cells = initializeLifeCells(
+        seq.size,
+        seq.density,
+        seq.maxDensity,
+        () => this.nextRandom(),
+      );
 
       seq.cells = [...cells];
       this.lifeState.set(target, { size: seq.size, cells: [...cells] });
@@ -888,6 +746,8 @@ export class SonusRuntime {
       this.lifeState.clear();
       this.lifeDefinitions.clear();
       this.lifeReaderState.clear();
+      this.registerState.clear();
+      this.registerReaderState.clear();
       this.voiceSequenceState.clear();
       this.whenEventState.clear();
       this.randomState = 0x6d2b79f5;
@@ -924,6 +784,9 @@ export class SonusRuntime {
     const languageLives = new Map<string, LanguageLifeDefinition>();
     const languageLifeReaders = new Map<string, LanguageLifeReaderDefinition>();
     const languageLifeEvolve = new Map<string, LanguageCycleDefinition>();
+    const languageRegisters = new Map<string, LanguageRegisterDefinition>();
+    const languageRegisterWrites = new Map<string, LanguageCycleDefinition>();
+    const languageRegisterVoices: LanguageRegisterVoiceDefinition[] = [];
     const languageTuringViews = new Set<string>();
     const languageTuringVoiceSources = new Map<string, string>();
     const languageCycles = new Map<string, LanguageCycleDefinition>();
@@ -939,6 +802,9 @@ export class SonusRuntime {
     const languageObjectEvery = new Map<string, LanguageObjectEveryDefinition>();
     const languageDriveEvery = new Map<string, LanguageObjectEveryDefinition>();
     const languageFxMeta = new Map<string, LanguageFxMetadata>();
+    const languageDelayTimes = new Map<string, LanguageDelayTimeDefinition>();
+    const languageDelayDefaults: LanguageDelayParamDefaultDefinition[] = [];
+    const languageDelayCycles: LanguageDelayParamCycleDefinition[] = [];
     const languageFxParameterCycles: LanguageFxParameterCycleDefinition[] = [];
     const languageFxParameterDefaults: LanguageFxParameterDefaultDefinition[] = [];
     const languageFxPitchSequences = new Map<string, LanguageFxPitchSequenceDefinition>();
@@ -948,6 +814,44 @@ export class SonusRuntime {
     const languageModSets: LanguageModSetDirective[] = [];
     let languageMasterClock: LanguageMasterClockDefinition | null = null;
     for (const { source: line, line: lineNumber } of lines) {
+      const registerDeclaration = parseLanguageRegisterDeclaration(line);
+      if (registerDeclaration) {
+        languageRegisters.set(registerDeclaration, { model: 'shift', size: 4, source: '', mode: 'direct', amount: 0 });
+        continue;
+      }
+      const registerModel = parseLanguageRegisterModel(line);
+      if (registerModel) {
+        const register = languageRegisters.get(registerModel.name);
+        if (register) register.model = 'shift';
+        continue;
+      }
+      const registerSize = parseLanguageRegisterSize(line);
+      if (registerSize) {
+        const register = languageRegisters.get(registerSize.name);
+        if (register) register.size = registerSize.size;
+        continue;
+      }
+      const registerSource = parseLanguageRegisterSource(line);
+      if (registerSource) {
+        const register = languageRegisters.get(registerSource.name);
+        if (register) {
+          register.source = registerSource.source;
+          register.mode = registerSource.mode;
+          register.amount = registerSource.amount;
+        }
+        continue;
+      }
+      const registerWrite = parseLanguageRegisterWrite(line);
+      if (registerWrite) {
+        languageRegisterWrites.set(registerWrite.name, registerWrite.timing);
+        continue;
+      }
+      const registerVoice = parseLanguageRegisterPitch(line);
+      if (registerVoice) {
+        languageRegisterVoices.push(registerVoice);
+        continue;
+      }
+
       const seqDeclaration = parseLanguageTuringDeclaration(line);
       if (seqDeclaration) {
         languageTurings.set(seqDeclaration, { model: 'turing', length: 8, change: 10, values: [], register: 1, current: 440 });
@@ -1018,6 +922,15 @@ export class SonusRuntime {
         });
         continue;
       }
+
+      const delayTime = parseLanguageDelayTime(line);
+      if (delayTime) { languageDelayTimes.set(delayTime.name, delayTime); continue; }
+      const delayLiteral = parseLanguageDelayParam(line, lineNumber);
+      if (delayLiteral) { languageDelayDefaults.push(delayLiteral); continue; }
+      const delayDefault = parseLanguageDelayParamDefault(line, lineNumber);
+      if (delayDefault) { languageDelayDefaults.push(delayDefault); continue; }
+      const delayCycle = parseLanguageDelayParamCycle(line, lineNumber);
+      if (delayCycle) { languageDelayCycles.push(delayCycle); continue; }
 
       const fxParameterCycle = parseLanguageFxParameterCycleDirective(line, lineNumber);
       if (fxParameterCycle) {
@@ -1356,6 +1269,7 @@ export class SonusRuntime {
           continue;
         }
         swells.set(name, {
+          model: 'swell',
           frequency: 0.25,
           slope: 50,
           shape: 50,
@@ -1364,6 +1278,12 @@ export class SonusRuntime {
           mode: 1,
           outputMode: 2,
           range: 0,
+          spread: 50,
+          bias: 50,
+          steps: 50,
+          deja: 0,
+          length: 8,
+          diversity: 50,
           parameters: new Map(),
         });
         results.push({ message: `${name} = Swell` });
@@ -1587,7 +1507,7 @@ export class SonusRuntime {
     // source order. All module declarations already exist, so references between
     // modules are still independent from declaration order.
     for (const { source: line, line: lineNumber } of lines) {
-      if (parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageSeqModel(line) || parseLanguageSeqSize(line) || parseLanguageLifeDensity(line) || parseLanguageLifeReader(line) || parseLanguageLifeEvolve(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageEnvelopeDirective(line, lineNumber) || parseLanguageFxMetadata(line) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
+      if (parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageSeqModel(line) || parseLanguageSeqSize(line) || parseLanguageLifeDensity(line) || parseLanguageLifeReader(line) || parseLanguageLifeEvolve(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageEnvelopeDirective(line, lineNumber) || parseLanguageFxMetadata(line) || parseLanguageDelayTime(line) || parseLanguageDelayParam(line, lineNumber) || parseLanguageDelayParamDefault(line, lineNumber) || parseLanguageDelayParamCycle(line, lineNumber) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
 
       const oscillatorDeclaration = parseOscillatorDeclaration(line);
       if (oscillatorDeclaration) {
@@ -2359,6 +2279,28 @@ export class SonusRuntime {
       }
 
       const parameter = directive.parameter;
+      if (parameter === 'model') {
+        const model = directive.value.toLowerCase();
+        if (model !== 'swell' && model !== 'dices') {
+          diagnostics.push({ line: directive.line, message: 'MOD model expects swell or dices' });
+          continue;
+        }
+        swell.model = model;
+        swell.parameters.set('MODEL', model.toUpperCase());
+        continue;
+      }
+
+      if (parameter === 'ratebeat') {
+        const beats = Number(directive.value);
+        if (!Number.isFinite(beats) || beats <= 0) {
+          diagnostics.push({ line: directive.line, message: 'MOD rate beat value must be greater than 0' });
+          continue;
+        }
+        swell.frequency = Math.max(0.001, clockBpm / 60 / beats);
+        swell.parameters.set('RATE', `${formatNumber(beats)} BEAT`);
+        continue;
+      }
+
       if (parameter === 'freq') {
         const value = Number(directive.value);
         if (!Number.isFinite(value) || value <= 0 || value > 10000) {
@@ -2378,6 +2320,28 @@ export class SonusRuntime {
         }
         swell[parameter] = value;
         swell.parameters.set(parameter.toUpperCase(), `${formatNumber(value)}%`);
+        continue;
+      }
+
+      if (parameter === 'spread' || parameter === 'bias' || parameter === 'steps' || parameter === 'deja' || parameter === 'diversity') {
+        const value = Number(directive.value);
+        if (!Number.isFinite(value) || value < 0 || value > 100) {
+          diagnostics.push({ line: directive.line, message: `MOD dices ${parameter} expects 0..100` });
+          continue;
+        }
+        swell[parameter] = value;
+        swell.parameters.set(parameter.toUpperCase(), `${formatNumber(value)}%`);
+        continue;
+      }
+
+      if (parameter === 'length') {
+        const value = Number(directive.value);
+        if (!Number.isInteger(value) || value < 1 || value > 16) {
+          diagnostics.push({ line: directive.line, message: 'MOD dices length expects 1..16' });
+          continue;
+        }
+        swell.length = value;
+        swell.parameters.set('LENGTH', `${value}`);
         continue;
       }
 
@@ -2597,11 +2561,15 @@ export class SonusRuntime {
     for (const name of moduleViews) {
       const ownerViews = embeddedViews.get(name) ?? [];
       if (swells.has(name)) {
+        const mod = swells.get(name)!;
+        const signals = mod.model === 'dices'
+          ? [`${name}.x1`, `${name}.x2`, `${name}.x3`, `${name}.y`]
+          : [1, 2, 3, 4].map((port) => `${name}.out${port}`);
         ownerViews.push({
-          signal: `${name}.out1`,
-          signals: [1, 2, 3, 4].map((port) => `${name}.out${port}`),
+          signal: signals[0],
+          signals,
           signalKind: 'signal',
-          port: 'OUT 1-4',
+          port: mod.model === 'dices' ? 'X1 / X2 / X3 / Y' : 'OUT 1-4',
         });
       } else if (voices.has(name)) {
         ownerViews.push({
@@ -2713,7 +2681,7 @@ export class SonusRuntime {
         const displayName = mod ? (mod.ownerVoice ? `${mod.ownerVoice}.${mod.displayName}` : mod.displayName) : name;
         return {
           id: name,
-          label: `${displayName.toUpperCase()} : ${mod ? 'MOD' : 'SWELL'}`,
+          label: `${displayName.toUpperCase()} : ${mod ? `MOD ${definition.model.toUpperCase()}` : 'SWELL'}`,
           kind: 'module' as const,
           parameters: [...definition.parameters.entries()].map(([parameterName, value]) => ({ name: parameterName, value })),
           views: embeddedViews.get(name),
@@ -2790,6 +2758,41 @@ export class SonusRuntime {
 
     this.scheme = { nodes: schemeNodes, connections: schemeConnections };
 
+    const delaySettings = new Map<string, { lines: number; timeMs: number; spread: number; spreadLoose: number; reverse: number; pitchProbability: number; pitchShifts: number[]; tape: number; diffusion: number; pingpong: number }>();
+    for (const [name, meta] of languageFxMeta) {
+      if (meta.modelId !== 'delay') continue;
+      delaySettings.set(name, { lines: 4, timeMs: 250, spread: 35, spreadLoose: 25, reverse: 0, pitchProbability: 0, pitchShifts: [0], tape: 35, diffusion: 12, pingpong: 0 });
+    }
+    for (const [name, timing] of languageDelayTimes) {
+      const setting = delaySettings.get(name); if (!setting) continue;
+      setting.timeMs = timing.unit === 'ms' ? timing.amount : timing.unit === 'sec' ? timing.amount * 1000 : timing.amount * (60000 / Math.max(1, clockBpm));
+    }
+    for (const definition of languageDelayDefaults) {
+      const setting = delaySettings.get(definition.name); if (!setting) continue;
+      const value = evalNumber(definition.expression, definition.line, `delay ${definition.parameter}`);
+      if (value === undefined) continue;
+      if (definition.parameter === 'lines') {
+        setting.lines = Math.max(1, Math.min(8, Math.round(value)));
+      } else if (definition.parameter === 'pitchprob') {
+        setting.pitchProbability = Math.max(0, Math.min(100, value));
+      } else if (definition.parameter === 'pitchcount') {
+        const count = Math.max(1, Math.min(16, Math.round(value)));
+        setting.pitchShifts = Array.from({ length: count }, (_, index) => setting.pitchShifts[index] ?? 0);
+      } else if (/^pitch\d+$/.test(definition.parameter)) {
+        const index = Number(definition.parameter.slice(5));
+        if (index < setting.pitchShifts.length) setting.pitchShifts[index] = Math.max(-12, Math.min(12, value));
+      } else if (value >= 0 && value <= 100) {
+        if (definition.parameter === 'spreadloose') setting.spreadLoose = value;
+        else if (
+          definition.parameter === 'spread' ||
+          definition.parameter === 'reverse' ||
+          definition.parameter === 'tape' ||
+          definition.parameter === 'diffusion' ||
+          definition.parameter === 'pingpong'
+        ) setting[definition.parameter] = value;
+      }
+    }
+
     const program: AudioProgram = {
       clock: { bpm: clockBpm, jitter: masterJitter, drift: masterTimingDrift },
       mainLevel,
@@ -2855,19 +2858,33 @@ export class SonusRuntime {
           timbre: definition.timbre,
           morph: definition.morph,
         })),
-      swells: [...swells.entries()].map(([name, definition]) => ({
-        name,
-        frequency: definition.frequency,
-        slope: definition.slope,
-        shape: definition.shape,
-        smooth: definition.smooth,
-        shift: definition.shift,
-        mode: definition.mode,
-        outputMode: definition.outputMode,
-        range: definition.range,
-      })),
+      swells: [...swells.entries()]
+        .filter(([, definition]) => definition.model === 'swell')
+        .map(([name, definition]) => ({
+          name,
+          frequency: definition.frequency,
+          slope: definition.slope,
+          shape: definition.shape,
+          smooth: definition.smooth,
+          shift: definition.shift,
+          mode: definition.mode,
+          outputMode: definition.outputMode,
+          range: definition.range,
+        })),
+      dices: [...swells.entries()]
+        .filter(([, definition]) => definition.model === 'dices')
+        .map(([name, definition]) => ({
+          name,
+          frequency: definition.frequency,
+          spread: definition.spread,
+          bias: definition.bias,
+          steps: definition.steps,
+          deja: definition.deja,
+          length: definition.length,
+          diversity: definition.diversity,
+        })),
       mists: [...mists.entries()]
-        .filter(([name]) => languageFxMeta.get(name)?.modelId !== 'sky')
+        .filter(([name]) => !['sky','delay'].includes(languageFxMeta.get(name)?.modelId ?? ''))
         .map(([name, definition]) => ({
           name,
           bypassed: definition.disabled,
@@ -2899,6 +2916,14 @@ export class SonusRuntime {
           mix: definition.mix,
           freeze: definition.freeze,
         })),
+      delays: [...mists.entries()]
+        .filter(([name]) => languageFxMeta.get(name)?.modelId === 'delay')
+        .map(([name, definition]) => {
+          const setting = delaySettings.get(name) ?? { lines: 4, timeMs: 250, spread: 35, spreadLoose: 25, reverse: 0, pitchProbability: 0, pitchShifts: [0], tape: 35, diffusion: 12, pingpong: 0 };
+          return { name, bypassed: definition.disabled, lines: setting.lines, timeMs: setting.timeMs, spread: setting.spread,
+            spreadLoose: setting.spreadLoose, feedback: definition.feedback, reverse: setting.reverse, pitchProbability: setting.pitchProbability, pitchShifts: setting.pitchShifts,
+            tape: setting.tape, diffusion: setting.diffusion, pingpong: setting.pingpong, mix: definition.mix };
+        }),
       filters: [...filters.entries()].map(([name, definition]) => ({
         name,
         bypassed: definition.disabled,
@@ -2931,7 +2956,12 @@ export class SonusRuntime {
         }
         for (const name of moduleViews) {
           if (swells.has(name)) {
-            for (let port = 1; port <= 4; port += 1) monitors.set(`${name}.out${port}`, 'signal');
+            const mod = swells.get(name)!;
+            if (mod.model === 'dices') {
+              for (const port of ['x1', 'x2', 'x3', 'y']) monitors.set(`${name}.${port}`, 'signal');
+            } else {
+              for (let port = 1; port <= 4; port += 1) monitors.set(`${name}.out${port}`, 'signal');
+            }
           } else if (voices.has(name)) {
             monitors.set(`${name}.out`, 'signal');
             monitors.set(`${name}.aux`, 'signal');
@@ -3027,16 +3057,10 @@ export class SonusRuntime {
       for (const [name, seq] of languageTurings) {
         const previous = this.turingState.get(name);
         if (!previous) continue;
-        const mask = seq.length >= 32 ? 0xffffffff : (2 ** seq.length - 1);
+        const mask = turingMask(seq.length);
         seq.register = previous.register >>> 0;
         if (seq.length < 32) seq.register &= mask;
-        if (seq.values.length > 0) {
-          const normalized = seq.register / Math.max(1, mask);
-          const index = Math.min(seq.values.length - 1, Math.floor(normalized * seq.values.length));
-          seq.current = seq.values[index];
-        } else {
-          seq.current = previous.current;
-        }
+        seq.current = turingFrequency(seq.register, seq.length, seq.values, previous.current);
       }
     }
 
@@ -3047,30 +3071,11 @@ export class SonusRuntime {
       }
     }
 
-    const capLifeDensity = (cells: boolean[], maxDensity: number | null): boolean[] => {
-      if (maxDensity === null) return cells;
-      const maxAlive = Math.floor(cells.length * (maxDensity / 100));
-      const live = cells.map((alive, index) => alive ? index : -1).filter((index) => index >= 0);
-      if (live.length <= maxAlive) return cells;
-      const next = [...cells];
-      for (let i = live.length - 1; i > 0; i -= 1) {
-        const j = Math.floor(random() * (i + 1));
-        [live[i], live[j]] = [live[j], live[i]];
+    for (const seq of languageLives.values()) {
+      if (seq.cells.length !== seq.size * seq.size) {
+        seq.cells = initializeLifeCells(seq.size, seq.density, seq.maxDensity, random);
       }
-      for (let i = maxAlive; i < live.length; i += 1) next[live[i]] = false;
-      return next;
-    };
-
-    const initializeLife = (seq: LanguageLifeDefinition): void => {
-      const total = seq.size * seq.size;
-      seq.cells = Array.from({ length: total }, () => random() < seq.density / 100);
-      seq.cells = capLifeDensity(seq.cells, seq.maxDensity);
-      if (!seq.cells.some(Boolean) && total > 0 && seq.density > 0 && (seq.maxDensity === null || seq.maxDensity > 0)) {
-        seq.cells[Math.floor(random() * total)] = true;
-      }
-    };
-
-    for (const seq of languageLives.values()) if (seq.cells.length !== seq.size * seq.size) initializeLife(seq);
+    }
 
     const lifeViews = new Map<string, LifeViewState>();
     for (const name of languageTuringViews) {
@@ -3080,21 +3085,13 @@ export class SonusRuntime {
     }
 
     const turingViews = new Map<string, TuringViewState>();
-    const turingBits = (value: number, length: number): number[] =>
-      Array.from({ length }, (_, index) => (value >>> index) & 1);
     for (const name of languageTuringViews) {
       const seq = languageTurings.get(name);
       if (!seq) continue;
-      const mask = seq.length >= 32 ? 0xffffffff : (2 ** seq.length - 1);
       if (!hotReload || !this.turingState.has(name)) {
-        seq.register = (Math.floor(random() * Math.max(1, mask)) || 1) >>> 0;
-        if (seq.length < 32) seq.register &= mask;
+        seq.register = initializeTuringRegister(seq.length, random);
       }
-      if (seq.values.length > 0) {
-        const normalized = seq.register / Math.max(1, mask);
-        const index = Math.min(seq.values.length - 1, Math.floor(normalized * seq.values.length));
-        seq.current = seq.values[index];
-      }
+      seq.current = turingFrequency(seq.register, seq.length, seq.values, seq.current);
       turingViews.set(name, {
         name,
         length: seq.length,
@@ -3117,6 +3114,106 @@ export class SonusRuntime {
     if (applyAudio) {
       this.stopSchedulers(hotReload);
       this.audio.applyProgram(program, { hotReload });
+
+    for (const [name, definition] of languageRegisters) {
+      const previous = hotReload ? this.registerState.get(name) : undefined;
+      const values = previous
+        ? resizeShiftRegister(previous, definition.size)
+        : createShiftRegister(definition.size);
+      this.registerState.set(name, values);
+    }
+
+    const applyRegisterOutputs = (registerName: string): void => {
+      const values = this.registerState.get(registerName);
+      if (!values) return;
+      for (const binding of languageRegisterVoices) {
+        if (binding.register !== registerName) continue;
+        const frequency = readShiftRegister(values, binding.stage);
+        const voice = voices.get(binding.voice);
+        if (!voice) continue;
+        voice.frequency = frequency;
+        this.audio.setVoiceParameter(binding.voice, 'freq', frequency);
+        updateInlinePiano('voice', binding.voice, frequency);
+      }
+    };
+
+    for (const binding of languageRegisterVoices) applyRegisterOutputs(binding.register);
+
+    const nextRegisterLifeFrequency = (
+      registerName: string,
+      sourceName: string,
+      mode: LifeReaderMode,
+      amount: number,
+      fallback: number,
+    ): number => {
+      const life = languageLives.get(sourceName);
+      if (!life || life.values.length === 0 || life.cells.length === 0) return fallback;
+      const live = life.cells.map((alive, index) => alive ? index : -1).filter((index) => index >= 0);
+      if (live.length === 0) return fallback;
+
+      const previous = this.registerReaderState.get(registerName);
+      let cell = previous?.cell ?? live[0];
+      let direction = previous?.direction ?? 1;
+      const nextAfter = (origin: number, dir: number): number => {
+        if (dir >= 0) return live.find((candidate) => candidate > origin) ?? live[0];
+        for (let i = live.length - 1; i >= 0; i -= 1) if (live[i] < origin) return live[i];
+        return live[live.length - 1];
+      };
+
+      if (mode === 'random') cell = live[Math.floor(random() * live.length)];
+      else if (mode === 'first') cell = live[0];
+      else if (mode === 'last') cell = live[live.length - 1];
+      else if (mode === 'reverse') cell = nextAfter(cell, -1);
+      else if (mode === 'pendulum') {
+        const candidate = nextAfter(cell, direction);
+        const wrapped = direction > 0 ? candidate <= cell : candidate >= cell;
+        if (wrapped) direction *= -1;
+        cell = nextAfter(cell, direction);
+      } else if (mode === 'walk') {
+        direction = random() < 0.5 ? -1 : 1;
+        const steps = Math.max(1, Math.round(amount || 1));
+        for (let i = 0; i < steps; i += 1) cell = nextAfter(cell, direction);
+      } else {
+        cell = nextAfter(cell, 1);
+      }
+
+      this.registerReaderState.set(registerName, { seq: sourceName, cell, direction });
+      const valueIndex = ((cell % life.values.length) + life.values.length) % life.values.length;
+      return life.values[valueIndex] ?? fallback;
+    };
+
+    for (const [name, definition] of languageRegisters) {
+      const timing = languageRegisterWrites.get(name);
+      if (!timing) continue;
+
+      const write = (): void => {
+        if (timing.chance < 100 && random() * 100 >= timing.chance) return;
+        const values = this.registerState.get(name) ?? createShiftRegister(definition.size);
+        const fallback = values[0] ?? 440;
+
+        let next = fallback;
+        const turing = languageTurings.get(definition.source);
+        if (turing) {
+          next = turing.current;
+        } else {
+          const life = languageLives.get(definition.source);
+          if (life) {
+            const mode = definition.mode === 'direct' ? 'order' : definition.mode;
+            next = nextRegisterLifeFrequency(name, definition.source, mode, definition.amount, fallback);
+          }
+        }
+
+        this.registerState.set(name, writeShiftRegister(values, next, definition.size));
+        applyRegisterOutputs(name);
+      };
+
+      if (timing.unit === 'beat') {
+        this.scheduler.addBeatJob(`register:${name}`, timing.amount, write, timing.loose, timing.clockSource);
+      } else {
+        const baseMs = timing.unit === 'sec' ? timing.amount * 1000 : timing.amount;
+        this.scheduler.addWallJob(`register:${name}`, baseMs, write);
+      }
+    }
 
     const envelopeTriggers = new Map<string, Array<() => void>>();
     const applyEnvelopeValue = (definition: LanguageEnvelopeDefinition, value: number): void => {
@@ -3430,6 +3527,35 @@ export class SonusRuntime {
       return value >= 0 && value <= 100 ? value : null;
     };
 
+    for (const cycle of languageDelayCycles) {
+      let driftRatio = 1;
+      const update = (): void => {
+        if (cycle.chance < 100 && random() * 100 >= cycle.chance) return;
+        const value = evalNumber(cycle.expression, cycle.line, `delay ${cycle.parameter}`);
+        if (value === undefined) return;
+        if (cycle.parameter === 'lines') {
+          this.audio.setDelayParameter(cycle.name, 'lines', Math.max(1, Math.min(8, Math.round(value))));
+        } else if (value >= 0 && value <= 100) {
+          if (cycle.parameter === 'spreadloose') this.audio.setDelaySpreadLoose(cycle.name, value);
+          else if (
+            cycle.parameter === 'spread' ||
+            cycle.parameter === 'reverse' ||
+            cycle.parameter === 'tape' ||
+            cycle.parameter === 'diffusion' ||
+            cycle.parameter === 'pingpong'
+          ) this.audio.setDelayParameter(cycle.name, cycle.parameter, value);
+        }
+      };
+      if (cycle.unit === 'beat') this.scheduler.addBeatJob(`delay-param:${cycle.name}:${cycle.parameter}`, cycle.amount, update, cycle.loose, cycle.clockSource);
+      else {
+        const baseMs = cycle.unit === 'sec' ? cycle.amount * 1000 : cycle.amount;
+        this.scheduler.addWallJob(`delay-param:${cycle.name}:${cycle.parameter}`, baseMs, update, () => {
+          if (cycle.drift) { driftRatio += (random() - 0.5) * 0.06; driftRatio = Math.min(1.2, Math.max(0.8, driftRatio)); } else driftRatio = 1;
+          return baseMs * driftRatio * (cycle.loose ? 0.94 + random() * 0.12 : 1);
+        });
+      }
+    }
+
     for (const cycle of languageFxParameterCycles) {
       const fx = mists.get(cycle.fx);
       if (!fx) continue;
@@ -3685,36 +3811,6 @@ export class SonusRuntime {
       });
     }
 
-    const LIFE_RULES: Record<LifeVariant, { birth: ReadonlySet<number>; survive: ReadonlySet<number> }> = {
-      conway: { birth: new Set([3]), survive: new Set([2, 3]) },
-      highlife: { birth: new Set([3, 6]), survive: new Set([2, 3]) },
-      seeds: { birth: new Set([2]), survive: new Set() },
-      'day-night': { birth: new Set([3, 6, 7, 8]), survive: new Set([3, 4, 6, 7, 8]) },
-      morley: { birth: new Set([3, 6, 8]), survive: new Set([2, 4, 5]) },
-    };
-
-    const evolveLife = (cells: boolean[], size: number, variant: LifeVariant): boolean[] => {
-      const rule = LIFE_RULES[variant];
-      const next = new Array<boolean>(cells.length).fill(false);
-      const at = (x: number, y: number): boolean => {
-        if (x < 0 || x >= size || y < 0 || y >= size) return false;
-        return cells[y * size + x] ?? false;
-      };
-      for (let y = 0; y < size; y += 1) {
-        for (let x = 0; x < size; x += 1) {
-          let neighbors = 0;
-          for (let dy = -1; dy <= 1; dy += 1) {
-            for (let dx = -1; dx <= 1; dx += 1) {
-              if ((dx !== 0 || dy !== 0) && at(x + dx, y + dy)) neighbors += 1;
-            }
-          }
-          const alive = at(x, y);
-          next[y * size + x] = alive ? rule.survive.has(neighbors) : rule.birth.has(neighbors);
-        }
-      }
-      return next;
-    };
-
     this.lifeDefinitions = new Map(languageLives);
 
     for (const [name, seq] of languageLives) {
@@ -3723,8 +3819,8 @@ export class SonusRuntime {
       if (!timing) continue;
       const advance = (): void => {
         if (timing.chance < 100 && random() * 100 >= timing.chance) return;
-        seq.cells = capLifeDensity(evolveLife(seq.cells, seq.size, seq.variant), seq.maxDensity);
-        if (seq.respawn && !seq.cells.some(Boolean)) initializeLife(seq);
+        seq.cells = capLifeDensity(evolveLife(seq.cells, seq.size, seq.variant), seq.maxDensity, random);
+        if (seq.respawn && !seq.cells.some(Boolean)) seq.cells = initializeLifeCells(seq.size, seq.density, seq.maxDensity, random);
         this.lifeState.set(name, { size: seq.size, cells: [...seq.cells] });
         const view = lifeViews.get(name);
         if (view) { view.cells = [...seq.cells]; view.revision += 1; }
@@ -3740,17 +3836,11 @@ export class SonusRuntime {
       this.turingState.set(name, { register: seq.register, current: seq.current, length: seq.length });
       const timing = languageObjectEvery.get(name);
       if (!timing || seq.values.length === 0) continue;
-      const mask = seq.length >= 32 ? 0xffffffff : (2 ** seq.length - 1);
-      if (!turingViews.has(name)) seq.register = (Math.floor(random() * Math.max(1, mask)) || 1) >>> 0;
+      if (!turingViews.has(name)) seq.register = initializeTuringRegister(seq.length, random);
       const advance = (): void => {
         if (timing.chance < 100 && random() * 100 >= timing.chance) return;
-        const feedbackBit = seq.register & 1;
-        const nextBit = random() * 100 < seq.change ? (random() < 0.5 ? 0 : 1) : feedbackBit;
-        seq.register = ((seq.register >>> 1) | (nextBit << (seq.length - 1))) >>> 0;
-        if (seq.length < 32) seq.register &= mask;
-        const normalized = seq.register / Math.max(1, mask);
-        const index = Math.min(seq.values.length - 1, Math.floor(normalized * seq.values.length));
-        seq.current = seq.values[index];
+        seq.register = advanceTuringRegister(seq.register, seq.length, seq.change, random);
+        seq.current = turingFrequency(seq.register, seq.length, seq.values, seq.current);
         this.turingState.set(name, { register: seq.register, current: seq.current, length: seq.length });
         const view = turingViews.get(name);
         if (view) {
@@ -4188,6 +4278,53 @@ function matchesCycle(condition: CycleCondition | null, eventIndex: number): boo
   return ((eventIndex - 1) % condition.length!) + 1 === condition.position;
 }
 
+function parseLanguageRegisterDeclaration(line: string): string | null {
+  return line.match(/^__register\("([A-Za-z_]\w*)"\)$/)?.[1] ?? null;
+}
+
+function parseLanguageRegisterModel(line: string): { name: string; model: 'shift' } | null {
+  const match = line.match(/^__registermodel\("([A-Za-z_]\w*)","shift"\)$/);
+  return match ? { name: match[1], model: 'shift' } : null;
+}
+
+function parseLanguageRegisterSize(line: string): { name: string; size: number } | null {
+  const match = line.match(/^__registersize\("([A-Za-z_]\w*)",(\d+)\)$/);
+  return match ? { name: match[1], size: Number(match[2]) } : null;
+}
+
+function parseLanguageRegisterSource(
+  line: string,
+): { name: string; source: string; mode: 'direct' | LifeReaderMode; amount: number } | null {
+  const match = line.match(/^__registersource\("([A-Za-z_]\w*)","([A-Za-z_]\w*)","(direct|order|random|walk|reverse|pendulum|first|last)",(\d+(?:\.\d+)?)\)$/);
+  return match ? {
+    name: match[1],
+    source: match[2],
+    mode: match[3] as 'direct' | LifeReaderMode,
+    amount: Number(match[4]),
+  } : null;
+}
+
+function parseLanguageRegisterWrite(line: string): { name: string; timing: LanguageCycleDefinition } | null {
+  const match = line.match(/^__registerwrite\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/);
+  if (!match) return null;
+  return {
+    name: match[1],
+    timing: {
+      amount: Number(match[2]),
+      unit: match[3] as 'ms' | 'sec' | 'beat',
+      chance: Number(match[4]),
+      drift: match[5] === 'true',
+      loose: match[6] === 'true',
+      clockSource: match[7],
+    },
+  };
+}
+
+function parseLanguageRegisterPitch(line: string): LanguageRegisterVoiceDefinition | null {
+  const match = line.match(/^__registerpitch\("([A-Za-z_]\w*)","([A-Za-z_]\w*)",(\d+)\)$/);
+  return match ? { voice: match[1], register: match[2], stage: Number(match[3]) } : null;
+}
+
 function parseLanguageTuringDeclaration(line: string): string | null {
   return line.match(/^__seq\("([A-Za-z_]\w*)"\)$/)?.[1] ?? null;
 }
@@ -4328,6 +4465,25 @@ function parseLanguageInlineScalarDirective(line: string): LanguageInlineScalarD
   };
 }
 
+function parseLanguageDelayTime(line: string): LanguageDelayTimeDefinition | null {
+  const match = line.match(/^__delaytime\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)"\)$/);
+  return match ? { name: match[1], amount: Number(match[2]), unit: match[3] as 'ms'|'sec'|'beat' } : null;
+}
+function parseLanguageDelayParam(line: string, lineNumber: number): LanguageDelayParamDefaultDefinition | null {
+  const match = line.match(/^__delayparam\("([A-Za-z_]\w*)","(lines|spread|spreadloose|reverse|pitchprob|pitchcount|pitch0|pitch1|pitch2|pitch3|pitch4|pitch5|pitch6|pitch7|pitch8|pitch9|pitch10|pitch11|pitch12|pitch13|pitch14|pitch15|tape|diffusion|pingpong)",(\d+(?:\.\d+)?)\)$/);
+  return match ? { name: match[1], parameter: match[2] as LanguageDelayParameter, expression: match[3], line: lineNumber } : null;
+}
+function parseLanguageDelayParamDefault(line: string, lineNumber: number): LanguageDelayParamDefaultDefinition | null {
+  const match = line.match(/^__delayparamdefault\("([A-Za-z_]\w*)","(lines|spread|spreadloose|reverse|pitchprob|pitchcount|pitch0|pitch1|pitch2|pitch3|pitch4|pitch5|pitch6|pitch7|pitch8|pitch9|pitch10|pitch11|pitch12|pitch13|pitch14|pitch15|tape|diffusion|pingpong)","((?:[^"\\]|\\.)*)"\)$/);
+  if (!match) return null; let expression: string; try { expression = JSON.parse(`"${match[3]}"`) as string; } catch { return null; }
+  return { name: match[1], parameter: match[2] as LanguageDelayParameter, expression, line: lineNumber };
+}
+function parseLanguageDelayParamCycle(line: string, lineNumber: number): LanguageDelayParamCycleDefinition | null {
+  const match = line.match(/^__delayparamcycle\("([A-Za-z_]\w*)","(lines|spread|spreadloose|reverse|pitchprob|pitchcount|pitch0|pitch1|pitch2|pitch3|pitch4|pitch5|pitch6|pitch7|pitch8|pitch9|pitch10|pitch11|pitch12|pitch13|pitch14|pitch15|tape|diffusion|pingpong)","((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/);
+  if (!match) return null; let expression: string; try { expression = JSON.parse(`"${match[3]}"`) as string; } catch { return null; }
+  return { name: match[1], parameter: match[2] as LanguageDelayParameter, expression, line: lineNumber, amount: Number(match[4]), unit: match[5] as 'ms'|'sec'|'beat', chance: Number(match[6]), drift: match[7] === 'true', loose: match[8] === 'true', clockSource: match[9] };
+}
+
 function parseLanguageFxMetadata(line: string): LanguageFxMetadata | null {
   const match = line.match(/^__fxmeta\("([A-Za-z_]\w*)"(?:,"([^"]+)")?\)$/);
   return match ? { name: match[1], modelId: match[2] ?? null } : null;
@@ -4432,7 +4588,7 @@ function parseLanguageFxModulationDirective(
 
 function parseLanguageModSetDirective(line: string, lineNumber: number): LanguageModSetDirective | null {
   const match = line.match(
-    /^__modset\("([A-Za-z_]\w*)","(freq|slope|shape|smooth|shift|output|range)","((?:[^"\\]|\\.)*)"\);?$/,
+    /^__modset\("([A-Za-z_]\w*)","(model|freq|ratebeat|slope|shape|smooth|shift|output|range|spread|bias|steps|deja|length|diversity)","((?:[^"\\]|\\.)*)"\);?$/,
   );
   if (!match) return null;
 
