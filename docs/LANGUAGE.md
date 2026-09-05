@@ -47,13 +47,14 @@ The current high-level language uses these main statement families:
 SET
 CLOCK
 VOICE
+DRUMKIT
 MOD
 FX
-PLAY
+OUT
 MAIN
 ```
 
-`VOICE`, `MOD`, and `FX` declarations use colon-delimited blocks.
+`VOICE`, `DRUMKIT`, `MOD`, `FX`, and `FILTER` declarations use colon-delimited blocks.
 
 Example:
 
@@ -64,7 +65,7 @@ VOICE lead:
     sound macro.fm
     PITCH NOTES C4
 
-PLAY lead through MAIN
+OUT lead TO MAIN
 ```
 
 ## SET
@@ -108,7 +109,7 @@ Scale:
 SET harmony: C minor
 ```
 
-`SET` declarations can be local to `VOICE`, `FX`, or `FILTER` scopes. A local
+`SET` declarations can be local to `VOICE`, `FX`, `FILTER`, or `DRUMKIT` scopes. A local
 name shadows a global name only inside its owning object. This is useful for
 notes, scalar values, timing values, and structured envelopes.
 
@@ -158,11 +159,6 @@ Removing the underscore starts a fresh musical clock epoch: beat phase is not
 recovered or caught up, named clocks restart from the new master downbeat, and
 no burst of missed beat events is emitted.
 
-The clock value can also be dynamic:
-
-```text
-CLOCK SET rnd(110,120) bpm WITH CYCLE 4 beats
-```
 
 ### Named clocks
 
@@ -237,6 +233,12 @@ MORPH 50 EVERY 2 beats on CLOCK /4
 
 The `EVERY` count is measured in ticks of the selected clock.
 
+The public `beat` unit therefore means one tick of the selected musical clock.
+With the master clock this is one master beat; with `ON CLOCK *4`, one `beat`
+is one quarter of a master beat. Subdivisions are expressed with derived clocks
+rather than fractional `EVERY` values.
+
+
 ## VOICE
 
 A voice is declared with:
@@ -301,8 +303,8 @@ unsuffixed Matter output is stereo, with MAIN on the left and AUX on the right;
 `.main`/`.out` and `.aux` select either output explicitly.
 
 ```text
-PLAY source THROUGH body THEN MAIN
-PLAY source THROUGH body.in2 THEN MAIN
+OUT source TO body TO MAIN
+OUT source TO body.in2 TO MAIN
 ```
 
 Because Matter is a `VOICE` with audio inputs, it can be used as a serial
@@ -359,12 +361,13 @@ used. `ms`/`sec` stages remain wall-clock based.
 Reusable envelopes use the multiline typed `SET` form:
 
 ```text
-SET motion TYPE ENVELOPE:
+SET motion: ENVELOPE [
     ATTACK LOG 20 ms
     DECAY 1/2 beat
     SUSTAIN 60
     RELEASE 2 beat
     RANGE 30 TO 90
+]
 ```
 
 and can then be used as the value of a compatible parameter:
@@ -381,9 +384,10 @@ do not leak into other objects:
 ```text
 VOICE lead:
     SET notes: [C3 Eb3 G3]
-    SET motion TYPE ENVELOPE:
+    SET motion: ENVELOPE [
         ATTACK 20 ms
         RELEASE 1 beat
+    ]
 
     PITCH notes EVERY 1 beat
     TIMBRE motion
@@ -499,7 +503,7 @@ PITCH SCALE C minor with walk every 2 beats
 Timing modifiers belong to the `every` clause:
 
 ```text
-morph rnd(20,80) every 3 sec on drift
+morph rnd(20,80) every 3 sec on loose
 ```
 
 ```text
@@ -509,10 +513,16 @@ PITCH SCALE C minor with random every 2 beats on loose, chance 80
 The canonical order is:
 
 ```text
-property value [with property modifiers] every time [on timing modifiers]
+property value [WITH value modifiers] EVERY timing [ON timing modifiers]
 ```
 
-`every` stays at the end of the property expression.
+`WITH` modifies the value or behavior being produced. `EVERY` creates the
+periodic event, and `ON` modifies only its scheduling (`CLOCK`, `CHANCE`,
+`COIN`, `LOOSE`, and Euclidean `ROTATE`). Timing modifiers are not accepted
+after `WITH`.
+
+`EVERY` stays at the end of the property expression.
+
 
 ### Euclidean every
 
@@ -527,19 +537,19 @@ The pattern advances one step on every tick of the master clock by default.
 Use the normal clock modifier to drive it from a derived or named clock:
 
 ```text
-MORPH wander(30,70) EVERY EUCLIDEAN 3/8 WITH CLOCK slow
+MORPH wander(30,70) EVERY EUCLIDEAN 3/8 ON CLOCK slow
 ```
 
 `ROTATE` rotates the Euclidean pattern without changing its hit count:
 
 ```text
-MORPH rnd(20,80) EVERY EUCLIDEAN 5/16 WITH ROTATE 2
+MORPH rnd(20,80) EVERY EUCLIDEAN 5/16 ON ROTATE 2
 ```
 
 Timing modifiers compose normally:
 
 ```text
-EVOLVE EVERY EUCLIDEAN 7/16 WITH CLOCK slow, ROTATE 3, CHANCE 80
+EVOLVE EVERY EUCLIDEAN 7/16 ON CLOCK slow, ROTATE 3, CHANCE 80
 ```
 
 `CHANCE` is evaluated only on Euclidean hit steps. `LOOSE` applies its normal
@@ -596,6 +606,77 @@ VOICE lead:
 ```
 
 All jobs remain synchronized to the shared runtime scheduler.
+
+## DRUMKIT
+
+`DRUMKIT` is a stereo synthesized-drum object. `KIT` is mandatory, like `SOUND` for `VOICE`.
+
+```text
+DRUMKIT drums:
+    KIT sonus606
+    kick EVERY 1 beat
+    snare EVERY EUCLIDEAN 5/16
+    hihat WITH decay 25 EVERY 1 beat ON CLOCK *2
+```
+
+`sonus606` is a built-in KIT value containing `kick`, `snare`, `clap`, `hihat`, `openhat`, `lowtom`, and `hightom` aliases. It uses the same KIT semantics as user-defined kits.
+
+Reusable custom kit:
+
+```text
+SET mykit: KIT [
+    drum.kick as bd WITH tune -8, level 70, decay 80
+    drum.snare as sd WITH snappy 40
+    drum.hihat as hh WITH decay 18
+]
+
+DRUMKIT drums:
+    KIT mykit
+    bd EVERY 1 beat
+    sd EVERY EUCLIDEAN 5/16
+    hh EVERY 1 beat ON CLOCK *2
+```
+
+A kit can derive from another kit and override selected aliases:
+
+```text
+SET dark606: KIT sonus606 [
+    kick WITH tune -6, decay 85
+    snare WITH snappy 35
+]
+```
+
+The same SET may be local to a DRUMKIT and follows the existing local-SET scope:
+
+```text
+DRUMKIT drums:
+    SET local606: KIT sonus606 [
+        kick WITH tune -5
+        hihat WITH decay 15
+    ]
+    KIT local606
+    kick EVERY 1 beat
+    hihat EVERY 1 beat ON CLOCK *2
+```
+
+One-off inline overrides are also valid:
+
+```text
+DRUMKIT drums:
+    KIT sonus606 [
+        kick WITH level 75, tune -3
+        hihat WITH decay 20
+    ]
+    kick EVERY 1 beat
+```
+
+Precedence is `drum model defaults < KIT defaults < derived/inline KIT overrides < WITH on the played alias`.
+
+Common `WITH` parameters are `level 0..100`, `pan -100..100`, `tune -24..24`, and `decay 0..100`. Model-specific parameters are `transient` for kick, `snappy`/`color` for snare, and `noise` for clap.
+
+The canonical order is `alias [WITH sound parameters] [EVERY timing]`. If `EVERY` is absent, the alias remains configured but silent. `EVERY` reuses the normal Sonus scheduler, including Euclidean timing and named/derived clocks.
+
+`DRUMKIT` is stereo; when no explicit `OUT` is declared, its main stereo output is routed to `MAIN` automatically. The first backend is synthesized only; samples and explicit pattern syntax remain future extensions of the same abstraction.
 
 ## MOD
 
@@ -834,146 +915,179 @@ FX grain:
 The current Mist integration receives this modulation at control rate rather
 than through dedicated audio-rate CV inputs.
 
-## PLAY
+## OUT
 
-Audio routing uses `PLAY`.
+Audio routing uses one `OUT` construct both inside audio objects and at top
+level. There is no separate `PLAY`, `THROUGH`, or `THEN` syntax.
 
-Basic route:
-
-```text
-PLAY lead through MAIN
-```
-
-The source output defaults to the primary output of the object. `THROUGH` is
-resolved by audio-port capability rather than by declaration category: an
-object may be a `VOICE`, `FILTER`, or `FX` and still be a valid processor if it
-exposes an audio input. An object with no audio input is rejected as a
-`THROUGH` destination.
-
-For a normal macro voice, explicit outputs are:
+Inside an object, the source object and its primary output are implicit:
 
 ```text
-lead.out
-lead.aux
+VOICE lead:
+    SOUND macro.fm
+    OUT TO clouds TO MAIN
 ```
 
-Example:
+At top level the source object is explicit:
 
 ```text
-PLAY lead.out through MAIN
+OUT lead TO clouds TO MAIN
 ```
 
-Intermediate output selectors belong to the node, not to its input. For
-example:
+Both forms describe the same serial graph:
 
 ```text
-PLAY lead THROUGH tone.hp THEN MAIN
+lead.out -> clouds.in -> MAIN
 ```
 
-routes `lead` into `tone.in`, then routes the SVF high-pass output to `MAIN`.
-The same rule allows source/processor hybrids such as `resonator.*` and
-`matter` to appear inside a serial chain.
+A single `OUT` line may contain multiple `TO` destinations. Each additional
+`TO` continues the serial path through the previous object. Multiple `OUT`
+lines create parallel paths:
+
+```text
+VOICE lead:
+    SOUND macro.fm
+    OUT TO MAIN
+    OUT AT 60 TO clouds TO MAIN
+```
+
+This sends the same primary output directly to `MAIN` and, in parallel, to
+`clouds` at 60 percent before returning the processed signal to `MAIN`.
 
 ### Route level
 
-`at` sets the gain of the route leaving the object immediately before it:
+`AT` is the gain of the edge leaving the object immediately before it. It never
+changes the intrinsic `LEVEL` of that object:
 
 ```text
-PLAY lead at 70 through MAIN
+OUT lead AT 70 TO grain AT 50 TO MAIN
 ```
 
-This does not change `VOICE level`.
-
-A chain can contain independent edge levels:
+means:
 
 ```text
-PLAY lead at 70 through grain at 50 then MAIN
+lead  -> grain  70%
+grain -> MAIN   50%
 ```
 
-Semantics:
+Inside an object the same rule applies:
 
 ```text
-lead  -> grain   70%
-grain -> MAIN    50%
+VOICE lead:
+    LEVEL 80
+    OUT AT 50 TO MAIN
 ```
 
-### then
+Here `LEVEL 80` affects the voice itself while `AT 50` affects only the route.
 
-`then` creates serial routing:
+### Ports
+
+The primary output is implicit. A normal voice therefore uses:
 
 ```text
-PLAY lead through grain then MAIN
+OUT TO MAIN
 ```
 
-Longer chains are valid:
+rather than `OUT OUT TO MAIN`.
+
+Secondary or named outputs are selected after the `OUT` keyword inside an
+object:
 
 ```text
-PLAY lead through grain then delay then reverb then MAIN
+VOICE lead:
+    OUT AUX AT 30 TO MAIN.R
 ```
 
-### Multiline PLAY
-
-Long routing chains can be written on multiple physical lines:
+At top level they use normal dotted source notation:
 
 ```text
-PLAY lead at 70
-    through grain at 50
-    then reverb at 80
-    then MAIN
+OUT lead.aux AT 30 TO MAIN.R
 ```
 
-Indented `through` / `then` lines are continuations of the original `PLAY`
-statement.
+Filters expose their named responses in the same way:
+
+```text
+FILTER tone:
+    MODEL svf
+    OUT HP TO MAIN
+```
+
+or:
+
+```text
+OUT tone.hp TO MAIN
+```
+
+`MAIN`, `MAIN.L`, and `MAIN.R` are valid final destinations. Intermediate
+objects use their default audio input unless an explicit input selector is
+provided, for example `body.in2`.
+
+### Automatic MAIN routing
+
+An audio-producing object that is not used as the source of any explicit `OUT`
+route is connected automatically from its primary output to `MAIN` at 100
+percent. Thus:
+
+```text
+VOICE bass:
+    SOUND macro.analog
+```
+
+is immediately audible.
+
+As soon as the object appears as a source in any `OUT` route, its automatic
+route is removed. For example:
+
+```text
+VOICE bass:
+    SOUND macro.analog
+    OUT TO filter
+```
+
+routes only to `filter`. If `filter` itself has no explicit outgoing route, its
+primary output is then automatically routed to `MAIN`.
+
+This also makes concise serial patches possible:
+
+```text
+OUT lead TO clouds
+```
+
+If `clouds` has no other outgoing `OUT`, the resulting graph is effectively
+`lead -> clouds -> MAIN`.
+
+### Duplicate routes
+
+Routes are validated after normalization of object and port defaults. The same
+source port may fan out to different destinations, but the exact same
+source-port/destination-port pair may be declared only once.
+
+These are parallel and valid:
+
+```text
+VOICE lead:
+    OUT TO MAIN
+    OUT AT 50 TO clouds
+```
+
+These are duplicates and are rejected even though one is local and one is
+top-level:
+
+```text
+VOICE lead:
+    OUT TO MAIN
+
+OUT lead.out AT 50 TO MAIN
+```
+
+The route level does not make an otherwise identical route distinct.
 
 ## Stereo routing
 
-Stereo effects use `.L` and `.R` channel selectors.
-
-The suffix describes the channel; whether it is an input or output is inferred
-from its position in the `PLAY` route.
-
-Input selection:
+Stereo objects preserve stereo when routed without channel selectors:
 
 ```text
-PLAY lead through grain.L
-```
-
-Output selection:
-
-```text
-PLAY grain.L through MAIN.L
-```
-
-Lowercase `.l` and `.r` are normalized to `.L` and `.R`.
-
-### Mono to stereo normalization
-
-A mono source sent to a stereo FX without a channel suffix is duplicated to
-both FX input channels:
-
-```text
-PLAY lead through grain
-```
-
-Conceptually:
-
-```text
-lead.out -> grain.L
-lead.out -> grain.R
-```
-
-### Stereo to mono coercion
-
-When a stereo object is routed into a mono input without selecting a channel,
-Sonus uses that object's primary channel. For the current stereo objects this
-is MAIN/left. Explicit `.aux` or `.R` selection always overrides this default.
-
-### Stereo FX to MAIN
-
-A stereo effect sent to `MAIN` without channel suffixes preserves stereo:
-
-```text
-PLAY grain through MAIN
+OUT grain TO MAIN
 ```
 
 Conceptually:
@@ -983,15 +1097,25 @@ grain.L -> MAIN.L
 grain.R -> MAIN.R
 ```
 
-Explicit routing is still available:
+A mono source sent to a stereo FX without a channel suffix is duplicated to
+both effect inputs:
 
 ```text
-PLAY lead.out through grain.L
-PLAY lead.aux through grain.R
-
-PLAY grain.L through MAIN.L
-PLAY grain.R through MAIN.R
+OUT lead TO grain
 ```
+
+Explicit channel routing remains available:
+
+```text
+OUT lead.out TO grain.L
+OUT lead.aux TO grain.R
+OUT grain.L TO MAIN.L
+OUT grain.R TO MAIN.R
+```
+
+When a stereo source is sent to a mono destination without a channel selector,
+Sonus uses the object's primary channel. Explicit `.aux` or `.R` selection
+overrides that coercion.
 
 ## MAIN
 
@@ -1011,7 +1135,7 @@ VOICE lead:
 and:
 
 ```text
-PLAY lead at 50 through MAIN
+OUT lead AT 50 TO MAIN
 ```
 
 The three gain stages are therefore:
@@ -1019,7 +1143,7 @@ The three gain stages are therefore:
 ```text
 VOICE level
     ->
-PLAY route at
+OUT route AT
     ->
 MAIN level
 ```
@@ -1317,7 +1441,7 @@ REGISTER canon:
     model shift
     size 4
     pitch melody
-    write every euclidean 5/16 with rotate 2
+    write every euclidean 5/16 on rotate 2
 ```
 
 A Life `SEQ` exposes a pitch pool, so the register must select how to read it:
@@ -1500,7 +1624,7 @@ Consumers read the same pool independently. Unlike Turing, a Life pool requires 
 
 ```text
 VOICE arp:
-    PITCH ecosystem WITH WALK EVERY 1/2 beat
+    PITCH ecosystem WITH WALK EVERY 1 beat ON CLOCK *2
 
 VOICE bells:
     PITCH ecosystem WITH RANDOM EVERY 4 beat ON CHANCE 30
@@ -1588,10 +1712,10 @@ tone.bp
 tone.np
 ```
 
-`.lp` is the default. Therefore `PLAY source THROUGH tone THEN MAIN` uses the low-pass response. A response can also be selected directly on an intermediate node:
+`.lp` is the default. Therefore `OUT source TO tone TO MAIN` uses the low-pass response. A response can also be selected directly on an intermediate node:
 
 ```text
-PLAY source THROUGH tone.hp THEN MAIN
+OUT source TO tone.hp TO MAIN
 ```
 
 which means `source -> tone.in -> tone.hp -> MAIN`. Embedded FILTER blocks follow the same rule. DaisySP also computes a peak response internally, but Sonus does not expose it as a routing port in this language version.
@@ -1686,15 +1810,15 @@ resonator.aux  -> stereo R
 Thus:
 
 ```text
-PLAY bells THROUGH MAIN
+OUT bells TO MAIN
 ```
 
 expands to MAIN -> `Audio.out_L` and AUX -> `Audio.out_R`. Explicit mono access
 is available as:
 
 ```text
-PLAY bells.main THROUGH MAIN
-PLAY bells.aux THROUGH MAIN
+OUT bells.main TO MAIN
+OUT bells.aux TO MAIN
 ```
 
 If an unsuffixed Resonator output is sent to a mono destination, the language
@@ -1704,7 +1828,7 @@ The Rings input is mono and is addressed by routing another object through the
 Resonator VOICE:
 
 ```text
-PLAY source THROUGH bells THEN MAIN
+OUT source TO bells TO MAIN
 ```
 
 When an external source is connected, the Rings worklet uses the original
@@ -1745,7 +1869,7 @@ VOICE lead:
     LIVE PITCH NOTES C3
 ```
 
-The older `PITCH NOTES ... WITH VIEW` form remains accepted for compatibility, but `LIVE PITCH NOTES ...` is the preferred spelling. The piano is display-only in this version; direct key editing of the source note/list is reserved for a later iteration. Other typed or derived values such as `PITCH FREQS`, `PITCH SCALE`, named sources and envelopes are not yet `LIVE`-editable. The qualifier is UI metadata; it does not introduce a second scheduler or hidden parameter value.
+`LIVE PITCH NOTES ...` is the canonical performance spelling. The piano is display-only in this version; direct key editing of the source note/list is reserved for a later iteration. Other typed or derived values such as `PITCH FREQS`, `PITCH SCALE`, named sources and envelopes are not yet `LIVE`-editable. The qualifier is UI metadata; it does not introduce a second scheduler or hidden parameter value.
 
 ## USE directive
 

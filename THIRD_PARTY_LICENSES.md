@@ -78,3 +78,9 @@ Current use: selected random-voltage and lag-processing components for the Sonus
 - License of the source portions used by Sonus Umbrae: MIT
 
 Sonus Umbrae does not expose the complete Marbles module. The Dices integration intentionally omits the T/gate section and Marbles' internal musical quantizer. Sonus supplies its own timing, routing, language, view and control abstractions around the selected random-voltage algorithms.
+
+## 606-Inspired-Synth-Drums
+- Upstream: https://github.com/analogcode/606-Inspired-Synth-Drums
+- Copyright: Matthew Fecher / AudioKit Pro
+- License: MIT
+- Current Sonus use: synthesized drum voices for the experimental `sonus606` WASM backend.

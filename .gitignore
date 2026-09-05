@@ -8,3 +8,6 @@ public/dsp/*.wasm
 # Sonus Pages: keep release WASM artifacts versioned
 !public/dsp/
 !public/dsp/*.wasm
+
+# locally fetched MIT drum source
+vendor/drums606/

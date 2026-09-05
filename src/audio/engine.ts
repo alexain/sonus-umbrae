@@ -96,6 +96,7 @@ export interface AudioProgram {
     length: number;
     diversity: number;
   }>;
+  drumkits: Array<{ name: string }>;
   mists: Array<{
     name: string;
     bypassed: boolean;
@@ -279,6 +280,8 @@ interface DicesVoice {
 }
 
 
+interface DrumkitVoice { node: AudioWorkletNode; outputSplitter: ChannelSplitterNode; outputL: GainNode; outputR: GainNode }
+
 interface MistVoice {
   bypassed: boolean;
   node: AudioWorkletNode;
@@ -433,6 +436,7 @@ export class AudioEngine {
   private resonators = new Map<string, ResonatorVoice>();
   private swells = new Map<string, SwellVoice>();
   private dices = new Map<string, DicesVoice>();
+  private drumkits = new Map<string, DrumkitVoice>();
   private mists = new Map<string, MistVoice>();
   private skies = new Map<string, SkyVoice>();
   private delays = new Map<string, DelayVoice>();
@@ -447,6 +451,7 @@ export class AudioEngine {
   private resonatorWasmBytes: ArrayBuffer | null = null;
   private swellWasmBytes: ArrayBuffer | null = null;
   private dicesWasmBytes: ArrayBuffer | null = null;
+  private drumkitWasmBytes: ArrayBuffer | null = null;
   private mistWasmBytes: ArrayBuffer | null = null;
   private skyWasmBytes: ArrayBuffer | null = null;
   private delayWasmBytes: ArrayBuffer | null = null;
@@ -456,6 +461,7 @@ export class AudioEngine {
   private resonatorWorkletLoaded = false;
   private swellWorkletLoaded = false;
   private dicesWorkletLoaded = false;
+  private drumkitWorkletLoaded = false;
   private mistWorkletLoaded = false;
   private skyWorkletLoaded = false;
   private delayWorkletLoaded = false;
@@ -477,7 +483,7 @@ export class AudioEngine {
           : 'suspended',
       sampleRate: this.context?.sampleRate ?? null,
       testFrequency: this.testOscillator?.frequency.value ?? null,
-      objectCount: this.oscillators.size + this.gains.size + this.voices.size + this.matters.size + this.resonators.size + this.swells.size + this.dices.size + this.mists.size + this.skies.size + this.delays.size + this.filters.size + this.clocks.size,
+      objectCount: this.oscillators.size + this.gains.size + this.voices.size + this.matters.size + this.resonators.size + this.swells.size + this.dices.size + this.drumkits.size + this.mists.size + this.skies.size + this.delays.size + this.filters.size + this.clocks.size,
       routeCount: this.routes.size,
     };
   }
@@ -496,6 +502,7 @@ export class AudioEngine {
     await this.ensureResonatorRuntime();
     await this.ensureSwellRuntime();
     await this.ensureDicesRuntime();
+    await this.ensureDrumkitRuntime();
     await this.ensureMistRuntime();
     await this.ensureSkyRuntime();
     await this.ensureDelayRuntime();
@@ -588,6 +595,7 @@ export class AudioEngine {
         (program.resonators.length > 0 && !this.resonatorWorkletLoaded) ||
         (program.swells.length > 0 && !this.swellWorkletLoaded) ||
         (program.dices.length > 0 && !this.dicesWorkletLoaded) ||
+        (program.drumkits.length > 0 && !this.drumkitWorkletLoaded) ||
         (program.mists.length > 0 && !this.mistWorkletLoaded) ||
         (program.skies.length > 0 && !this.skyWorkletLoaded) ||
         (program.delays.length > 0 && !this.delayWorkletLoaded) ||
@@ -610,6 +618,7 @@ export class AudioEngine {
     const desiredResonators = new Map(program.resonators.map((definition) => [definition.name, definition]));
     const desiredSwells = new Map(program.swells.map((definition) => [definition.name, definition]));
     const desiredDices = new Map(program.dices.map((definition) => [definition.name, definition]));
+    const desiredDrumkits = new Map(program.drumkits.map((definition) => [definition.name, definition]));
     const desiredMists = new Map(program.mists.map((definition) => [definition.name, definition]));
     const desiredSkies = new Map(program.skies.map((definition) => [definition.name, definition]));
     const desiredDelays = new Map(program.delays.map((definition) => [definition.name, definition]));
@@ -662,6 +671,7 @@ export class AudioEngine {
     for (const [name] of this.dices) {
       if (!desiredDices.has(name)) this.removeDices(name);
     }
+    for (const [name] of this.drumkits) { if (!desiredDrumkits.has(name)) this.removeDrumkit(name); }
 
     for (const [name] of this.mists) {
       if (!desiredMists.has(name)) this.removeMist(name);
@@ -711,6 +721,7 @@ export class AudioEngine {
       this.createDices(definition);
       this.updateDices(definition);
     }
+    for (const definition of program.drumkits) this.createDrumkit(definition);
     this.setModTransport(true);
 
 
@@ -1197,6 +1208,24 @@ export class AudioEngine {
   }
 
 
+  private createDrumkit(definition: AudioProgram['drumkits'][number]): void {
+    if (this.drumkits.has(definition.name)) return;
+    if (!this.drumkitWorkletLoaded || !this.drumkitWasmBytes) throw new Error('Drumkit DSP is not ready; run :start after building the DSP');
+    const context = this.ensureContext();
+    const node = new AudioWorkletNode(context, 'sonus-drumkit', { numberOfInputs:0, numberOfOutputs:1, outputChannelCount:[2], channelCount:2, channelCountMode:'explicit', channelInterpretation:'discrete', processorOptions:{ wasmBytes:this.drumkitWasmBytes.slice(0) } });
+    const outputSplitter=context.createChannelSplitter(2), outputL=context.createGain(), outputR=context.createGain();
+    node.connect(outputSplitter); outputSplitter.connect(outputL,0,0); outputSplitter.connect(outputR,1,0);
+    this.drumkits.set(definition.name,{node,outputSplitter,outputL,outputR});
+  }
+
+  triggerDrumkit(name:string, voice:'kick'|'snare'|'clap'|'hihat'|'openhat'|'lowtom'|'hightom', params:{level:number;pan:number;tune:number;decay:number;transient:number;snappy:number;color:number;noise:number}): void {
+    const drumkit=this.drumkits.get(name); if(!drumkit) throw new Error(`unknown DRUMKIT object: ${name}`);
+    drumkit.node.port.postMessage({ type:'trigger', voice,
+      level:Math.max(0,Math.min(1,params.level/100)), pan:Math.max(-1,Math.min(1,params.pan/100)), tune:params.tune,
+      decay:Math.max(0,Math.min(1,params.decay/100)), transient:Math.max(0,Math.min(1,params.transient/100)),
+      snappy:Math.max(0,Math.min(1,params.snappy/100)), color:2 ** ((params.color-50)/25), noise:Math.max(0,Math.min(1,params.noise/100)) });
+  }
+
   private createMist(definition: AudioProgram['mists'][number]): void {
     if (this.mists.has(definition.name)) return;
     if (!this.mistWorkletLoaded || !this.mistWasmBytes) {
@@ -1628,6 +1657,12 @@ export class AudioEngine {
       return { node: dices.node, output };
     }
 
+
+    const drumkitOutput = signal.match(/^([A-Za-z_]\w*)\.(out_L|out_R)$/);
+    if (drumkitOutput && this.drumkits.has(drumkitOutput[1])) {
+      const drumkit=this.drumkits.get(drumkitOutput[1])!;
+      return { node: drumkitOutput[2] === 'out_R' ? drumkit.outputR : drumkit.outputL, output:0 };
+    }
 
     const mistOutput = signal.match(/^([A-Za-z_]\w*)\.(out_L|out_R)$/);
     if (mistOutput) {
@@ -2385,6 +2420,12 @@ export class AudioEngine {
   }
 
 
+  private removeDrumkit(name:string): void {
+    const drumkit=this.drumkits.get(name); if(!drumkit) return;
+    for(const node of [drumkit.outputSplitter,drumkit.outputL,drumkit.outputR]) { try { node.disconnect(); } catch {} }
+    try { drumkit.node.disconnect(); } catch {} drumkit.node.port.close(); this.drumkits.delete(name);
+  }
+
   private removeDices(name: string): void {
     const dices = this.dices.get(name);
     if (!dices) return;
@@ -2556,6 +2597,13 @@ export class AudioEngine {
     this.dicesWorkletLoaded = true;
   }
 
+  private async ensureDrumkitRuntime(): Promise<void> {
+    if (this.drumkitWorkletLoaded && this.drumkitWasmBytes) return;
+    const context=this.ensureContext(); const response=await fetch(publicAssetUrl('/dsp/drumkit.wasm'));
+    if(!response.ok) throw new Error('Drumkit DSP missing. Run npm run dsp:setup and npm run dsp:build.');
+    this.drumkitWasmBytes=await response.arrayBuffer(); await context.audioWorklet.addModule(publicAssetUrl('/worklets/drumkit-processor.js')); this.drumkitWorkletLoaded=true;
+  }
+
   private async ensureMistRuntime(): Promise<void> {
     if (this.mistWorkletLoaded && this.mistWasmBytes) return;
     const context = this.ensureContext();
@@ -2659,6 +2707,7 @@ export class AudioEngine {
     for (const name of [...this.mists.keys()]) this.removeMist(name);
     for (const name of [...this.swells.keys()]) this.removeSwell(name);
     for (const name of [...this.dices.keys()]) this.removeDices(name);
+    for (const name of [...this.drumkits.keys()]) this.removeDrumkit(name);
     for (const name of [...this.resonators.keys()]) this.removeResonator(name);
     for (const name of [...this.matters.keys()]) this.removeMatter(name);
     for (const name of [...this.voices.keys()]) this.removeVoice(name);
@@ -2682,6 +2731,7 @@ export class AudioEngine {
     this.matterWorkletLoaded = false;
     this.resonatorWorkletLoaded = false;
     this.swellWorkletLoaded = false;
+    this.drumkitWorkletLoaded = false;
     this.mistWorkletLoaded = false;
     this.skyWorkletLoaded = false;
     this.daisyFiltersWorkletLoaded = false;

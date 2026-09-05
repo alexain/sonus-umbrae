@@ -74,7 +74,7 @@ export function parseProgramCapabilities(source: string): ProgramCapabilitySet {
   return { capabilities, directiveLine, directiveText };
 }
 
-type SourceKind = 'voice' | 'note' | 'freq' | 'time' | 'clock' | 'trigger' | 'scalar' | 'scale' | 'seq' | 'register' | 'envelope';
+type SourceKind = 'voice' | 'note' | 'freq' | 'time' | 'clock' | 'trigger' | 'scalar' | 'scale' | 'seq' | 'register' | 'envelope' | 'kit';
 
 type SourceDefinition =
   | { kind: 'scalar'; internalName?: string }
@@ -85,7 +85,8 @@ type SourceDefinition =
   | { kind: 'scale'; values: number[]; display: string; internalName?: string }
   | { kind: 'seq'; model: 'turing' | 'life' | null; values: number[]; display: string; internalName?: string }
   | { kind: 'register'; size: number; display: string; internalName?: string }
-  | { kind: 'envelope'; spec: EnvelopeSpec; display: string; internalName?: string };
+  | { kind: 'envelope'; spec: EnvelopeSpec; display: string; internalName?: string }
+  | { kind: 'kit'; kit: DrumKitDefinition; display: string; internalName?: string };
 
 
 type EnvelopeCurve = 'lin' | 'log';
@@ -105,6 +106,96 @@ type EnvelopeSpec = {
   range: [number, number];
   display: string;
 };
+
+type DrumVoiceId = 'kick' | 'snare' | 'clap' | 'hihat' | 'openhat' | 'lowtom' | 'hightom';
+
+type DrumSlotDefaults = {
+  level: number;
+  pan: number;
+  tune: number;
+  decay: number;
+  transient: number;
+  snappy: number;
+  color: number;
+  noise: number;
+  humanize: number;
+};
+
+type DrumKitEntry = { source: DrumVoiceId; alias: string; defaults: DrumSlotDefaults };
+type DrumKitDefinition = { entries: Map<string, DrumKitEntry> };
+type DrumkitState = { name: string; line: number; indentation: number; kit: DrumKitDefinition | null };
+
+const DRUM_DEFAULTS: DrumSlotDefaults = {
+  level: 100, pan: 0, tune: 0, decay: 70,
+  transient: 30, snappy: 75, color: 50, noise: 50, humanize: 0,
+};
+
+const SONUS606_KIT: DrumKitDefinition = {
+  entries: new Map<string, DrumKitEntry>([
+    ['kick', { source: 'kick', alias: 'kick', defaults: { ...DRUM_DEFAULTS } }],
+    ['snare', { source: 'snare', alias: 'snare', defaults: { ...DRUM_DEFAULTS } }],
+    ['clap', { source: 'clap', alias: 'clap', defaults: { ...DRUM_DEFAULTS } }],
+    ['hihat', { source: 'hihat', alias: 'hihat', defaults: { ...DRUM_DEFAULTS, decay: 30 } }],
+    ['openhat', { source: 'openhat', alias: 'openhat', defaults: { ...DRUM_DEFAULTS, decay: 75 } }],
+    ['lowtom', { source: 'lowtom', alias: 'lowtom', defaults: { ...DRUM_DEFAULTS } }],
+    ['hightom', { source: 'hightom', alias: 'hightom', defaults: { ...DRUM_DEFAULTS } }],
+  ]),
+};
+
+function cloneDrumKit(kit: DrumKitDefinition): DrumKitDefinition {
+  return { entries: new Map([...kit.entries].map(([alias, entry]) => [alias, {
+    source: entry.source, alias: entry.alias, defaults: { ...entry.defaults },
+  }])) };
+}
+
+function drumParameterDefaults(source: DrumVoiceId, raw: string, line: number, base: DrumSlotDefaults = DRUM_DEFAULTS): DrumSlotDefaults {
+  const result = { ...base };
+  const modifiers = raw.trim() ? raw.split(',').map((item) => item.trim()).filter(Boolean) : [];
+  for (const modifier of modifiers) {
+    const match = modifier.match(/^([A-Za-z_][A-Za-z0-9_]*)\s+(-?\d+(?:\.\d+)?)$/);
+    if (!match) throw new LanguageError([{ line, message: `invalid drum WITH parameter '${modifier}'` }]);
+    const key = match[1].toLowerCase() as keyof DrumSlotDefaults;
+    const value = Number(match[2]);
+    if (key === 'level' || key === 'decay' || key === 'transient' || key === 'snappy' || key === 'color' || key === 'noise' || key === 'humanize') {
+      if (value < 0 || value > 100) throw new LanguageError([{ line, message: `drum ${key} expects 0..100` }]);
+    } else if (key === 'pan') {
+      if (value < -100 || value > 100) throw new LanguageError([{ line, message: 'drum pan expects -100..100' }]);
+    } else if (key === 'tune') {
+      if (value < -24 || value > 24) throw new LanguageError([{ line, message: 'drum tune expects -24..24 semitones' }]);
+    } else throw new LanguageError([{ line, message: `unknown drum parameter '${match[1]}'` }]);
+    if (key === 'transient' && source !== 'kick') throw new LanguageError([{ line, message: 'transient is available only for drum.kick' }]);
+    if ((key === 'snappy' || key === 'color') && source !== 'snare') throw new LanguageError([{ line, message: `${key} is available only for drum.snare` }]);
+    if (key === 'noise' && source !== 'clap') throw new LanguageError([{ line, message: 'noise is available only for drum.clap' }]);
+    result[key] = value;
+  }
+  return result;
+}
+
+function parseDrumKitEntry(raw: string, line: number, kit: DrumKitDefinition): DrumKitEntry {
+  const sourceEntry = raw.match(/^drum\.(kick|snare|clap|hihat|openhat|lowtom|hightom)\s+as\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(.+))?$/i);
+  if (sourceEntry) {
+    const source = sourceEntry[1].toLowerCase() as DrumVoiceId;
+    return { source, alias: sourceEntry[2], defaults: drumParameterDefaults(source, sourceEntry[3] ?? '', line) };
+  }
+  const override = raw.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(.+))?$/i);
+  if (override) {
+    const previous = kit.entries.get(override[1]);
+    if (!previous) throw new LanguageError([{ line, message: `unknown KIT alias '${override[1]}'` }]);
+    return { source: previous.source, alias: previous.alias, defaults: drumParameterDefaults(previous.source, override[2] ?? '', line, previous.defaults) };
+  }
+  throw new LanguageError([{ line, message: `invalid KIT entry '${raw}'` }]);
+}
+
+function applyDrumKitEntries(base: DrumKitDefinition, body: string, line: number): DrumKitDefinition {
+  const result = cloneDrumKit(base);
+  for (const raw of body.split(/\s*;\s*/).map((item) => item.trim()).filter(Boolean)) {
+    const entry = parseDrumKitEntry(raw, line, result);
+    result.entries.set(entry.alias, entry);
+  }
+  return result;
+}
+
+function serializeDrumParams(params: DrumSlotDefaults): string { return JSON.stringify(params); }
 
 type VoiceState = {
   name: string;
@@ -680,7 +771,7 @@ function parseSelectionMode(modifiers: string[], line: number, property: string)
   return { mode, amount, favor };
 }
 
-function parseTimingModifiers(modifiers: string[], line: number, unit: string): TimingModifiers {
+function parseTimingModifiers(modifiers: string[], line: number, _unit: string): TimingModifiers {
   const result: TimingModifiers = { chance: 100, drift: false, loose: false };
   let probabilityModifier: 'chance' | 'coin' | null = null;
 
@@ -706,13 +797,6 @@ function parseTimingModifiers(modifiers: string[], line: number, unit: string): 
       }
       result.chance = 50;
       probabilityModifier = 'coin';
-      continue;
-    }
-    if (normalized === 'drift') {
-      if (unit === 'beat') {
-        throw new LanguageError([{ line, message: 'drift is available only for sec/ms timing; beat timing stays locked to the master clock' }]);
-      }
-      result.drift = true;
       continue;
     }
     if (normalized === 'loose') {
@@ -1241,7 +1325,7 @@ function splitEveryClause(value: string): { base: string; every: string | null }
 }
 
 function splitEveryModifiers(value: string): { base: string; modifiers: string[] } {
-  const match = value.match(/^(.*?)\s+(?:on|with)\s+(.+)$/i);
+  const match = value.match(/^(.*?)\s+on\s+(.+)$/i);
   if (!match) return { base: value.trim(), modifiers: [] };
   return {
     base: match[1].trim(),
@@ -1307,7 +1391,7 @@ function parseEverySpec(
 
   if (amount <= 0) throw new LanguageError([{ line, message: 'every interval must be greater than 0' }]);
   if (unit === 'beat' && !Number.isInteger(amount)) {
-    throw new LanguageError([{ line, message: 'beat timing currently requires a whole number of beats' }]);
+    throw new LanguageError([{ line, message: 'EVERY beat timing uses whole ticks; use ON CLOCK *n for subdivisions' }]);
   }
 
   let clockSource = 'Clock';
@@ -1815,11 +1899,7 @@ function compileSet(
     return `${runtimeName} = ${JSON.stringify(display)};`;
   }
 
-  const cycleMatch = body.match(
-    /^(.*)\s+cycle\s+(\d+(?:\.\d+)?)\s+(ms|sec|secs|second|seconds|beat|beats)(?:\s+with\s+(.+))?$/i,
-  );
-
-  const expression = (cycleMatch ? cycleMatch[1] : body).trim();
+  const expression = body.trim();
   if (!expression) {
     throw new LanguageError([{ line, message: 'SET expects a scalar expression' }]);
   }
@@ -1827,26 +1907,7 @@ function compileSet(
   scalarNames.add(name);
   sourceKinds.set(name, 'scalar');
   sourceDefinitions.set(name, { kind: 'scalar', internalName: runtimeName });
-
-  if (!cycleMatch) return `${runtimeName} = ${expression};`;
-
-  const amount = numberValue(cycleMatch[2], line, 'cycle');
-  if (amount <= 0) {
-    throw new LanguageError([{ line, message: 'cycle interval must be greater than 0' }]);
-  }
-
-  const unit = normalizeCycleUnit(cycleMatch[3], line);
-  if (unit === 'beat' && !Number.isInteger(amount)) {
-    throw new LanguageError([{ line, message: 'beat cycles currently require a whole number of beats' }]);
-  }
-
-  const modifiers = (cycleMatch[4] ?? '')
-    .split(',')
-    .map((item) => item.trim())
-    .filter(Boolean);
-  const timing = parseTimingModifiers(modifiers, line, unit);
-
-  return `${runtimeName} = ${expression}; __setcycle(${JSON.stringify(runtimeName)},${amount},${JSON.stringify(unit)},${timing.chance},${timing.drift},${timing.loose});`;
+  return `${runtimeName} = ${expression};`;
 }
 
 
@@ -1863,8 +1924,8 @@ function compileClockProperty(
 ): string {
   const key = property.toLowerCase();
   const value = rawValue.trim();
-  if (key === 'jitter' || key === 'drift' || key === 'drifter') {
-    const publicKey = key === 'drift' ? 'drifter' : key;
+  if (key === 'jitter' || key === 'drifter') {
+    const publicKey = key;
     const amount = numberValue(value, line, `CLOCK ${publicKey}`);
     if (amount < 0 || amount > 100) throw new LanguageError([{ line, message: `CLOCK ${publicKey} expects 0..100` }]);
     if (key === 'jitter') clock.jitter = amount; else clock.drift = amount;
@@ -1892,39 +1953,26 @@ function compileClock(lineText: string, line: number): string {
   const disabled = Boolean(match[1]);
   const expression = match[2].trim();
   if (!expression) throw new LanguageError([{ line, message: 'CLOCK set expects a BPM expression' }]);
-  let cycleAmount: number | null = null;
-  let cycleUnit: 'ms' | 'sec' | 'beat' | null = null;
-  let expressionDrift = false;
   let jitter = 0;
   let timingDrift = 0;
   const modifiers = (match[3] ?? '').split(',').map((item) => item.trim()).filter(Boolean);
   for (const modifier of modifiers) {
-    const cycle = modifier.match(/^cycle\s+(\d+(?:\.\d+)?)\s+(ms|sec|secs|second|seconds|beat|beats)$/i);
-    if (cycle) {
-      if (cycleAmount !== null) throw new LanguageError([{ line, message: 'CLOCK accepts only one cycle modifier' }]);
-      cycleAmount = numberValue(cycle[1], line, 'CLOCK cycle');
-      if (cycleAmount <= 0) throw new LanguageError([{ line, message: 'CLOCK cycle must be greater than 0' }]);
-      cycleUnit = normalizeCycleUnit(cycle[2], line);
-      if (cycleUnit === 'beat' && !Number.isInteger(cycleAmount)) throw new LanguageError([{ line, message: 'CLOCK beat cycles currently require a whole number of beats' }]);
-      continue;
-    }
     const jitterMatch = modifier.match(/^jitter\s+(\d+(?:\.\d+)?)$/i);
     if (jitterMatch) {
       jitter = numberValue(jitterMatch[1], line, 'CLOCK jitter');
       if (jitter < 0 || jitter > 100) throw new LanguageError([{ line, message: 'CLOCK jitter expects 0..100' }]);
       continue;
     }
-    const drifterMatch = modifier.match(/^(?:drifter|drift)\s+(\d+(?:\.\d+)?)$/i);
+    const drifterMatch = modifier.match(/^drifter\s+(\d+(?:\.\d+)?)$/i);
     if (drifterMatch) {
       timingDrift = numberValue(drifterMatch[1], line, 'CLOCK drifter');
       if (timingDrift < 0 || timingDrift > 100) throw new LanguageError([{ line, message: 'CLOCK drifter expects 0..100' }]);
       continue;
     }
-    if (/^drift$/i.test(modifier)) { expressionDrift = true; continue; }
     if (/^view$/i.test(modifier)) throw new LanguageError([{ line, message: 'the master CLOCK view is always active; WITH VIEW is only for named clocks' }]);
     throw new LanguageError([{ line, message: `CLOCK does not support modifier '${modifier}'` }]);
   }
-  return `__masterclock(${JSON.stringify(expression)},${cycleAmount ?? 0},${JSON.stringify(cycleUnit ?? 'ms')},${expressionDrift},${jitter},${timingDrift},${disabled});`;
+  return `__masterclock(${JSON.stringify(expression)},0,"ms",false,${jitter},${timingDrift},${disabled});`;
 }
 
 function compileNamedClock(
@@ -1956,7 +2004,7 @@ function compileNamedClock(
       if (jitter < 0 || jitter > 100) throw new LanguageError([{ line, message: 'CLOCK jitter expects 0..100' }]);
       continue;
     }
-    const drifterMatch = modifier.match(/^(?:drifter|drift)\s+(\d+(?:\.\d+)?)$/i);
+    const drifterMatch = modifier.match(/^drifter\s+(\d+(?:\.\d+)?)$/i);
     if (drifterMatch) {
       drifter = numberValue(drifterMatch[1], line, 'CLOCK drifter');
       if (drifter < 0 || drifter > 100) throw new LanguageError([{ line, message: 'CLOCK drifter expects 0..100' }]);
@@ -2491,28 +2539,28 @@ function compileFxProperty(
   return `${initial} __fxparamdefault(${JSON.stringify(fx.name)},${JSON.stringify(parameter)},${JSON.stringify(expression)});`;
 }
 
-type PlayPort = 'out' | 'main' | 'aux' | 'lp' | 'hp' | 'bp' | 'np' | 'in' | 'in2' | null;
+type OutPort = 'out' | 'main' | 'aux' | 'lp' | 'hp' | 'bp' | 'np' | 'in' | 'in2' | null;
 
-type PlayEndpoint = {
+type OutEndpoint = {
   name: string;
   channel: 'L' | 'R' | null;
-  port: PlayPort;
+  port: OutPort;
   amount: number;
 };
 
-type PlayObjectKind = 'voice' | 'matter' | 'resonator' | 'fx' | 'filter' | 'main';
+type OutObjectKind = 'voice' | 'matter' | 'resonator' | 'drumkit' | 'fx' | 'filter' | 'main';
 
-type PlaySignal =
+type OutSignal =
   | { stereo: false; mono: string }
   | { stereo: true; left: string; right: string; primary: string };
 
-type PlayInput =
+type OutInput =
   | { stereo: false; mono: string }
   | { stereo: true; left: string; right: string };
 
-function parsePlayEndpoint(raw: string, line: number): PlayEndpoint {
+function parseOutEndpoint(raw: string, line: number): OutEndpoint {
   const match = raw.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\.(out|main|aux|lp|hp|bp|np|in|in2|L|R))?(?:\s+at\s+(.+))?$/i);
-  if (!match) throw new LanguageError([{ line, message: `invalid PLAY endpoint '${raw.trim()}'` }]);
+  if (!match) throw new LanguageError([{ line, message: `invalid OUT endpoint '${raw.trim()}'` }]);
   const suffix = match[2]?.toLowerCase() ?? null;
   return {
     name: match[1],
@@ -2522,34 +2570,43 @@ function parsePlayEndpoint(raw: string, line: number): PlayEndpoint {
   };
 }
 
-function compilePlay(
+function normalizeLocalOutSource(localSource: string, raw: string, line: number): string {
+  const text = raw.trim();
+  if (!text) return localSource;
+  const amountOnly = text.match(/^at\s+(.+)$/i);
+  if (amountOnly) return `${localSource} at ${amountOnly[1]}`;
+  const port = text.match(/^(out|main|aux|lp|hp|bp|np|L|R)(?:\s+at\s+(.+))?$/i);
+  if (!port) {
+    throw new LanguageError([{ line, message: `inside an object, OUT expects [port] [AT amount] TO destination` }]);
+  }
+  return `${localSource}.${port[1]}${port[2] ? ` at ${port[2]}` : ''}`;
+}
+
+function compileOut(
   lineText: string,
   line: number,
+  localSource: string | null,
   voices: Set<string>,
   fxs: Set<string>,
   filters: Set<string>,
+  drumkits: Set<string>,
   voiceEmbeddedFilters: Map<string, string>,
   voiceSoundIds: Map<string, string>,
-): string {
-  const body = lineText.trim().replace(/^PLAY\s+/i, '');
-  if (body === lineText.trim()) throw new LanguageError([{ line, message: 'PLAY expects a source' }]);
-
-  const pieces = body.split(/\s+(through|then)\s+/i);
-  if (pieces.length < 3 || pieces[1].toLowerCase() !== 'through' || pieces.length % 2 === 0) {
-    throw new LanguageError([{ line, message: 'PLAY expects source through destination [then destination ...]' }]);
+): { code: string; sources: string[] } {
+  const rawBody = lineText.trim().replace(/^OUT\b/i, '').trim();
+  const body = localSource && /^to\b/i.test(rawBody) ? `${localSource} ${rawBody}` : rawBody;
+  const rawPieces = body.split(/\s+to\s+/i);
+  if (rawPieces.length < 2) {
+    throw new LanguageError([{ line, message: 'OUT expects [source/port] [AT amount] TO destination [AT amount TO destination ...]' }]);
   }
 
-  const endpoints: PlayEndpoint[] = [];
-  const separators: string[] = [];
-  for (let index = 0; index < pieces.length; index += 2) {
-    endpoints.push(parsePlayEndpoint(pieces[index], line));
-    if (index + 1 < pieces.length) separators.push(pieces[index + 1].toLowerCase());
-  }
-  if (separators.slice(1).some((separator) => separator !== 'then')) {
-    throw new LanguageError([{ line, message: "after the first 'through', PLAY chains use 'then'" }]);
-  }
+  const pieces = [...rawPieces];
+  if (localSource) pieces[0] = normalizeLocalOutSource(localSource, pieces[0], line);
+  else if (!pieces[0].trim()) throw new LanguageError([{ line, message: 'top-level OUT requires an explicit source object' }]);
 
-  const kindOf = (name: string): PlayObjectKind => {
+  const endpoints = pieces.map((piece) => parseOutEndpoint(piece, line));
+
+  const kindOf = (name: string): OutObjectKind => {
     if (voices.has(name)) {
       const sound = voiceSoundIds.get(name) ?? '';
       if (sound === 'matter') return 'matter';
@@ -2557,44 +2614,34 @@ function compilePlay(
       return 'voice';
     }
     if (fxs.has(name)) return 'fx';
+    if (drumkits.has(name)) return 'drumkit';
     if (filters.has(name)) return 'filter';
     if (name.toUpperCase() === 'MAIN') return 'main';
-    throw new LanguageError([{ line, message: `unknown PLAY object '${name}'` }]);
+    throw new LanguageError([{ line, message: `unknown OUT object '${name}'` }]);
   };
 
-  const sourceSignal = (endpoint: PlayEndpoint, kind: PlayObjectKind): PlaySignal => {
-    if (kind === 'main') throw new LanguageError([{ line, message: 'MAIN cannot be used as a PLAY source' }]);
+  const sourceSignal = (endpoint: OutEndpoint, kind: OutObjectKind): OutSignal => {
+    if (kind === 'main') throw new LanguageError([{ line, message: 'MAIN cannot be used as an OUT source' }]);
 
     if (kind === 'filter') {
       if (endpoint.channel) throw new LanguageError([{ line, message: 'FILTER outputs are mono; .L/.R are not valid' }]);
-      if (endpoint.port === 'in' || endpoint.port === 'in2') {
-        throw new LanguageError([{ line, message: `FILTER '${endpoint.name}' input cannot be used as an audio source` }]);
-      }
+      if (endpoint.port === 'in' || endpoint.port === 'in2') throw new LanguageError([{ line, message: `FILTER '${endpoint.name}' input cannot be used as an audio source` }]);
       if (endpoint.port && !['lp', 'hp', 'bp', 'np'].includes(endpoint.port)) {
         throw new LanguageError([{ line, message: `FILTER '${endpoint.name}' output must be .lp, .hp, .bp, or .np` }]);
       }
       return { stereo: false, mono: `${endpoint.name}.${endpoint.port ?? 'lp'}` };
     }
 
-    if (kind === 'fx') {
-      if (endpoint.port) throw new LanguageError([{ line, message: 'FX outputs use .L/.R, not named mono ports' }]);
-      if (endpoint.channel) {
-        return { stereo: false, mono: `${endpoint.name}.${endpoint.channel === 'R' ? 'out_R' : 'out_L'}` };
-      }
-      return {
-        stereo: true,
-        left: `${endpoint.name}.out_L`,
-        right: `${endpoint.name}.out_R`,
-        primary: `${endpoint.name}.out_L`,
-      };
+    if (kind === 'fx' || kind === 'drumkit') {
+      if (endpoint.port) throw new LanguageError([{ line, message: `${kind.toUpperCase()} outputs use .L/.R, not named mono ports` }]);
+      if (endpoint.channel) return { stereo: false, mono: `${endpoint.name}.${endpoint.channel === 'R' ? 'out_R' : 'out_L'}` };
+      return { stereo: true, left: `${endpoint.name}.out_L`, right: `${endpoint.name}.out_R`, primary: `${endpoint.name}.out_L` };
     }
 
     const embeddedFilter = voiceEmbeddedFilters.get(endpoint.name);
     if (embeddedFilter) {
       if (endpoint.channel) throw new LanguageError([{ line, message: 'VOICE/FILTER outputs are mono; .L/.R are not valid' }]);
-      if (endpoint.port === 'in' || endpoint.port === 'in2') {
-        throw new LanguageError([{ line, message: `input selector '${endpoint.port}' cannot be used as an output of '${endpoint.name}'` }]);
-      }
+      if (endpoint.port === 'in' || endpoint.port === 'in2') throw new LanguageError([{ line, message: `input selector '${endpoint.port}' cannot be used as an output of '${endpoint.name}'` }]);
       if (endpoint.port && !['lp', 'hp', 'bp', 'np'].includes(endpoint.port)) {
         throw new LanguageError([{ line, message: `VOICE '${endpoint.name}' contains FILTER '${embeddedFilter}'; available outputs are .lp, .hp, .bp, .np` }]);
       }
@@ -2603,76 +2650,46 @@ function compilePlay(
 
     if (kind === 'voice') {
       if (endpoint.channel) throw new LanguageError([{ line, message: 'VOICE outputs are mono ports; .L/.R are not valid' }]);
-      if (endpoint.port === 'in' || endpoint.port === 'in2') {
-        throw new LanguageError([{ line, message: `VOICE '${endpoint.name}' does not expose an audio input` }]);
-      }
-      if (endpoint.port && !['out', 'aux'].includes(endpoint.port)) {
-        throw new LanguageError([{ line, message: `VOICE '${endpoint.name}' output must be .out or .aux` }]);
-      }
+      if (endpoint.port === 'in' || endpoint.port === 'in2') throw new LanguageError([{ line, message: `VOICE '${endpoint.name}' does not expose an audio input` }]);
+      if (endpoint.port && !['out', 'aux'].includes(endpoint.port)) throw new LanguageError([{ line, message: `VOICE '${endpoint.name}' output must be .out or .aux` }]);
       return { stereo: false, mono: `${endpoint.name}.${endpoint.port ?? 'out'}` };
     }
 
     if (endpoint.channel) throw new LanguageError([{ line, message: `${kind} outputs use named MAIN/AUX ports, not .L/.R` }]);
-    // When an input selector is used on an intermediate endpoint (for example
-    // `THROUGH body.in2 THEN MAIN`), the following edge uses the default stereo
-    // output of the same object.
     const outputPort = endpoint.port === 'in' || endpoint.port === 'in2' ? null : endpoint.port;
-    if (outputPort && !['out', 'main', 'aux'].includes(outputPort)) {
-      throw new LanguageError([{ line, message: `${kind} '${endpoint.name}' output must be .main/.out or .aux` }]);
-    }
+    if (outputPort && !['out', 'main', 'aux'].includes(outputPort)) throw new LanguageError([{ line, message: `${kind} '${endpoint.name}' output must be .main/.out or .aux` }]);
     if (outputPort === 'out' || outputPort === 'main') return { stereo: false, mono: `${endpoint.name}.out` };
     if (outputPort === 'aux') return { stereo: false, mono: `${endpoint.name}.aux` };
-    return {
-      stereo: true,
-      left: `${endpoint.name}.out`,
-      right: `${endpoint.name}.aux`,
-      primary: `${endpoint.name}.out`,
-    };
+    return { stereo: true, left: `${endpoint.name}.out`, right: `${endpoint.name}.aux`, primary: `${endpoint.name}.out` };
   };
 
-  const targetInput = (endpoint: PlayEndpoint, kind: PlayObjectKind): PlayInput | null => {
+  const targetInput = (endpoint: OutEndpoint, kind: OutObjectKind): OutInput | null => {
     if (kind === 'main') return null;
-
-    if (kind === 'voice') {
-      throw new LanguageError([{ line, message: `object '${endpoint.name}' does not expose an audio input` }]);
-    }
+    if (kind === 'voice') throw new LanguageError([{ line, message: `object '${endpoint.name}' does not expose an audio input` }]);
+    if (kind === 'drumkit') throw new LanguageError([{ line, message: `DRUMKIT '${endpoint.name}' does not expose an audio input` }]);
 
     if (kind === 'filter') {
       if (endpoint.channel) throw new LanguageError([{ line, message: 'FILTER input is mono; .L/.R are not valid' }]);
       if (endpoint.port === 'in2') throw new LanguageError([{ line, message: `FILTER '${endpoint.name}' has no .in2 input` }]);
-      // An output selector on an intermediate node selects which FILTER output
-      // is used by the next edge; audio still enters the filter's default IN.
-      if (endpoint.port && !['in', 'lp', 'hp', 'bp', 'np'].includes(endpoint.port)) {
-        throw new LanguageError([{ line, message: `FILTER '${endpoint.name}' has no input '${endpoint.port}'` }]);
-      }
+      if (endpoint.port && !['in', 'lp', 'hp', 'bp', 'np'].includes(endpoint.port)) throw new LanguageError([{ line, message: `FILTER '${endpoint.name}' has no input '${endpoint.port}'` }]);
       return { stereo: false, mono: `${endpoint.name}.in` };
     }
 
     if (kind === 'resonator') {
       if (endpoint.channel) throw new LanguageError([{ line, message: `resonator '${endpoint.name}' has one mono audio input` }]);
       if (endpoint.port === 'in2') throw new LanguageError([{ line, message: `resonator '${endpoint.name}' has no .in2 input` }]);
-      if (endpoint.port && !['in', 'out', 'main', 'aux'].includes(endpoint.port)) {
-        throw new LanguageError([{ line, message: `resonator '${endpoint.name}' has no input '${endpoint.port}'` }]);
-      }
+      if (endpoint.port && !['in', 'out', 'main', 'aux'].includes(endpoint.port)) throw new LanguageError([{ line, message: `resonator '${endpoint.name}' has no input '${endpoint.port}'` }]);
       return { stereo: false, mono: `${endpoint.name}.in` };
     }
 
     if (kind === 'matter') {
       if (endpoint.channel) throw new LanguageError([{ line, message: `matter '${endpoint.name}' external inputs are mono` }]);
-      if (endpoint.port && !['in', 'in2', 'out', 'main', 'aux'].includes(endpoint.port)) {
-        throw new LanguageError([{ line, message: `matter '${endpoint.name}' has no input '${endpoint.port}'` }]);
-      }
+      if (endpoint.port && !['in', 'in2', 'out', 'main', 'aux'].includes(endpoint.port)) throw new LanguageError([{ line, message: `matter '${endpoint.name}' has no input '${endpoint.port}'` }]);
       return { stereo: false, mono: `${endpoint.name}.${endpoint.port === 'in2' ? 'in2' : 'in'}` };
     }
 
-    // Stereo FX can be addressed as a stereo destination, or one channel can
-    // be selected explicitly with .L/.R. Output channel selectors on an
-    // intermediate FX therefore naturally select the same channel on both
-    // incoming and outgoing edges.
     if (endpoint.port) throw new LanguageError([{ line, message: `FX '${endpoint.name}' input uses .L/.R channel selectors` }]);
-    if (endpoint.channel) {
-      return { stereo: false, mono: `${endpoint.name}.${endpoint.channel === 'R' ? 'inR' : 'inL'}` };
-    }
+    if (endpoint.channel) return { stereo: false, mono: `${endpoint.name}.${endpoint.channel === 'R' ? 'inR' : 'inL'}` };
     return { stereo: true, left: `${endpoint.name}.inL`, right: `${endpoint.name}.inR` };
   };
 
@@ -2701,7 +2718,6 @@ function compilePlay(
 
     const input = targetInput(target, targetKind);
     if (!input) throw new LanguageError([{ line, message: `object '${target.name}' does not expose an audio input` }]);
-
     if (input.stereo) {
       if (signal.stereo) {
         routes.push(`${signal.left}(${amount}) -> ${input.left};`);
@@ -2711,18 +2727,15 @@ function compilePlay(
         routes.push(`${signal.mono}(${amount}) -> ${input.right};`);
       }
     } else {
-      // Stereo -> mono coercion uses the object's primary channel. For all
-      // current stereo Sonus objects that is MAIN/L; explicit .aux/.R always
-      // overrides the coercion at the source endpoint.
       routes.push(`${signal.stereo ? signal.primary : signal.mono}(${amount}) -> ${input.mono};`);
     }
   }
 
   if (endpoints[endpoints.length - 1].amount !== 100) {
-    throw new LanguageError([{ line, message: "'at' belongs to the outgoing route; the final PLAY destination cannot have 'at'" }]);
+    throw new LanguageError([{ line, message: "'AT' belongs to the outgoing route; the final OUT destination cannot have AT" }]);
   }
 
-  return routes.join('\n');
+  return { code: routes.join('\n'), sources: endpoints.slice(0, -1).map((endpoint) => endpoint.name) };
 }
 
 
@@ -2955,49 +2968,54 @@ export function compileLanguageSource(source: string): string {
   const capabilitySet = parseProgramCapabilities(source);
   const lines = source.replace(/\r\n/g, '\n').split('\n');
 
-  // Multiline structured SET values are collapsed to a single synthetic line
-  // before the normal statement pass. The physical child lines remain empty so
-  // diagnostics and editor line numbering stay stable.
+  // Collapse multiline KIT lists while preserving physical line count.
   for (let index = 0; index < lines.length; index += 1) {
     const raw = stripComment(lines[index]);
     const trimmed = raw.trim();
-    const declaration = trimmed.match(/^SET\s+([A-Za-z_][A-Za-z0-9_]*)\s+TYPE\s+ENVELOPE\s*:\s*$/i);
-    if (!declaration) continue;
+    const start = trimmed.match(/^(SET\s+[A-Za-z_][A-Za-z0-9_]*\s*:\s*KIT(?:\s+[A-Za-z_][A-Za-z0-9_]*)?|KIT\s+[A-Za-z_][A-Za-z0-9_]*)\s*\[\s*$/i);
+    if (!start) continue;
     const indentation = raw.length - raw.trimStart().length;
-    const properties: string[] = [];
+    const entries: string[] = [];
     let next = index + 1;
+    let closed = false;
     while (next < lines.length) {
       const childRaw = stripComment(lines[next]);
       const childTrimmed = childRaw.trim();
       if (!childTrimmed) { lines[next] = ''; next += 1; continue; }
+      if (childTrimmed === ']') { lines[next] = ''; closed = true; break; }
+      const childIndentation = childRaw.length - childRaw.trimStart().length;
+      if (childIndentation <= indentation) break;
+      entries.push(childTrimmed); lines[next] = ''; next += 1;
+    }
+    if (!closed) throw new LanguageError([{ line: index + 1, message: 'KIT list requires a closing ]' }]);
+    lines[index] = `${' '.repeat(indentation)}${start[1]} [${entries.join('; ')}]`;
+  }
+
+  // Multiline ENVELOPE values use the same bracketed structured SET syntax as KIT.
+  for (let index = 0; index < lines.length; index += 1) {
+    const raw = stripComment(lines[index]);
+    const trimmed = raw.trim();
+    const declaration = trimmed.match(/^SET\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*ENVELOPE\s*\[\s*$/i);
+    if (!declaration) continue;
+    const indentation = raw.length - raw.trimStart().length;
+    const properties: string[] = [];
+    let next = index + 1;
+    let closed = false;
+    while (next < lines.length) {
+      const childRaw = stripComment(lines[next]);
+      const childTrimmed = childRaw.trim();
+      if (!childTrimmed) { lines[next] = ''; next += 1; continue; }
+      if (childTrimmed === ']') { lines[next] = ''; closed = true; break; }
       const childIndentation = childRaw.length - childRaw.trimStart().length;
       if (childIndentation <= indentation) break;
       properties.push(childTrimmed);
       lines[next] = '';
       next += 1;
     }
-    if (properties.length === 0) {
-      throw new LanguageError([{ line: index + 1, message: 'SET <name> TYPE ENVELOPE requires one or more indented properties' }]);
+    if (!closed || properties.length === 0) {
+      throw new LanguageError([{ line: index + 1, message: 'SET <name>: ENVELOPE [ ... ] requires one or more properties and a closing ]' }]);
     }
     lines[index] = `${' '.repeat(indentation)}SET ${declaration[1]}: ENVELOPE [${properties.join(', ')}]`;
-  }
-
-  // PLAY continuations are physical lines beginning with indented THROUGH/THEN.
-  // Collapse them onto the first line for parsing while preserving output line count.
-  for (let index = 0; index < lines.length; index += 1) {
-    if (!/^\s*PLAY\b/i.test(stripComment(lines[index]).trimStart())) continue;
-    let combined = stripComment(lines[index]).trim();
-    let next = index + 1;
-    while (next < lines.length) {
-      const continuationRaw = stripComment(lines[next]);
-      const continuation = continuationRaw.trim();
-      const indentation = continuationRaw.length - continuationRaw.trimStart().length;
-      if (indentation <= 0 || !/^(through|then)\b/i.test(continuation)) break;
-      combined += ` ${continuation}`;
-      lines[next] = '';
-      next += 1;
-    }
-    lines[index] = combined;
   }
 
   const output = Array(lines.length).fill('') as string[];
@@ -3013,6 +3031,10 @@ export function compileLanguageSource(source: string): string {
   const localSourceDefinitions = new Map<string, Map<string, SourceDefinition>>();
   const localSourceKinds = new Map<string, Map<string, SourceKind>>();
   const modSources = new Map<string, ModSourceDefinition>();
+  const drumkits = new Set<string>();
+  const pendingOuts: Array<{ index: number; line: number; text: string; localSource: string | null }> = [];
+  const kitDefinitions = new Map<string, DrumKitDefinition>([['sonus606', cloneDrumKit(SONUS606_KIT)]]);
+  const localKitDefinitions = new Map<string, Map<string, DrumKitDefinition>>();
 
   const scopedDefinitions = (scope: string | null, parentScope: string | null = null): Map<string, SourceDefinition> => {
     const result = new Map(sourceDefinitions);
@@ -3049,6 +3071,7 @@ export function compileLanguageSource(source: string): string {
   let currentFx: FxState | null = null;
   let currentFilter: FilterState | null = null;
   let currentMod: ModState | null = null;
+  let currentDrumkit: DrumkitState | null = null;
 
   for (let index = 0; index < lines.length; index += 1) {
     const lineNumber = index + 1;
@@ -3070,12 +3093,26 @@ export function compileLanguageSource(source: string): string {
 
     try {
       if (currentMod && indentation <= currentMod.indentation) currentMod = null;
+      if (currentDrumkit && indentation <= currentDrumkit.indentation) { if (!currentDrumkit.kit) diagnostics.push({ line: currentDrumkit.line, message: `DRUMKIT '${currentDrumkit.name}' requires KIT` }); currentDrumkit = null; }
       if (currentSeq && indentation <= currentSeq.indentation) { requireSeqReady(currentSeq, diagnostics); currentSeq = null; }
       if (currentRegister && indentation <= currentRegister.indentation) { requireRegisterReady(currentRegister, diagnostics); currentRegister = null; }
       if (currentClock && indentation <= currentClock.indentation) { requireClockReady(currentClock, diagnostics); currentClock = null; }
       if (currentFilter && indentation <= currentFilter.indentation) {
         requireFilterModel(currentFilter, diagnostics);
         currentFilter = null;
+      }
+
+      const drumkitBlockMatch = trimmed.match(/^(_)?DRUMKIT\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*$/i);
+      if (drumkitBlockMatch) {
+        if (indentation > 0) throw new LanguageError([{ line: lineNumber, message: 'DRUMKIT is currently a top-level object' }]);
+        const disabled = Boolean(drumkitBlockMatch[1]);
+        const name = drumkitBlockMatch[2];
+        if (drumkits.has(name) || voices.has(name) || fxs.has(name) || filters.has(name)) throw new LanguageError([{ line: lineNumber, message: `duplicate object: ${name}` }]);
+        drumkits.add(name);
+        currentDrumkit = { name, line: lineNumber, indentation, kit: null };
+        currentVoice = null; currentFx = null; currentFilter = null; currentMod = null;
+        output[index] = `__drumkit(${JSON.stringify(name)},${disabled});`;
+        continue;
       }
 
       const clockBlockMatch = trimmed.match(/^(_)?CLOCK\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
@@ -3290,7 +3327,15 @@ export function compileLanguageSource(source: string): string {
 
       if (/^_?CLOCK\b/i.test(trimmed)) {
         const localOwner = indentation > 0
-          ? (currentFilter ? `filter:${currentFilter.internalName}` : currentVoice ? `voice:${currentVoice.name}` : currentFx ? `fx:${currentFx.name}` : null)
+          ? (currentFilter
+              ? `filter:${currentFilter.internalName}`
+              : currentVoice
+                ? `voice:${currentVoice.name}`
+                : currentFx
+                  ? `fx:${currentFx.name}`
+                  : currentDrumkit
+                    ? `drumkit:${currentDrumkit.name}`
+                    : null)
           : null;
         const parentScope = currentFilter?.ownerVoice ? `voice:${currentFilter.ownerVoice}` : null;
         if (localOwner) {
@@ -3333,8 +3378,31 @@ export function compileLanguageSource(source: string): string {
       }
 
       if (/^SET\b/i.test(trimmed)) {
+        const setKit = trimmed.match(/^SET\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*KIT(?:\s+([A-Za-z_][A-Za-z0-9_]*))?\s*\[(.*)\]\s*$/i);
+        if (setKit) {
+          const setName = setKit[1];
+          const local = currentDrumkit !== null && indentation > currentDrumkit.indentation;
+          const scoped = local ? (localKitDefinitions.get(currentDrumkit!.name) ?? new Map<string, DrumKitDefinition>()) : null;
+          if (local && scoped && !localKitDefinitions.has(currentDrumkit!.name)) localKitDefinitions.set(currentDrumkit!.name, scoped);
+          if (!local && indentation > 0) throw new LanguageError([{ line: lineNumber, message: 'local KIT SET is currently supported inside DRUMKIT' }]);
+          const baseName = setKit[2];
+          const base = baseName ? (scoped?.get(baseName) ?? kitDefinitions.get(baseName.toLowerCase()) ?? kitDefinitions.get(baseName)) : { entries: new Map<string, DrumKitEntry>() };
+          if (!base) throw new LanguageError([{ line: lineNumber, message: `unknown KIT '${baseName}'` }]);
+          const defined = applyDrumKitEntries(base, setKit[3], lineNumber);
+          if (local) scoped!.set(setName, defined); else kitDefinitions.set(setName, defined);
+          output[index] = '';
+          continue;
+        }
         const localOwner = indentation > 0
-          ? (currentFilter ? `filter:${currentFilter.internalName}` : currentVoice ? `voice:${currentVoice.name}` : currentFx ? `fx:${currentFx.name}` : null)
+          ? (currentFilter
+              ? `filter:${currentFilter.internalName}`
+              : currentVoice
+                ? `voice:${currentVoice.name}`
+                : currentFx
+                  ? `fx:${currentFx.name}`
+                  : currentDrumkit
+                    ? `drumkit:${currentDrumkit.name}`
+                    : null)
           : null;
         const parentScope = currentFilter?.ownerVoice ? `voice:${currentFilter.ownerVoice}` : null;
         if (localOwner) {
@@ -3385,12 +3453,51 @@ export function compileLanguageSource(source: string): string {
         continue;
       }
 
-      if (/^PLAY\b/i.test(trimmed)) {
-        requireVoiceSound(currentVoice, diagnostics);
-        requireFxModel(currentFx, diagnostics);
-        currentVoice = null;
-        currentFx = null;
-        output[index] = compilePlay(trimmed, lineNumber, voices, fxs, filters, voiceEmbeddedFilters, voiceSoundIds);
+      if (/^OUT\b/i.test(trimmed)) {
+        const localSource = indentation > 0
+          ? (currentFilter
+              ? (currentFilter.ownerVoice ?? currentFilter.name)
+              : currentVoice
+                ? currentVoice.name
+                : currentFx
+                  ? currentFx.name
+                  : currentDrumkit
+                    ? currentDrumkit.name
+                    : null)
+          : null;
+        if (indentation > 0 && !localSource) {
+          throw new LanguageError([{ line: lineNumber, message: 'OUT can be local only inside an audio object' }]);
+        }
+        pendingOuts.push({ index, line: lineNumber, text: trimmed, localSource });
+        output[index] = '';
+        continue;
+      }
+
+      if (currentDrumkit && indentation > currentDrumkit.indentation) {
+        const kitLine = trimmed.match(/^KIT\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s*\[(.*)\])?\s*$/i);
+        if (kitLine) {
+          const local = localKitDefinitions.get(currentDrumkit.name);
+          const base = local?.get(kitLine[1]) ?? kitDefinitions.get(kitLine[1].toLowerCase()) ?? kitDefinitions.get(kitLine[1]);
+          if (!base) throw new LanguageError([{ line: lineNumber, message: `unknown KIT '${kitLine[1]}'` }]);
+          currentDrumkit.kit = kitLine[2] === undefined ? cloneDrumKit(base) : applyDrumKitEntries(base, kitLine[2], lineNumber);
+          output[index] = `__drumkitmeta(${JSON.stringify(currentDrumkit.name)},${JSON.stringify(kitLine[1])});`;
+          continue;
+        }
+        if (!currentDrumkit.kit) throw new LanguageError([{ line: lineNumber, message: `DRUMKIT '${currentDrumkit.name}' requires KIT before instrument lines` }]);
+        const split = splitEveryClause(trimmed);
+        const soundPart = split.base.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(.+))?$/i);
+        if (!soundPart) throw new LanguageError([{ line: lineNumber, message: `invalid DRUMKIT instrument line '${trimmed}'` }]);
+        const alias = soundPart[1];
+        const entry = currentDrumkit.kit.entries.get(alias);
+        if (!entry) throw new LanguageError([{ line: lineNumber, message: `unknown KIT alias '${alias}'` }]);
+        const params = drumParameterDefaults(entry.source, soundPart[2] ?? '', lineNumber, entry.defaults);
+        if (!split.every) {
+          output[index] = `__drumslot(${JSON.stringify(currentDrumkit.name)},${JSON.stringify(alias)},${JSON.stringify(entry.source)},${JSON.stringify(serializeDrumParams(params))},0,"ms",100,false,false,"Clock");`;
+          continue;
+        }
+        const timing = parseEverySpec(split.every, lineNumber, scopedDefinitions(`drumkit:${currentDrumkit.name}`));
+        const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+        output[index] = `${prefix}__drumslot(${JSON.stringify(currentDrumkit.name)},${JSON.stringify(alias)},${JSON.stringify(entry.source)},${JSON.stringify(serializeDrumParams(params))},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
         continue;
       }
 
@@ -3420,12 +3527,12 @@ export function compileLanguageSource(source: string): string {
       }
 
       if (/^[A-Za-z_][A-Za-z0-9_]*\s*:/.test(trimmed)) {
-        throw new LanguageError([{ line: lineNumber, message: 'only VOICE, FX, FILTER, MOD, SEQ, REGISTER and CLOCK blocks are supported' }]);
+        throw new LanguageError([{ line: lineNumber, message: 'only VOICE, FX, FILTER, MOD, SEQ, REGISTER, DRUMKIT and CLOCK blocks are supported' }]);
       }
 
       throw new LanguageError([{
         line: lineNumber,
-        message: 'each top-level statement must begin with VOICE, FX, FILTER, MOD, SEQ, REGISTER, SET, CLOCK, MAIN, or PLAY',
+        message: 'each top-level statement must begin with VOICE, FX, FILTER, MOD, SEQ, REGISTER, DRUMKIT, SET, CLOCK, MAIN, or OUT',
       }]);
     } catch (error) {
       if (error instanceof LanguageError) diagnostics.push(...error.diagnostics);
@@ -3438,7 +3545,45 @@ export function compileLanguageSource(source: string): string {
   requireFilterModel(currentFilter, diagnostics);
   requireSeqReady(currentSeq, diagnostics);
   requireRegisterReady(currentRegister, diagnostics);
+  if (currentDrumkit && !currentDrumkit.kit) diagnostics.push({ line: currentDrumkit.line, message: `DRUMKIT '${currentDrumkit.name}' requires KIT` });
+
+  const explicitRouteSources = new Set<string>();
+  for (const pending of pendingOuts) {
+    try {
+      const compiled = compileOut(
+        pending.text,
+        pending.line,
+        pending.localSource,
+        voices,
+        fxs,
+        filters,
+        drumkits,
+        voiceEmbeddedFilters,
+        voiceSoundIds,
+      );
+      output[pending.index] = compiled.code;
+      for (const sourceName of compiled.sources) explicitRouteSources.add(sourceName);
+    } catch (error) {
+      if (error instanceof LanguageError) diagnostics.push(...error.diagnostics);
+      else throw error;
+    }
+  }
+
+  const implicitRoutes: string[] = [];
+  const autoRoute = (name: string): void => {
+    if (explicitRouteSources.has(name)) return;
+    try {
+      implicitRoutes.push(compileOut(`OUT ${name} TO MAIN`, 0, null, voices, fxs, filters, drumkits, voiceEmbeddedFilters, voiceSoundIds).code);
+    } catch (error) {
+      if (error instanceof LanguageError) diagnostics.push(...error.diagnostics);
+      else throw error;
+    }
+  };
+  for (const name of voices) autoRoute(name);
+  for (const name of fxs) autoRoute(name);
+  for (const name of filters) autoRoute(name);
+  for (const name of drumkits) autoRoute(name);
 
   if (diagnostics.length > 0) throw new LanguageError(diagnostics);
-  return output.join('\n');
+  return [...output, ...implicitRoutes].join('\n');
 }

@@ -6,7 +6,7 @@ import { parameterUpdatePolicy, type ParameterUpdatePolicy } from './language/pa
 
 type Screen = 'live' | 'config' | 'help' | 'about' | 'scheme';
 
-const VERSION = '0.3.0';
+const VERSION = '0.5.0';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Missing #app');
@@ -59,7 +59,7 @@ app.innerHTML = `
       <div id="about-screen" class="screen system-screen hidden" aria-hidden="true">
         <div class="system-title">ABOUT SONUS UMBRAE</div>
         <div class="rule"></div>
-        <div class="about-copy">A WEB-BASED LIVE CODING ENVIRONMENT FOR GENERATIVE AUDIO, MODULATION, ROUTING AND PERFORMANCE-ORIENTED CONTROL.</div>
+        <div class="about-copy">A LIVE CODING LANGUAGE AND ENVIRONMENT FOR GENERATIVE AUDIO, MODULATION, SYNTHESIS AND SIGNAL ROUTING.</div>
         <div class="about-grid">
           <span>VERSION</span><span>${VERSION}</span>
           <span>RUNTIME</span><span>TYPESCRIPT · WEB AUDIO · AUDIOWORKLET · WASM</span>
@@ -900,7 +900,7 @@ function notify(text: string): void {
 function normalizeLanguageCommandCase(): void {
   const normalized = editor.value
     .replace(
-      /^(\s*)(use|voice|fx|filter|seq|register|play|set|clock|main)(?=\s|$)/gim,
+      /^(\s*)(use|voice|fx|filter|seq|register|out|set|clock|main)(?=\s|$)/gim,
       (_match, indentation: string, commandName: string) => `${indentation}${commandName.toUpperCase()}`,
     )
     .replace(
@@ -916,18 +916,7 @@ function normalizeLanguageCommandCase(): void {
       (_match, indentation: string) => `${indentation}model`,
     )
     .replace(
-      /^(\s*PLAY\s+[A-Za-z_]\w*(?:\.(?:out|aux))?\s+through\s+)main(?:\.([lr]))?/gim,
-      (_match, prefix: string, channel: string | undefined) =>
-        `${prefix}MAIN${channel ? `.${channel.toUpperCase()}` : ''}`,
-    )
-    .replace(
-      /^(\s*PLAY\b.*)$/gim,
-      (line: string) => line
-        .replace(/\bmain\b/gi, 'MAIN')
-        .replace(/\.([lr])\b/gi, (_match, channel: string) => `.${channel.toUpperCase()}`),
-    )
-    .replace(
-      /^(\s*(?:through|then)\b.*)$/gim,
+      /^(\s*OUT\b.*)$/gim,
       (line: string) => line
         .replace(/\bmain\b/gi, 'MAIN')
         .replace(/\.([lr])\b/gi, (_match, channel: string) => `.${channel.toUpperCase()}`),
@@ -2530,7 +2519,7 @@ function statementLabels(source: string): string[] {
   for (let index = 0; index < lines.length; index += 1) {
     const trimmed = lines[index].trim();
     if (!trimmed || trimmed.startsWith('//')) continue;
-    if (/^_?(VOICE|FX|FILTER|MOD|SEQ|SET|CLOCK|PLAY)\b/i.test(trimmed)) {
+    if (/^_?(VOICE|FX|FILTER|MOD|SEQ|SET|CLOCK|OUT)\b/i.test(trimmed)) {
       statement += 1;
       labels[index] = String(statement);
     }
@@ -2894,7 +2883,7 @@ function renderSyntaxLayer(): void {
     const trimmedCode = codePart.trim();
     const indentation = codePart.length - codePart.trimStart().length;
     if (trimmedCode && disabledBlockIndent !== null && indentation <= disabledBlockIndent) disabledBlockIndent = null;
-    const disabledHeader = /^_(?:VOICE|FILTER|FX|CLOCK)\b/i.test(trimmedCode);
+    const disabledHeader = /^_(?:VOICE|FILTER|FX|CLOCK|DRUMKIT)\b/i.test(trimmedCode);
     if (disabledHeader) disabledBlockIndent = indentation;
     if (disabledHeader || (disabledBlockIndent !== null && (!trimmedCode || indentation > disabledBlockIndent))) {
       row.classList.add('syntax-disabled-object');
@@ -3289,7 +3278,7 @@ audioStartButton.addEventListener('click', () => {
 });
 
 type LiveDisableDescriptor = {
-  kind: 'voice' | 'filter' | 'fx' | 'clock';
+  kind: 'voice' | 'filter' | 'fx' | 'clock' | 'drumkit';
   name: string;
   disabled: boolean;
 };
@@ -3315,6 +3304,12 @@ function liveDisableDescriptors(source: string): LiveDisableDescriptor[] {
     const namedClock = trimmed.match(/^(_)?CLOCK\s+([A-Za-z_][A-Za-z0-9_]*)\b/i);
     if (namedClock && !/^set$/i.test(namedClock[2])) {
       descriptors.push({ kind: 'clock', name: namedClock[2], disabled: Boolean(namedClock[1]) });
+      continue;
+    }
+    const drumkit = trimmed.match(/^(_)?DRUMKIT\s+([A-Za-z_][A-Za-z0-9_]*)\s*:/i);
+    if (drumkit) {
+      descriptors.push({ kind: 'drumkit', name: drumkit[2], disabled: Boolean(drumkit[1]) });
+      scopes.push({ indent, kind: 'drumkit', name: drumkit[2] });
       continue;
     }
     const voice = trimmed.match(/^(_)?VOICE\s+([A-Za-z_][A-Za-z0-9_]*)\s*:/i);
@@ -3358,7 +3353,8 @@ function applyImmediateLiveDisableEdits(): void {
     if (descriptor.kind === 'clock' && descriptor.name === 'Clock' && previous && !descriptor.disabled) {
       runtime.restartMusicalEpoch();
     }
-    audioEngine.setLiveObjectDisabled(descriptor.kind, descriptor.name, descriptor.disabled);
+    if (descriptor.kind === 'drumkit') runtime.setLiveDrumkitDisabled(descriptor.name, descriptor.disabled);
+    else audioEngine.setLiveObjectDisabled(descriptor.kind, descriptor.name, descriptor.disabled);
   }
   liveDisableSnapshot = nextSnapshot;
 }
@@ -3485,8 +3481,6 @@ editor.addEventListener('keydown', (event) => {
     let indentation = currentIndent;
     if (!trimmed) indentation = currentIndent.length >= 4 ? currentIndent.slice(0, -4) : '';
     else if (/^_?(VOICE|FX|FILTER|MOD|SEQ|CLOCK)\b.*:\s*$/i.test(trimmed)) indentation = `${currentIndent}    `;
-    else if (/^PLAY\b/i.test(trimmed) && !/\bthrough\b/i.test(trimmed)) indentation = `${currentIndent}    `;
-    else if (currentIndent.length > 0 && /^(through|then)\b/i.test(trimmed)) indentation = currentIndent;
 
     editor.setRangeText(`\n${indentation}`, start, end, 'end');
 

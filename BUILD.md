@@ -409,3 +409,10 @@ For a local release check:
 ```bash
 npm run pages:check
 ```
+
+## Sonus 606 drum DSP
+The experimental `sonus606` backend builds as `public/dsp/drumkit.wasm`.
+
+`npm run dsp:setup` fetches the MIT-licensed header-only upstream source into `vendor/drums606/`, and `npm run dsp:build` compiles the Sonus bridge.
+
+Before the `DRUMKIT` language object is integrated, test the backend independently at `/drumkit-harness.html`.

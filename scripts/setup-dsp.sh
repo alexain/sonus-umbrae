@@ -130,3 +130,17 @@ DSP sources ready.
 Next, make sure Emscripten is active in this shell (em++ must be in PATH), then run:
   npm run dsp:build
 MSG
+
+
+DRUMS606_DIR="$VENDOR/drums606"
+DRUMS606_REPO="https://github.com/analogcode/606-Inspired-Synth-Drums.git"
+if [[ ! -d "$DRUMS606_DIR/.git" ]]; then
+  rm -rf "$DRUMS606_DIR"
+  git clone --depth 1 "$DRUMS606_REPO" "$DRUMS606_DIR"
+else
+  git -C "$DRUMS606_DIR" fetch --depth 1 origin
+  git -C "$DRUMS606_DIR" reset --hard origin/HEAD
+fi
+for file in BassDrum.hpp Clap.hpp HiHats.hpp Snare.hpp Toms.hpp SynthDrumCommon.hpp; do
+  [[ -f "$DRUMS606_DIR/Source/$file" ]] || { echo "606 drum source missing: $file" >&2; exit 1; }
+done
