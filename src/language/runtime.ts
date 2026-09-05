@@ -1,6 +1,6 @@
 import { AudioEngine, type AudioProgram, type SignalKind } from '../audio/engine';
 import { evaluateExpression, ExpressionError, type ScalarValue } from './expression';
-import { RuntimeScheduler } from './runtime/scheduler';
+import { RuntimeScheduler, parseRuntimePatternSource } from './runtime/scheduler';
 import {
   createShiftRegister,
   readShiftRegister,
@@ -122,6 +122,29 @@ export interface LifeViewState {
   size: number;
   cells: boolean[];
   revision: number;
+}
+
+export interface DrumkitLaneViewState {
+  alias: string;
+  voice: 'kick' | 'snare' | 'clap' | 'hihat' | 'openhat' | 'lowtom' | 'hightom';
+  steps: number;
+  totalSteps: number;
+  page: number;
+  pageCount: number;
+  absoluteCursor: number;
+  clockRate: number;
+  hits: boolean[];
+  cursor: number;
+  lastTriggeredStep: number | null;
+  lastTriggeredAt: number | null;
+  revision: number;
+}
+
+export interface DrumkitViewState {
+  name: string;
+  steps: number;
+  disabled: boolean;
+  lanes: DrumkitLaneViewState[];
 }
 
 export interface InlinePianoViewState {
@@ -418,6 +441,7 @@ interface LanguageDrumSlotDefinition {
   drumkit: string; alias: string; voice: LanguageDrumVoiceId;
   params: { level:number; pan:number; tune:number; decay:number; transient:number; snappy:number; color:number; noise:number; humanize:number };
   amount:number; unit:'ms'|'sec'|'beat'; chance:number; drift:boolean; loose:boolean; clockSource:string;
+  euclidean: { hits:number; steps:number; rotate:number } | null;
 }
 
 interface LanguageModMetadata {
@@ -562,6 +586,71 @@ interface LanguageInlineScalarDefinition {
   expression: string;
 }
 
+function buildEuclideanPattern(hits: number, steps: number, rotate: number): boolean[] {
+  const pattern = Array.from({ length: steps }, () => false);
+  if (hits <= 0 || steps <= 0) return pattern;
+  for (let hit = 0; hit < hits; hit += 1) {
+    const base = Math.floor(hit * steps / hits);
+    const index = ((base + rotate) % steps + steps) % steps;
+    pattern[index] = true;
+  }
+  return pattern;
+}
+
+function drumViewLaneSteps(
+  slot: LanguageDrumSlotDefinition,
+  sourceClockRate: number,
+  fallbackSteps: number,
+): number {
+  const pattern = parseRuntimePatternSource(slot.clockSource);
+  if (pattern) return pattern.spec.steps;
+  if (slot.unit !== 'beat') return Math.max(1, fallbackSteps);
+  const rate = Number.isFinite(sourceClockRate) && sourceClockRate > 0 ? sourceClockRate : 1;
+  // The view spans four master beats. One visual cell corresponds to one
+  // actual tick of the lane clock, so triplets naturally use 12 cells,
+  // sixteenths 16, eighths 8, and so on.
+  return Math.max(1, Math.ceil(4 * rate - 1e-9));
+}
+
+function drumViewPattern(
+  slot: LanguageDrumSlotDefinition,
+  laneSteps: number,
+  masterBeatMs: number,
+): boolean[] {
+  const result = Array.from({ length: laneSteps }, () => false);
+  if (slot.amount <= 0) return result;
+
+  const pattern = parseRuntimePatternSource(slot.clockSource);
+  if (pattern) {
+    for (const event of pattern.spec.events) {
+      const index = event.index - 1;
+      if (index >= 0 && index < result.length) result[index] = true;
+    }
+    return result;
+  }
+
+  if (slot.unit !== 'beat') {
+    const intervalMs = slot.unit === 'sec' ? slot.amount * 1000 : slot.amount;
+    if (!Number.isFinite(masterBeatMs) || masterBeatMs <= 0 || intervalMs <= 0) return result;
+    const intervalBeats = intervalMs / masterBeatMs;
+    for (let beat = 0; beat < 4 - 1e-9; beat += intervalBeats) {
+      const cell = Math.floor((beat / 4) * laneSteps);
+      if (cell >= 0 && cell < laneSteps) result[cell] = true;
+    }
+    return result;
+  }
+
+  const euclidean = slot.euclidean;
+  const euclideanPattern = euclidean ? buildEuclideanPattern(euclidean.hits, euclidean.steps, euclidean.rotate) : null;
+  for (let tick = 0; tick < laneSteps; tick += 1) {
+    const due = euclideanPattern
+      ? euclideanPattern[tick % euclideanPattern.length]
+      : tick % slot.amount === 0;
+    if (due) result[tick] = true;
+  }
+  return result;
+}
+
 export class SonusRuntime {
   private parameterViews: ParameterViewState[] = [];
   private variableViews: VariableViewState[] = [];
@@ -570,6 +659,9 @@ export class SonusRuntime {
   private inlineViews = new Map<string, InlineViewState>();
   private turingViews = new Map<string, TuringViewState>();
   private lifeViews = new Map<string, LifeViewState>();
+  private drumkitViews = new Map<string, DrumkitViewState>();
+  private drumViewMasterBeat = 0;
+  private drumViewMasterBeatAt = performance.now();
 
   private scheme: SchemeModel = {
     nodes: [{ id: 'Audio', label: 'AUDIO OUT', kind: 'module', parameters: [] }],
@@ -606,11 +698,18 @@ export class SonusRuntime {
 
   restartMusicalEpoch(): void {
     this.scheduler.resetBeatPhase();
+    this.drumViewMasterBeat = 0;
+    this.drumViewMasterBeatAt = performance.now();
+    for (const view of this.drumkitViews.values()) {
+      for (const lane of view.lanes) lane.cursor = 0;
+    }
   }
 
   setLiveDrumkitDisabled(name: string, disabled: boolean): void {
     if (disabled) this.liveDisabledDrumkits.add(name);
     else this.liveDisabledDrumkits.delete(name);
+    const view = this.drumkitViews.get(name);
+    if (view) view.disabled = disabled;
   }
 
   validate(source: string): EvaluationResult[] {
@@ -622,6 +721,7 @@ export class SonusRuntime {
       inlineViews: this.inlineViews,
       turingViews: this.turingViews,
       lifeViews: this.lifeViews,
+      drumkitViews: this.drumkitViews,
       randomState: this.randomState,
     };
     try {
@@ -634,6 +734,7 @@ export class SonusRuntime {
       this.inlineViews = saved.inlineViews;
       this.turingViews = saved.turingViews;
       this.lifeViews = saved.lifeViews;
+      this.drumkitViews = saved.drumkitViews;
       this.randomState = saved.randomState;
     }
   }
@@ -666,6 +767,53 @@ export class SonusRuntime {
 
   getLifeViews(): LifeViewState[] {
     return [...this.lifeViews.values()].map((view) => ({ ...view, cells: [...view.cells] }));
+  }
+
+  getDrumkitViews(): DrumkitViewState[] {
+    const timing = this.audio.getClockTiming('Clock');
+    const beatMs = timing.beatDurationMs;
+    const elapsed = timing.running && Number.isFinite(beatMs) && beatMs > 0
+      ? Math.max(0, performance.now() - this.drumViewMasterBeatAt) / beatMs
+      : 0;
+    const beatPosition = this.drumViewMasterBeat + Math.min(0.999999, elapsed);
+    const cyclePosition = ((beatPosition % 4) + 4) % 4;
+
+    return [...this.drumkitViews.values()].map((view) => {
+      const disabled = view.disabled || this.liveDisabledDrumkits.has(view.name);
+      return {
+        ...view,
+        disabled,
+        lanes: view.lanes.map((lane) => {
+          const patternState = this.scheduler.getPatternState(`drum:${view.name}:${lane.alias}`);
+          const absoluteCursor = patternState
+            ? patternState.step
+            : lane.totalSteps > 0
+              ? Math.min(lane.totalSteps - 1, Math.floor(cyclePosition * lane.clockRate))
+              : 0;
+          const pageSize = lane.totalSteps > 32 ? 32 : Math.max(1, lane.totalSteps);
+          const pageCount = Math.max(1, Math.ceil(lane.totalSteps / pageSize));
+          const page = Math.min(pageCount - 1, Math.floor(absoluteCursor / pageSize));
+          const pageStart = page * pageSize;
+          const pageEnd = Math.min(lane.totalSteps, pageStart + pageSize);
+          const hits = lane.hits.slice(pageStart, pageEnd);
+          const lastTriggeredStep = lane.lastTriggeredStep !== null
+            && lane.lastTriggeredStep >= pageStart
+            && lane.lastTriggeredStep < pageEnd
+              ? lane.lastTriggeredStep - pageStart
+              : null;
+          return {
+            ...lane,
+            steps: hits.length,
+            page,
+            pageCount,
+            absoluteCursor,
+            hits,
+            cursor: absoluteCursor - pageStart,
+            lastTriggeredStep,
+          };
+        }),
+      };
+    });
   }
 
   resetLife(name?: string): string[] {
@@ -724,6 +872,7 @@ export class SonusRuntime {
       inlineViews: this.inlineViews,
       turingViews: this.turingViews,
       lifeViews: this.lifeViews,
+      drumkitViews: this.drumkitViews,
       scheme: this.scheme,
       randomState: this.randomState,
     };
@@ -738,6 +887,7 @@ export class SonusRuntime {
       this.inlineViews = saved.inlineViews;
       this.turingViews = saved.turingViews;
       this.lifeViews = saved.lifeViews;
+      this.drumkitViews = saved.drumkitViews;
       this.scheme = saved.scheme;
       this.randomState = saved.randomState;
     }
@@ -828,17 +978,17 @@ export class SonusRuntime {
     const languageFxPitchCycles = new Map<string, LanguageCycleDefinition>();
     const languageFxModulations: LanguageFxModulationDefinition[] = [];
     const languageMods = new Map<string, LanguageModMetadata>();
-    const languageDrumkits = new Map<string, { kit: string; disabled: boolean }>();
+    const languageDrumkits = new Map<string, { kit: string; disabled: boolean; viewSteps: number }>();
     const languageDrumSlots: LanguageDrumSlotDefinition[] = [];
     const languageModSets: LanguageModSetDirective[] = [];
     let languageMasterClock: LanguageMasterClockDefinition | null = null;
     for (const { source: line, line: lineNumber } of lines) {
       const drumkitDeclaration = parseLanguageDrumkitDirective(line);
-      if (drumkitDeclaration) { languageDrumkits.set(drumkitDeclaration.name, { kit: 'sonus606', disabled: drumkitDeclaration.disabled }); continue; }
+      if (drumkitDeclaration) { languageDrumkits.set(drumkitDeclaration.name, { kit: 'sonus606', disabled: drumkitDeclaration.disabled, viewSteps: drumkitDeclaration.viewSteps }); continue; }
       const drumkitMeta = parseLanguageDrumkitMetaDirective(line);
       if (drumkitMeta) {
         const previous = languageDrumkits.get(drumkitMeta.name);
-        languageDrumkits.set(drumkitMeta.name, { kit: drumkitMeta.kit, disabled: previous?.disabled ?? false });
+        languageDrumkits.set(drumkitMeta.name, { kit: drumkitMeta.kit, disabled: previous?.disabled ?? false, viewSteps: previous?.viewSteps ?? 0 });
         continue;
       }
       const drumSlot = parseLanguageDrumSlotDirective(line);
@@ -2667,10 +2817,19 @@ export class SonusRuntime {
         else parentRate = parent.rate;
       }
       definition.rate = parentRate * definition.localRate;
-      // Named clock feel is local to the clock object. It shares the master's
-      // nominal tempo/rate relationship but can carry independent jitter/drifter.
-      definition.jitter = definition.localJitter;
-      definition.drift = definition.localDrift;
+      // User-declared named clocks keep their feel local/independent. Internal
+      // PATTERN subdivision clocks are different: they are implementation
+      // details of the reference clock, so a PATTERN that defaults to CLOCK *4
+      // must inherit the master's jitter/drifter rather than silently becoming
+      // perfectly quantized. Explicit local feel would still win if an internal
+      // clock ever acquires one in the future.
+      const patternSubdivisionClock = name.startsWith('__clock_pattern_');
+      definition.jitter = patternSubdivisionClock && definition.localJitter === 0
+        ? masterJitter
+        : definition.localJitter;
+      definition.drift = patternSubdivisionClock && definition.localDrift === 0
+        ? masterTimingDrift
+        : definition.localDrift;
       definition.parameters = new Map([
         ['FROM', definition.parent === 'Clock' ? 'MASTER' : definition.parent.toUpperCase()],
         ['RATE', definition.rateLabel],
@@ -3152,8 +3311,42 @@ export class SonusRuntime {
       });
     }
 
+    const drumkitViews = new Map<string, DrumkitViewState>();
+    const masterBeatMs = clockBpm > 0 ? 60000 / clockBpm : Infinity;
+    for (const [name, definition] of languageDrumkits) {
+      if (definition.viewSteps <= 0) continue;
+      const lanes = languageDrumSlots
+        .filter((slot) => slot.drumkit === name && slot.amount > 0)
+        .map((slot): DrumkitLaneViewState => {
+          const patternSource = parseRuntimePatternSource(slot.clockSource);
+          const sourceClockName = patternSource?.sourceName ?? slot.clockSource.match(/^__euclidean_\d+_\d+_\d+__(.+)$/)?.[1] ?? slot.clockSource;
+          const sourceClockRate = sourceClockName === 'Clock' ? 1 : (clockSources.get(sourceClockName)?.rate ?? 1);
+          const previous = hotReload
+            ? this.drumkitViews.get(name)?.lanes.find((lane) => lane.alias === slot.alias)
+            : undefined;
+          const laneSteps = drumViewLaneSteps(slot, sourceClockRate, definition.viewSteps);
+          return {
+            alias: slot.alias,
+            voice: slot.voice,
+            steps: laneSteps,
+            totalSteps: laneSteps,
+            page: 0,
+            pageCount: Math.max(1, Math.ceil(laneSteps / 32)),
+            absoluteCursor: previous?.absoluteCursor ?? 0,
+            clockRate: sourceClockRate,
+            hits: drumViewPattern(slot, laneSteps, masterBeatMs),
+            cursor: previous?.cursor ?? 0,
+            lastTriggeredStep: previous?.lastTriggeredStep ?? null,
+            lastTriggeredAt: previous?.lastTriggeredAt ?? null,
+            revision: (previous?.revision ?? 0) + 1,
+          };
+        });
+      drumkitViews.set(name, { name, steps: definition.viewSteps, disabled: definition.disabled, lanes });
+    }
+
     this.turingViews = turingViews;
     this.lifeViews = lifeViews;
+    this.drumkitViews = drumkitViews;
     this.inlineViews = inlineViews;
     this.parameterViews = [...parameterViews.values()];
     this.variableViews = variableViews;
@@ -3163,6 +3356,22 @@ export class SonusRuntime {
     this.moduleViews = new Set(moduleViews);
     if (applyAudio) {
       this.stopSchedulers(hotReload);
+      if (!hotReload) {
+        this.drumViewMasterBeat = 0;
+        this.drumViewMasterBeatAt = performance.now();
+      }
+      if (this.drumkitViews.size > 0) {
+        let drumViewClockStarted = false;
+        const unsubscribeDrumViewClock = this.audio.subscribeClockTrigger('Clock', () => {
+          // The first master-clock trigger is beat 0 of the new musical epoch,
+          // not beat 1. Keep the playhead on the first beat for that first tick,
+          // then advance on subsequent triggers.
+          if (drumViewClockStarted) this.drumViewMasterBeat += 1;
+          else drumViewClockStarted = true;
+          this.drumViewMasterBeatAt = performance.now();
+        });
+        this.whenUnsubscribers.push(unsubscribeDrumViewClock);
+      }
       this.liveDisabledDrumkits = new Set(
         [...languageDrumkits.entries()].filter(([, definition]) => definition.disabled).map(([name]) => name),
       );
@@ -3174,7 +3383,8 @@ export class SonusRuntime {
       const humanizeStateKey = `drum:${slot.drumkit}:${slot.alias}`;
       let triggerIndex = hotReload ? (this.drumHumanizeState.get(humanizeStateKey) ?? 0) : 0;
 
-      const sourceClockName = slot.clockSource.match(/^__euclidean_\d+_\d+_\d+__(.+)$/)?.[1] ?? slot.clockSource;
+      const patternSource = parseRuntimePatternSource(slot.clockSource);
+      const sourceClockName = patternSource?.sourceName ?? slot.clockSource.match(/^__euclidean_\d+_\d+_\d+__(.+)$/)?.[1] ?? slot.clockSource;
       const sourceClockRate = sourceClockName === 'Clock'
         ? 1
         : (clockSources.get(sourceClockName)?.rate ?? 1);
@@ -3203,6 +3413,14 @@ export class SonusRuntime {
 
         triggerIndex += 1;
         this.drumHumanizeState.set(humanizeStateKey, triggerIndex);
+
+        const drumView = this.drumkitViews.get(slot.drumkit);
+        const laneView = drumView?.lanes.find((lane) => lane.alias === slot.alias);
+        if (drumView && laneView) {
+          laneView.lastTriggeredStep = this.getDrumkitViews().find((view) => view.name === slot.drumkit)?.lanes.find((lane) => lane.alias === slot.alias)?.absoluteCursor ?? laneView.absoluteCursor;
+          laneView.lastTriggeredAt = performance.now();
+          laneView.revision += 1;
+        }
 
         this.audio.triggerDrumkit(slot.drumkit, slot.voice, {
           ...slot.params,
@@ -4870,19 +5088,20 @@ function parseLanguageParameterDefaultDirective(
   };
 }
 
-function parseLanguageDrumkitDirective(line: string): { name: string; disabled: boolean } | null {
-  const match = line.match(/^__drumkit\("([A-Za-z_]\w*)",(true|false)\)$/);
-  return match ? { name: match[1], disabled: match[2] === 'true' } : null;
+function parseLanguageDrumkitDirective(line: string): { name: string; disabled: boolean; viewSteps: number } | null {
+  const match = line.match(/^__drumkit\("([A-Za-z_]\w*)",(true|false),(\d+)\)$/);
+  return match ? { name: match[1], disabled: match[2] === 'true', viewSteps: Number(match[3]) } : null;
 }
 function parseLanguageDrumkitMetaDirective(line: string): { name:string; kit:string } | null {
   const match = line.match(/^__drumkitmeta\("([A-Za-z_]\w*)","([A-Za-z_]\w*)"\)$/); return match ? { name:match[1], kit:match[2] } : null;
 }
 function parseLanguageDrumSlotDirective(line: string): LanguageDrumSlotDefinition | null {
-  const match = line.match(/^__drumslot\("([A-Za-z_]\w*)","([A-Za-z_]\w*)","(kick|snare|clap|hihat|openhat|lowtom|hightom)","((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([^"]+)"\)$/);
+  const match = line.match(/^__drumslot\("([A-Za-z_]\w*)","([A-Za-z_]\w*)","(kick|snare|clap|hihat|openhat|lowtom|hightom)","((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([^"]+)",(\d+),(\d+),(\d+)\)$/);
   if (!match) return null;
   let encoded=''; try { encoded = JSON.parse(`"${match[4]}"`) as string; } catch { return null; }
   let params: LanguageDrumSlotDefinition['params']; try { params = JSON.parse(encoded) as LanguageDrumSlotDefinition['params']; } catch { return null; }
-  return { drumkit:match[1], alias:match[2], voice:match[3] as LanguageDrumVoiceId, params, amount:Number(match[5]), unit:match[6] as 'ms'|'sec'|'beat', chance:Number(match[7]), drift:match[8]==='true', loose:match[9]==='true', clockSource:match[10] };
+  const hits = Number(match[11]), steps = Number(match[12]), rotate = Number(match[13]);
+  return { drumkit:match[1], alias:match[2], voice:match[3] as LanguageDrumVoiceId, params, amount:Number(match[5]), unit:match[6] as 'ms'|'sec'|'beat', chance:Number(match[7]), drift:match[8]==='true', loose:match[9]==='true', clockSource:match[10], euclidean: hits > 0 && steps > 0 ? { hits, steps, rotate } : null };
 }
 
 function parseLanguageObjectEveryDirective(

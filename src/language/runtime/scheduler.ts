@@ -8,6 +8,22 @@ type RuntimeWallJob = {
   intervalFactory?: () => number;
 };
 
+export type RuntimePatternMode = 'forward' | 'reverse' | 'pendulum' | 'walk' | 'random';
+export type RuntimePatternEvent = { index: number; retrig?: number; chance: number; cycle: { position: number; length: number } | null };
+export type RuntimePatternSpec = { steps: number; mode: RuntimePatternMode; events: RuntimePatternEvent[] };
+
+export function parseRuntimePatternSource(sourceName: string): { spec: RuntimePatternSpec; sourceName: string } | null {
+  const match = sourceName.match(/^__pattern__(.+?)__(.+)$/);
+  if (!match) return null;
+  try {
+    const spec = JSON.parse(decodeURIComponent(match[1])) as RuntimePatternSpec;
+    if (!Number.isInteger(spec.steps) || spec.steps < 1 || !Array.isArray(spec.events)) return null;
+    return { spec, sourceName: match[2] };
+  } catch {
+    return null;
+  }
+}
+
 type RuntimeBeatJob = {
   key: string;
   sourceName: string;
@@ -17,6 +33,11 @@ type RuntimeBeatJob = {
   loose: boolean;
   euclideanPattern: boolean[] | null;
   euclideanStep: number;
+  pattern: RuntimePatternSpec | null;
+  patternStep: number;
+  patternDirection: 1 | -1;
+  patternCycle: number;
+  patternDisplayStep: number;
 };
 
 export class RuntimeScheduler {
@@ -26,7 +47,7 @@ export class RuntimeScheduler {
   private epochMs = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
   private clockUnsubscribes: Array<() => void> = [];
-  private preservedBeatPhase = new Map<string, { sourceName: string; everyBeats: number; counter: number; euclideanStep: number }>();
+  private preservedBeatPhase = new Map<string, { sourceName: string; everyBeats: number; counter: number; euclideanStep: number; patternSteps: number; patternMode: RuntimePatternMode | null; patternStep: number; patternDirection: 1 | -1; patternCycle: number; patternDisplayStep: number }>();
   private preservedWallPhase = new Map<string, { intervalMs: number; remainingMs: number }>();
 
   constructor(private readonly audio: AudioEngine) {}
@@ -37,7 +58,7 @@ export class RuntimeScheduler {
       this.preservedBeatPhase = new Map(
         this.beatJobs.map((job) => [
           job.key,
-          { sourceName: job.sourceName, everyBeats: job.everyBeats, counter: job.counter, euclideanStep: job.euclideanStep },
+          { sourceName: job.sourceName, everyBeats: job.everyBeats, counter: job.counter, euclideanStep: job.euclideanStep, patternSteps: job.pattern?.steps ?? 0, patternMode: job.pattern?.mode ?? null, patternStep: job.patternStep, patternDirection: job.patternDirection, patternCycle: job.patternCycle, patternDisplayStep: job.patternDisplayStep },
         ]),
       );
       this.preservedWallPhase = new Map(
@@ -86,7 +107,14 @@ export class RuntimeScheduler {
   ): void {
     let actualSourceName = sourceName;
     let euclideanPattern: boolean[] | null = null;
-    const euclidean = sourceName.match(/^__euclidean_(\d+)_(\d+)_(\d+)__(.+)$/);
+    let pattern: RuntimePatternSpec | null = null;
+    const parsedPattern = parseRuntimePatternSource(sourceName);
+    if (parsedPattern) {
+      pattern = parsedPattern.spec;
+      actualSourceName = parsedPattern.sourceName;
+      everyBeats = 1;
+    }
+    const euclidean = pattern ? null : sourceName.match(/^__euclidean_(\d+)_(\d+)_(\d+)__(.+)$/);
     if (euclidean) {
       const hits = Number(euclidean[1]);
       const steps = Number(euclidean[2]);
@@ -100,6 +128,8 @@ export class RuntimeScheduler {
     const canRestore = preserved
       && preserved.sourceName === actualSourceName
       && preserved.everyBeats === everyBeats;
+    const restorePattern = Boolean(pattern && canRestore && preserved?.patternSteps === pattern.steps);
+    const initialPatternStep = pattern?.mode === 'reverse' ? pattern.steps - 1 : 0;
     this.beatJobs.push({
       key,
       sourceName: actualSourceName,
@@ -111,6 +141,11 @@ export class RuntimeScheduler {
       euclideanStep: canRestore && euclideanPattern
         ? preserved.euclideanStep % euclideanPattern.length
         : 0,
+      pattern,
+      patternStep: restorePattern ? Math.min(pattern!.steps - 1, preserved!.patternStep) : initialPatternStep,
+      patternDirection: restorePattern && preserved?.patternMode === pattern?.mode ? preserved!.patternDirection : 1,
+      patternCycle: restorePattern ? Math.max(1, preserved!.patternCycle) : 1,
+      patternDisplayStep: restorePattern ? Math.min(pattern!.steps - 1, preserved!.patternDisplayStep) : initialPatternStep,
     });
   }
 
@@ -154,11 +189,54 @@ export class RuntimeScheduler {
     for (const job of this.beatJobs) {
       job.counter = 0;
       job.euclideanStep = 0;
+      job.patternStep = job.pattern?.mode === 'reverse' ? Math.max(0, job.pattern.steps - 1) : 0;
+      job.patternDirection = 1;
+      job.patternCycle = 1;
+      job.patternDisplayStep = job.patternStep;
     }
     this.preservedBeatPhase.clear();
     // Deferred callbacks are produced only by loose beat jobs. A fresh master
     // clock epoch must not fire callbacks that belonged to the previous epoch.
     this.deferred = [];
+  }
+
+  getPatternState(key: string): { step: number; cycle: number; steps: number; mode: RuntimePatternMode } | null {
+    const job = this.beatJobs.find((candidate) => candidate.key === key && candidate.pattern !== null);
+    if (!job?.pattern) return null;
+    return { step: job.patternDisplayStep, cycle: job.patternCycle, steps: job.pattern.steps, mode: job.pattern.mode };
+  }
+
+  private advancePattern(job: RuntimeBeatJob): void {
+    const pattern = job.pattern;
+    if (!pattern) return;
+    if (pattern.mode === 'random') {
+      job.patternStep = Math.floor(Math.random() * pattern.steps);
+      return;
+    }
+    if (pattern.mode === 'walk') {
+      const delta = Math.random() < 0.5 ? -1 : 1;
+      job.patternStep = (job.patternStep + delta + pattern.steps) % pattern.steps;
+      return;
+    }
+    if (pattern.mode === 'reverse') {
+      if (job.patternStep <= 0) { job.patternStep = pattern.steps - 1; job.patternCycle += 1; }
+      else job.patternStep -= 1;
+      return;
+    }
+    if (pattern.mode === 'pendulum') {
+      if (pattern.steps <= 1) { job.patternCycle += 1; return; }
+      if (job.patternDirection > 0) {
+        if (job.patternStep >= pattern.steps - 1) { job.patternDirection = -1; job.patternStep = pattern.steps - 2; }
+        else job.patternStep += 1;
+      } else if (job.patternStep <= 0) {
+        job.patternDirection = 1;
+        job.patternStep = 1;
+        job.patternCycle += 1;
+      } else job.patternStep -= 1;
+      return;
+    }
+    if (job.patternStep >= pattern.steps - 1) { job.patternStep = 0; job.patternCycle += 1; }
+    else job.patternStep += 1;
   }
 
   private tickWallClock(): void {
@@ -188,29 +266,52 @@ export class RuntimeScheduler {
   private tickBeat(sourceName: string): void {
     for (const job of this.beatJobs) {
       if (job.sourceName !== sourceName) continue;
-      if (job.euclideanPattern) {
+      if (job.pattern) {
+        if (job.pattern.mode === 'random') job.patternStep = Math.floor(Math.random() * job.pattern.steps);
+        const currentStep = job.patternStep;
+        job.patternDisplayStep = currentStep;
+        const event = job.pattern.events.find((candidate) => candidate.index === currentStep + 1);
+        const cycleAllowed = !event?.cycle || (((job.patternCycle - 1) % event.cycle.length) + 1 === event.cycle.position);
+        const chanceAllowed = Boolean(event) && (event!.chance >= 100 || Math.random() * 100 < event!.chance);
+        this.advancePattern(job);
+        if (!event || !cycleAllowed || !chanceAllowed) continue;
+      } else if (job.euclideanPattern) {
         const hit = job.euclideanPattern[job.euclideanStep] ?? false;
         job.euclideanStep = (job.euclideanStep + 1) % job.euclideanPattern.length;
         if (!hit) continue;
       } else {
-        job.counter += 1;
-        if (job.counter < job.everyBeats) continue;
-        job.counter = 0;
+        // counter is the current phase, not the number of ticks already
+        // consumed. Phase 0 is therefore due on the first clock trigger of
+        // a fresh transport epoch.
+        const due = job.counter === 0;
+        job.counter = (job.counter + 1) % job.everyBeats;
+        if (!due) continue;
       }
 
-      if (!job.loose) {
+      const retrig = job.pattern
+        ? Math.max(1, Math.min(16, Math.round(job.pattern.events.find((candidate) => candidate.index === job.patternDisplayStep + 1)?.retrig ?? 1)))
+        : 1;
+      const sourceBeatMs = this.audio.getClockTiming(sourceName).beatDurationMs;
+      const looseDelayMs = job.loose && Number.isFinite(sourceBeatMs)
+        ? sourceBeatMs * 0.08 * Math.random()
+        : 0;
+
+      if (retrig === 1 && looseDelayMs === 0) {
         job.callback();
         continue;
       }
 
-      const bpm = this.audio.getClockStatus().bpm;
-      const beatMs = bpm > 0 ? 60000 / bpm : 0;
-      this.deferred.push({
-        dueAtMs: performance.now() + beatMs * 0.08 * Math.random(),
-        callback: job.callback,
-      });
+      const spacingMs = retrig > 1 && Number.isFinite(sourceBeatMs)
+        ? sourceBeatMs / retrig
+        : 0;
+      const now = performance.now();
+      for (let retrigIndex = 0; retrigIndex < retrig; retrigIndex += 1) {
+        const delayMs = looseDelayMs + spacingMs * retrigIndex;
+        if (delayMs <= 0) job.callback();
+        else this.deferred.push({ dueAtMs: now + delayMs, callback: job.callback });
+      }
 
-      if (this.timer === null) {
+      if (this.deferred.length > 0 && this.timer === null) {
         this.timer = setInterval(() => this.tickWallClock(), 10);
       }
     }

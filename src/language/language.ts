@@ -123,7 +123,7 @@ type DrumSlotDefaults = {
 
 type DrumKitEntry = { source: DrumVoiceId; alias: string; defaults: DrumSlotDefaults };
 type DrumKitDefinition = { entries: Map<string, DrumKitEntry> };
-type DrumkitState = { name: string; line: number; indentation: number; kit: DrumKitDefinition | null };
+type DrumkitState = { name: string; line: number; indentation: number; kit: DrumKitDefinition | null; viewSteps: number };
 
 const DRUM_DEFAULTS: DrumSlotDefaults = {
   level: 100, pan: 0, tune: 0, decay: 70,
@@ -1290,6 +1290,9 @@ function compileVoiceProperty(
       return `${prefix}__objectevery(${JSON.stringify(voice.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
     }
 
+    case 'pattern':
+      return objectPatternDirective(voice.name, value, line, sourceDefinitions);
+
     case 'cycle':
       throw new LanguageError([{ line, message: "standalone cycle is deprecated; use 'every' or an inline 'every' clause" }]);
 
@@ -1319,9 +1322,92 @@ type EverySpec = {
 };
 
 function splitEveryClause(value: string): { base: string; every: string | null } {
-  const match = value.match(/^(.*?)\s+every\s+(.+)$/i);
-  if (!match) return { base: value.trim(), every: null };
-  return { base: match[1].trim(), every: match[2].trim() };
+  const every = value.match(/^(.*?)(?:\s+mode\s+(forward|reverse|pendulum|walk|random))?\s+every\s+(.+)$/i);
+  if (every) {
+    const mode = every[2]?.toLowerCase();
+    let timing = every[3].trim();
+    if (mode) {
+      timing = /\s+on\s+/i.test(timing)
+        ? `${timing}, MODE ${mode}`
+        : `${timing} ON MODE ${mode}`;
+    }
+    return { base: every[1].trim(), every: timing };
+  }
+
+  const pattern = value.match(/^(.*?)(?:\s+mode\s+(forward|reverse|pendulum|walk|random))?\s+pattern\s+\[([^\]]+)\](?:\s+steps\s+(\d+))?(?:\s+on\s+clock\s+(.+))?$/i);
+  if (!pattern) return { base: value.trim(), every: null };
+  const mode = pattern[2] ? ` MODE ${pattern[2]}` : '';
+  const steps = pattern[4] ? ` STEPS ${pattern[4]}` : '';
+  const clock = pattern[5] ? ` ON CLOCK ${pattern[5].trim()}` : '';
+  return { base: pattern[1].trim(), every: `PATTERN [${pattern[3].trim()}]${steps}${mode}${clock}` };
+}
+
+type PatternReaderMode = 'forward' | 'reverse' | 'pendulum' | 'walk' | 'random';
+type PatternStepSpec = { index: number; retrig: number; chance: number; cycle: { position: number; length: number } | null };
+
+function parsePatternTimingSpec(raw: string, line: number, sourceDefinitions: Map<string, SourceDefinition>): EverySpec | null {
+  const match = raw.trim().match(/^PATTERN\s+\[([^\]]+)\](?:\s+STEPS\s+(\d+))?(?:\s+MODE\s+(forward|reverse|pendulum|walk|random))?(?:\s+ON\s+CLOCK\s+(.+))?$/i);
+  if (!match) return null;
+
+  const steps = match[2] === undefined ? 16 : Number(match[2]);
+  if (!Number.isInteger(steps) || steps < 1 || steps > 128) throw new LanguageError([{ line, message: 'PATTERN STEPS expects an integer from 1 to 128' }]);
+  const mode = (match[3]?.toLowerCase() ?? 'forward') as PatternReaderMode;
+  const tokens = match[1].trim().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) throw new LanguageError([{ line, message: 'PATTERN cannot be empty' }]);
+
+  const seen = new Set<number>();
+  const events: PatternStepSpec[] = tokens.map((token) => {
+    const parsed = token.match(/^(\d+)(?:\*(\d+))?(?:!(?:(\d+)|(\d+):(\d+)))?$/);
+    if (!parsed) throw new LanguageError([{ line, message: `invalid PATTERN step '${token}'` }]);
+    const index = Number(parsed[1]);
+    if (index < 1 || index > steps) throw new LanguageError([{ line, message: `PATTERN step ${index} is outside 1..${steps}` }]);
+    if (seen.has(index)) throw new LanguageError([{ line, message: `duplicate PATTERN step ${index}` }]);
+    seen.add(index);
+    let retrig = 1;
+    if (parsed[2] !== undefined) {
+      retrig = Number(parsed[2]);
+      if (!Number.isInteger(retrig) || retrig < 2 || retrig > 16) {
+        throw new LanguageError([{ line, message: 'PATTERN retrig expects *2 through *16' }]);
+      }
+    }
+    let chance = 100;
+    let cycle: PatternStepSpec['cycle'] = null;
+    if (parsed[3] !== undefined) {
+      chance = Number(parsed[3]);
+      if (!Number.isInteger(chance) || chance < 1 || chance > 100) throw new LanguageError([{ line, message: 'PATTERN step chance expects an integer from 1 to 100' }]);
+    } else if (parsed[4] !== undefined) {
+      const position = Number(parsed[4]);
+      const length = Number(parsed[5]);
+      if (length < 1 || position < 1 || position > length) throw new LanguageError([{ line, message: `PATTERN cycle condition '${parsed[4]}:${parsed[5]}' expects 1 <= position <= length` }]);
+      cycle = { position, length };
+    }
+    return { index, retrig, chance, cycle };
+  });
+  if ((mode === 'walk' || mode === 'random') && events.some((event) => event.cycle !== null)) {
+    throw new LanguageError([{ line, message: `PATTERN cycle conditions !A:B are not available with MODE ${mode}` }]);
+  }
+
+  let clockSource: string;
+  let clockPrelude = '';
+  const clockValue = (match[4] ?? '*4').trim();
+  const rate = clockValue.match(/^([/*])\s*(\d+(?:\.\d+)?)$/);
+  if (rate) {
+    const n = Number(rate[2]);
+    if (!Number.isFinite(n) || n <= 0) throw new LanguageError([{ line, message: 'PATTERN clock divisor/multiplier must be greater than 0' }]);
+    const label = `${rate[1]}${formatSourceNumber(n)}`;
+    const safe = label.replace('/', 'div_').replace('*', 'mul_').replace('.', '_');
+    clockSource = `__clock_pattern_${line}_${safe}`;
+    clockPrelude = `${clockSource} = Clock.rate(${JSON.stringify(label)});`;
+  } else {
+    if (!IDENTIFIER.test(clockValue)) throw new LanguageError([{ line, message: `invalid PATTERN clock source '${clockValue}'` }]);
+    const definition = sourceDefinitions.get(clockValue);
+    if (!definition) throw new LanguageError([{ line, message: `unknown clock source '${clockValue}'` }]);
+    if (definition.kind !== 'clock') throw new LanguageError([{ line, message: `source '${clockValue}' is ${definition.kind}, expected clock source` }]);
+    clockSource = definition.internalName;
+  }
+
+  const payload = encodeURIComponent(JSON.stringify({ steps, mode, events }));
+  return { amount: 1, unit: 'beat', chance: 100, drift: false, loose: false, clockSource: `__pattern__${payload}__${clockSource}`, clockPrelude, euclidean: null };
 }
 
 function splitEveryModifiers(value: string): { base: string; modifiers: string[] } {
@@ -1354,6 +1440,8 @@ function parseEverySpec(
   line: number,
   sourceDefinitions: Map<string, SourceDefinition>,
 ): EverySpec {
+  const pattern = parsePatternTimingSpec(raw, line, sourceDefinitions);
+  if (pattern) return pattern;
   const { base, modifiers } = splitEveryModifiers(raw.trim());
 
   let amount: number;
@@ -1396,9 +1484,24 @@ function parseEverySpec(
 
   let clockSource = 'Clock';
   let clockPrelude = '';
+  let readerMode: PatternReaderMode = 'forward';
+  let readerModeExplicit = false;
   const timingModifiers: string[] = [];
 
   for (const modifier of modifiers) {
+    const mode = modifier.match(/^mode\s+(forward|reverse|pendulum|walk|random)$/i);
+    if (mode) {
+      if (!euclidean) {
+        throw new LanguageError([{ line, message: 'MODE with EVERY is available only for EVERY EUCLIDEAN' }]);
+      }
+      if (readerModeExplicit) {
+        throw new LanguageError([{ line, message: 'EVERY EUCLIDEAN accepts only one MODE reader' }]);
+      }
+      readerMode = mode[1].toLowerCase() as PatternReaderMode;
+      readerModeExplicit = true;
+      continue;
+    }
+
     const rotate = modifier.match(/^rotate\s+(-?\d+)$/i);
     if (rotate) {
       if (!euclidean) {
@@ -1443,7 +1546,21 @@ function parseEverySpec(
 
   const timing = parseTimingModifiers(timingModifiers, line, unit);
   if (euclidean) {
-    clockSource = `__euclidean_${euclidean.hits}_${euclidean.steps}_${euclidean.rotate}__${clockSource}`;
+    if (readerModeExplicit) {
+      const basePattern = Array.from({ length: euclidean.steps }, (_, step) =>
+        ((step * euclidean.hits) % euclidean.steps) < euclidean.hits
+      );
+      const rotatedPattern = euclidean.rotate === 0
+        ? basePattern
+        : basePattern.map((_, step) => basePattern[(step - euclidean.rotate + euclidean.steps) % euclidean.steps]);
+      const events: PatternStepSpec[] = rotatedPattern.flatMap((hit, step) =>
+        hit ? [{ index: step + 1, retrig: 1, chance: 100, cycle: null }] : []
+      );
+      const payload = encodeURIComponent(JSON.stringify({ steps: euclidean.steps, mode: readerMode, events }));
+      clockSource = `__pattern__${payload}__${clockSource}`;
+    } else {
+      clockSource = `__euclidean_${euclidean.hits}_${euclidean.steps}_${euclidean.rotate}__${clockSource}`;
+    }
   }
   return { amount, unit, ...timing, clockSource, clockPrelude, euclidean };
 }
@@ -1451,6 +1568,12 @@ function parseEverySpec(
 function everyDirective(name: string, spec: EverySpec): string {
   const prefix = spec.clockPrelude ? `${spec.clockPrelude} ` : '';
   return `${prefix}__cycle(${JSON.stringify(name)},${spec.amount},${JSON.stringify(spec.unit)},${spec.chance},${spec.drift},${spec.loose},${JSON.stringify(spec.clockSource)});`;
+}
+
+function objectPatternDirective(name: string, raw: string, line: number, sourceDefinitions: Map<string, SourceDefinition>): string {
+  const timing = parseEverySpec(`PATTERN ${raw}`, line, sourceDefinitions);
+  const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+  return `${prefix}__objectevery(${JSON.stringify(name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
 }
 
 function requireRegisterReady(register: RegisterState | null, diagnostics: LanguageDiagnostic[]): void {
@@ -1520,9 +1643,9 @@ function compileRegisterProperty(
   }
 
   if (key === 'write') {
-    const match = value.match(/^every\s+(.+)$/i);
-    if (!match) throw new LanguageError([{ line, message: 'REGISTER write expects every <time>' }]);
-    const timing = parseEverySpec(match[1], line, sourceDefinitions);
+    const match = value.match(/^(every\s+(.+)|pattern\s+(.+))$/i);
+    if (!match) throw new LanguageError([{ line, message: 'REGISTER write expects EVERY <time> or PATTERN [...]' }]);
+    const timing = parseEverySpec(match[2] ?? `PATTERN ${match[3]}`, line, sourceDefinitions);
     register.hasWrite = true;
     const prefix = timing.clockPrelude ? `${timing.clockPrelude}\n` : '';
     return `${prefix}__registerwrite(${JSON.stringify(register.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
@@ -1640,9 +1763,9 @@ function compileSeqProperty(
   }
   if (effectiveKey === 'evolve') {
     if (seq.modelId !== 'life') throw new LanguageError([{ line, message: 'EVOLVE is available only for MODEL life' }]);
-    const evolve = value.match(/^every\s+(.+)$/i);
-    if (!evolve) throw new LanguageError([{ line, message: 'EVOLVE expects EVERY <time> [ON ...]' }]);
-    const timing = parseEverySpec(evolve[1], line, sourceDefinitions);
+    const evolve = value.match(/^(every\s+(.+)|pattern\s+(.+))$/i);
+    if (!evolve) throw new LanguageError([{ line, message: 'EVOLVE expects EVERY <time> [ON ...] or PATTERN [...]' }]);
+    const timing = parseEverySpec(evolve[2] ?? `PATTERN ${evolve[3]}`, line, sourceDefinitions);
     const prefix = timing.clockPrelude ? `${timing.clockPrelude}\n` : '';
     return `${prefix}__lifeevolve(${JSON.stringify(seq.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
   }
@@ -1651,6 +1774,10 @@ function compileSeqProperty(
     const timing = parseEverySpec(value, line, sourceDefinitions);
     const prefix = timing.clockPrelude ? `${timing.clockPrelude}\n` : '';
     return `${prefix}__objectevery(${JSON.stringify(seq.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
+  }
+  if (effectiveKey === 'pattern') {
+    if (seq.modelId === 'life') throw new LanguageError([{ line, message: 'SEQ life uses EVOLVE PATTERN ..., not a playhead PATTERN' }]);
+    return objectPatternDirective(seq.name, value, line, sourceDefinitions);
   }
   throw new LanguageError([{ line, message: `unknown SEQ property '${property}'` }]);
 }
@@ -2272,6 +2399,8 @@ function compileFxProperty(
     const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
     return `${prefix}__objectevery(${JSON.stringify(fx.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
   }
+  if (key === 'pattern') return objectPatternDirective(fx.name, value, line, sourceDefinitions);
+
 
   if (!fx.modelId) {
     throw new LanguageError([{ line, message: `${property} requires FX model to be declared first` }]);
@@ -2594,8 +2723,7 @@ function compileOut(
   voiceSoundIds: Map<string, string>,
 ): { code: string; sources: string[] } {
   const rawBody = lineText.trim().replace(/^OUT\b/i, '').trim();
-  const body = localSource && /^to\b/i.test(rawBody) ? `${localSource} ${rawBody}` : rawBody;
-  const rawPieces = body.split(/\s+to\s+/i);
+  const rawPieces = rawBody.split(/\s+to\s+/i);
   if (rawPieces.length < 2) {
     throw new LanguageError([{ line, message: 'OUT expects [source/port] [AT amount] TO destination [AT amount TO destination ...]' }]);
   }
@@ -2760,6 +2888,8 @@ function compileFilterProperty(
     const prefix = timing.clockPrelude ? `${timing.clockPrelude}\n` : '';
     return `${prefix}__objectevery(${JSON.stringify(filter.internalName)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
   }
+  if (key === 'pattern') return objectPatternDirective(filter.internalName, value, line, sourceDefinitions);
+
 
   if (key === 'model') {
     if (!/^svf$/i.test(value)) {
@@ -3102,16 +3232,21 @@ export function compileLanguageSource(source: string): string {
         currentFilter = null;
       }
 
-      const drumkitBlockMatch = trimmed.match(/^(_)?DRUMKIT\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*$/i);
+      const drumkitBlockMatch = trimmed.match(/^(_)?DRUMKIT\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+view(?:\s+(\d+)\s+steps?)?)?\s*:\s*$/i);
       if (drumkitBlockMatch) {
         if (indentation > 0) throw new LanguageError([{ line: lineNumber, message: 'DRUMKIT is currently a top-level object' }]);
         const disabled = Boolean(drumkitBlockMatch[1]);
         const name = drumkitBlockMatch[2];
+        const viewRequested = /\bwith\s+view\b/i.test(trimmed);
+        const viewSteps = viewRequested ? Number(drumkitBlockMatch[3] ?? 16) : 0;
+        if (viewRequested && (!Number.isInteger(viewSteps) || viewSteps < 4 || viewSteps > 64 || viewSteps % 4 !== 0)) {
+          throw new LanguageError([{ line: lineNumber, message: 'DRUMKIT WITH VIEW expects 4..64 STEPS in multiples of 4' }]);
+        }
         if (drumkits.has(name) || voices.has(name) || fxs.has(name) || filters.has(name)) throw new LanguageError([{ line: lineNumber, message: `duplicate object: ${name}` }]);
         drumkits.add(name);
-        currentDrumkit = { name, line: lineNumber, indentation, kit: null };
+        currentDrumkit = { name, line: lineNumber, indentation, kit: null, viewSteps };
         currentVoice = null; currentFx = null; currentFilter = null; currentMod = null;
-        output[index] = `__drumkit(${JSON.stringify(name)},${disabled});`;
+        output[index] = `__drumkit(${JSON.stringify(name)},${disabled},${viewSteps});`;
         continue;
       }
 
@@ -3492,12 +3627,13 @@ export function compileLanguageSource(source: string): string {
         if (!entry) throw new LanguageError([{ line: lineNumber, message: `unknown KIT alias '${alias}'` }]);
         const params = drumParameterDefaults(entry.source, soundPart[2] ?? '', lineNumber, entry.defaults);
         if (!split.every) {
-          output[index] = `__drumslot(${JSON.stringify(currentDrumkit.name)},${JSON.stringify(alias)},${JSON.stringify(entry.source)},${JSON.stringify(serializeDrumParams(params))},0,"ms",100,false,false,"Clock");`;
+          output[index] = `__drumslot(${JSON.stringify(currentDrumkit.name)},${JSON.stringify(alias)},${JSON.stringify(entry.source)},${JSON.stringify(serializeDrumParams(params))},0,"ms",100,false,false,"Clock",0,0,0);`;
           continue;
         }
         const timing = parseEverySpec(split.every, lineNumber, scopedDefinitions(`drumkit:${currentDrumkit.name}`));
         const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
-        output[index] = `${prefix}__drumslot(${JSON.stringify(currentDrumkit.name)},${JSON.stringify(alias)},${JSON.stringify(entry.source)},${JSON.stringify(serializeDrumParams(params))},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
+        const euclidean = timing.euclidean ?? { hits: 0, steps: 0, rotate: 0 };
+        output[index] = `${prefix}__drumslot(${JSON.stringify(currentDrumkit.name)},${JSON.stringify(alias)},${JSON.stringify(entry.source)},${JSON.stringify(serializeDrumParams(params))},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)},${euclidean.hits},${euclidean.steps},${euclidean.rotate});`;
         continue;
       }
 

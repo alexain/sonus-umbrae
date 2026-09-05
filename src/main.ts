@@ -1,6 +1,6 @@
 import './style.css';
 import { AudioEngine, type AudioLatencyMode } from './audio/engine';
-import { SonusEvaluationError, SonusRuntime, type InlineViewState, type LifeViewState, type ParameterViewState, type TuringViewState, type SchemeConnection, type SchemeModel, type SchemeNode } from './language/runtime';
+import { SonusEvaluationError, SonusRuntime, type DrumkitViewState, type InlineViewState, type LifeViewState, type ParameterViewState, type TuringViewState, type SchemeConnection, type SchemeModel, type SchemeNode } from './language/runtime';
 import { compileLanguageSource, LanguageError, parseProgramCapabilities, type ProgramCapability } from './language/language';
 import { parameterUpdatePolicy, type ParameterUpdatePolicy } from './language/parameter-policy';
 
@@ -1077,8 +1077,14 @@ function evaluateLiveSource(): boolean {
     if (requestCapabilityRestart(source)) return false;
     const compiled = compileLanguageSource(source);
     const hasMasterClock = /^\s*_?CLOCK\s+SET\b/im.test(source);
-    audioEngine.setClockTransport(hasMasterClock);
+    // Build all scheduler jobs while transport is stopped, then start the
+    // musical epoch. Starting the clock before runtime.evaluate() can emit the
+    // first beat before DRUMKIT/SEQ jobs have subscribed, shifting patterns by
+    // one beat after Cmd/Ctrl+Backspace.
+    audioEngine.setClockTransport(false);
+    runtime.restartMusicalEpoch();
     const results = runtime.evaluate(compiled);
+    audioEngine.setClockTransport(hasMasterClock);
     rememberActiveCapabilities(source);
     editingInlineViews = null;
     syncLiveDisableSnapshot(source);
@@ -1394,6 +1400,7 @@ function syncViews(): void {
   const variables = runtime.getVariableViews();
   const turingViews = runtime.getTuringViews();
   const lifeViews = runtime.getLifeViews();
+  const drumkitViews = runtime.getDrumkitViews();
   const scheme = runtime.getSchemeModel();
   const nodes = new Map(scheme.nodes.map((node) => [node.id, node]));
   const moduleViewScales = parseModuleViewScales(sourceText());
@@ -1403,6 +1410,7 @@ function syncViews(): void {
   if (appConfig.showMetrics) panels.push(buildMetricsPanel(scheme, variables.length));
   for (const view of turingViews) panels.push(buildTuringPanel(view));
   for (const view of lifeViews) panels.push(buildLifePanel(view));
+  for (const view of drumkitViews) panels.push(buildDrumkitPanel(view));
 
   const audio = nodes.get('Audio');
   panels.push(buildModuleMonitorPanel({
@@ -1606,6 +1614,54 @@ function buildLifePanel(view: LifeViewState): HTMLElement {
     const cell = document.createElement('span');
     cell.className = `life-cell ${alive ? 'on' : 'off'}`;
     grid.append(cell);
+  }
+
+  body.append(grid);
+  return card;
+}
+
+function buildDrumkitPanel(view: DrumkitViewState): HTMLElement {
+  const card = createMonitorCard(`DRUMKIT:${view.name}`, `${view.name.toUpperCase()} : DRUMKIT`, false);
+  card.classList.add('drumkit-monitor-card');
+  const body = card.querySelector<HTMLElement>('.monitor-body');
+  if (!body) return card;
+
+  const grid = document.createElement('div');
+  grid.className = 'drumkit-pattern';
+  grid.dataset.drumkitName = view.name;
+  for (const lane of view.lanes) {
+    const row = document.createElement('div');
+    row.className = 'drumkit-lane';
+    row.dataset.drumkitLane = lane.alias;
+
+    const label = document.createElement('span');
+    label.className = 'drumkit-lane-label';
+    label.textContent = lane.alias.toUpperCase();
+
+    const steps = document.createElement('span');
+    steps.className = 'drumkit-lane-steps';
+    steps.style.setProperty('--drumkit-steps', String(lane.steps));
+    lane.hits.forEach((hit, index) => {
+      const cell = document.createElement('span');
+      cell.className = `drumkit-step ${hit ? 'hit' : 'empty'}${index === lane.cursor ? ' cursor' : ''}`;
+      cell.dataset.step = String(index);
+      cell.textContent = hit ? '◆' : '·';
+      steps.append(cell);
+    });
+
+    const page = document.createElement('span');
+    page.className = 'drumkit-lane-page';
+    page.textContent = lane.pageCount > 1 ? `${lane.page + 1}/${lane.pageCount}` : '';
+
+    row.append(label, steps, page);
+    grid.append(row);
+  }
+
+  if (view.lanes.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'monitor-empty';
+    empty.textContent = 'NO ACTIVE LANES';
+    grid.append(empty);
   }
 
   body.append(grid);
@@ -1901,17 +1957,58 @@ function updateLifeViews(): void {
   }
 }
 
+function updateDrumkitViews(): void {
+  const states = new Map(runtime.getDrumkitViews().map((view) => [view.name, view]));
+  const now = performance.now();
+  for (const pattern of document.querySelectorAll<HTMLElement>('.drumkit-pattern[data-drumkit-name]')) {
+    const name = pattern.dataset.drumkitName;
+    if (!name) continue;
+    const state = states.get(name);
+    if (!state) continue;
+    for (const lane of state.lanes) {
+      const row = [...pattern.querySelectorAll<HTMLElement>('.drumkit-lane')]
+        .find((candidate) => candidate.dataset.drumkitLane === lane.alias);
+      if (!row) continue;
+      const steps = row.querySelector<HTMLElement>('.drumkit-lane-steps');
+      if (!steps) continue;
+      steps.style.setProperty('--drumkit-steps', String(lane.steps));
+      let cells = [...steps.querySelectorAll<HTMLElement>('.drumkit-step')];
+      if (cells.length !== lane.hits.length) {
+        steps.replaceChildren(...lane.hits.map((hit, index) => {
+          const cell = document.createElement('span');
+          cell.className = `drumkit-step ${hit ? 'hit' : 'empty'}`;
+          cell.dataset.step = String(index);
+          cell.textContent = hit ? '◆' : '·';
+          return cell;
+        }));
+        cells = [...steps.querySelectorAll<HTMLElement>('.drumkit-step')];
+      }
+      cells.forEach((cell, index) => {
+        cell.classList.toggle('hit', lane.hits[index]);
+        cell.classList.toggle('empty', !lane.hits[index]);
+        cell.classList.toggle('cursor', index === lane.cursor);
+        cell.classList.toggle('triggered', lane.lastTriggeredStep === index && lane.lastTriggeredAt !== null && now - lane.lastTriggeredAt < 130);
+        cell.textContent = lane.hits[index] ? '◆' : '·';
+      });
+      const page = row.querySelector<HTMLElement>('.drumkit-lane-page');
+      if (page) page.textContent = lane.pageCount > 1 ? `${lane.page + 1}/${lane.pageCount}` : '';
+    }
+  }
+}
+
 function drawScopes(): void {
   scopeFrame = 0;
   updateVariableValues();
   updateTuringViews();
   updateLifeViews();
+  updateDrumkitViews();
   updateSchemeLiveValues();
   const canvases = [...document.querySelectorAll<HTMLCanvasElement>('canvas.scope-canvas')];
   const liveValues = document.querySelectorAll<HTMLElement>('.scheme-live-value');
   const turingRegisters = document.querySelectorAll<HTMLElement>('.turing-register');
   const lifeGrids = document.querySelectorAll<HTMLElement>('.life-grid');
-  if (canvases.length === 0 && liveValues.length === 0 && turingRegisters.length === 0 && lifeGrids.length === 0) return;
+  const drumkitPatterns = document.querySelectorAll<HTMLElement>('.drumkit-pattern');
+  if (canvases.length === 0 && liveValues.length === 0 && turingRegisters.length === 0 && lifeGrids.length === 0 && drumkitPatterns.length === 0) return;
 
   const phosphor = getComputedStyle(document.documentElement).getPropertyValue('--phosphor-hot').trim() || '#ffe783';
 
@@ -3307,7 +3404,7 @@ function liveDisableDescriptors(source: string): LiveDisableDescriptor[] {
       descriptors.push({ kind: 'clock', name: namedClock[2], disabled: Boolean(namedClock[1]) });
       continue;
     }
-    const drumkit = trimmed.match(/^(_)?DRUMKIT\s+([A-Za-z_][A-Za-z0-9_]*)\s*:/i);
+    const drumkit = trimmed.match(/^(_)?DRUMKIT\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+WITH\s+VIEW(?:\s+\d+\s+STEPS)?)?\s*:/i);
     if (drumkit) {
       descriptors.push({ kind: 'drumkit', name: drumkit[2], disabled: Boolean(drumkit[1]) });
       scopes.push({ indent, kind: 'drumkit', name: drumkit[2] });
