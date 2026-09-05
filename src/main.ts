@@ -6,7 +6,7 @@ import { parameterUpdatePolicy, type ParameterUpdatePolicy } from './language/pa
 
 type Screen = 'live' | 'config' | 'help' | 'about' | 'scheme';
 
-const VERSION = '0.3.0';
+const VERSION = '0.5.0';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Missing #app');
@@ -59,7 +59,7 @@ app.innerHTML = `
       <div id="about-screen" class="screen system-screen hidden" aria-hidden="true">
         <div class="system-title">ABOUT SONUS UMBRAE</div>
         <div class="rule"></div>
-        <div class="about-copy">A WEB-BASED LIVE CODING ENVIRONMENT FOR GENERATIVE AUDIO, MODULATION, ROUTING AND PERFORMANCE-ORIENTED CONTROL.</div>
+        <div class="about-copy">A LIVE CODING LANGUAGE AND ENVIRONMENT FOR GENERATIVE AUDIO, MODULATION, SYNTHESIS AND SIGNAL ROUTING.</div>
         <div class="about-grid">
           <span>VERSION</span><span>${VERSION}</span>
           <span>RUNTIME</span><span>TYPESCRIPT · WEB AUDIO · AUDIOWORKLET · WASM</span>
