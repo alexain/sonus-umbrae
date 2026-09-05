@@ -74,3 +74,17 @@ The 0.3.0 release expands Sonus Umbrae's generative modulation and performance t
 - Dices views preserve their real `-5V..+5V` control-voltage domain and label traces as `X1 / X2 / X3 / Y`.
 - The creative delay gains discrete-window probabilistic pitch shifting and ping-pong behaviour in addition to reverse/tape/diffusion processing.
 - Configuration now includes a persistent `OUTPUT LEVEL` control, independent from script-level `MAIN LEVEL`.
+
+
+<!-- SONUS-GITHUB-PAGES -->
+## Browser preview
+
+The `main` branch is deployable to GitHub Pages. Release WASM files are committed under `public/dsp/`, so the Pages workflow only installs the JavaScript dependencies and runs the Vite production build.
+
+Expected public URL:
+
+```text
+https://alexain.github.io/sonus-umbrae/
+```
+
+The browser preview is intended for testing current releases. Web Audio capabilities such as explicit output-device selection remain browser-dependent.
