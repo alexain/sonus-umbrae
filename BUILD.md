@@ -85,6 +85,9 @@ vendor/eurorack/
 vendor/superparasites/
 vendor/cloudseed-core/
 vendor/daisysp/
+vendor/marbles/
+vendor/stmlib/
+vendor/dspark/
 ```
 
 `cloudseed-core` is Ghost Note Audio's MIT-licensed CloudSeedCore algorithm used by the Sonus `sky` reverb. `daisysp` is Electrosmith's MIT-licensed DSP library; the current build uses only its SVF filter implementation. Vendor directories are intentionally ignored by Git and upstream source code is not copied into the Sonus Umbrae repository.
@@ -102,6 +105,7 @@ The generated WASM artifacts are written to:
 ```text
 public/dsp/voice.wasm
 public/dsp/swell.wasm
+public/dsp/dices.wasm
 public/dsp/mist.wasm
 public/dsp/matter.wasm
 public/dsp/resonator.wasm
@@ -109,7 +113,7 @@ public/dsp/sky.wasm
 public/dsp/daisy-filters.wasm
 ```
 
-`voice.wasm` provides the current macro-oscillator `VOICE` backend, `swell.wasm` provides the four-output modulation backend used by `MOD`, and `mist.wasm` provides the current Mist stereo `FX` backend. `sky.wasm` provides the ambient `sky` reverb backed by CloudSeedCore. `matter.wasm` and `resonator.wasm` provide the physical-model and resonator engines. `daisy-filters.wasm` is a separate DaisySP filter-area module; it currently contains only the SVF backend.
+`voice.wasm` provides the current macro-oscillator `VOICE` backend, `swell.wasm` provides the Tides-derived four-output modulation backend, `dices.wasm` provides the Marbles-derived random-voltage `MOD dices` backend, and `mist.wasm` provides the current Mist stereo `FX` backend. `sky.wasm` provides the ambient `sky` reverb backed by CloudSeedCore. `matter.wasm` and `resonator.wasm` provide the physical-model and resonator engines. `daisy-filters.wasm` is a separate DaisySP filter-area module; it currently contains only the SVF backend.
 
 Generated WASM files are ignored by Git and should be rebuilt locally.
 
@@ -305,3 +309,75 @@ The module is deliberately separate from future DaisySP areas. Additional permis
 The DaisySP SVF computes low, high, band, notch and peak responses simultaneously. The Sonus bridge also exports an explicit SVF reset used by musical transport stop, so resonant filter state is cleared while FX tails remain untouched. Sonus currently exposes the four canonical routing ports `lp`, `hp`, `bp`, and `np`; `lp` is the default FILTER output. The peak response remains internal to the backend for now.
 
 `npm run dsp:build` also removes a stale legacy `public/dsp/liquid.wasm` artifact if one exists from an older checkout.
+
+## Language/runtime source layout
+
+The language implementation is split by responsibility rather than kept in one monolithic runtime file:
+
+```text
+src/language/
+  language.ts
+  expression.ts
+  parser/
+    pitch.ts
+  runtime.ts
+  runtime/
+    scheduler.ts
+    seq/
+      life.ts
+      turing.ts
+```
+
+`language.ts` remains the high-level DSL compiler/orchestrator. Pure pitch primitives live under
+`parser/`, the global `EVERY` scheduler lives in `runtime/scheduler.ts`, and pure generative
+sequence algorithms live under `runtime/seq/`. `runtime.ts` owns orchestration, consumer state,
+views, and audio-engine integration.
+
+New `SEQ` models should put their model-specific algorithm/state helpers under `runtime/seq/`
+instead of extending `runtime.ts` with another embedded implementation.
+
+## Live parameter update policy
+
+Mutable parameters declare how editor/control-surface changes reach the runtime in
+`src/language/parameter-policy.ts`.
+
+- `continuous`: intermediate values are streamed while a `LIVE` slider moves.
+- `commit`: intermediate values update only the editor/readout; the runtime receives
+  the new value once when the edit is committed (for sliders, on release/change).
+
+This policy is shared infrastructure. New DSP objects should classify parameters
+by semantics rather than implementing slider-specific behavior. Structural or
+capture-time controls such as future delay `reverse`/`lines` use `commit`; signal
+controls such as filter `cutoff`, `feedback`, and `mix` use `continuous`.
+
+## Creative delay DSP
+
+The creative delay uses DSPark v1.7.0 (MIT) as the forward delay core and a Sonus C++ layer for multi-line routing and true reverse-window playback. `npm run dsp:setup` fetches DSPark into `vendor/dspark`; `npm run dsp:build` produces `public/dsp/delay.wasm` and the browser loads it through `public/worklets/delay-processor.js`.
+
+The DSP preallocates up to eight lines. Reverse routing is decided once per newly captured window and is retained by that material through feedback, so live changes to the reverse probability are non-retroactive.
+
+
+<!-- SONUS-0.3.0-DICES-BUILD -->
+## Dices / Marbles WASM
+
+`MOD dices` is compiled as the independent `public/dsp/dices.wasm` backend.
+
+The build uses only the random-voltage components needed by Sonus Umbrae. It intentionally does not integrate Marbles' T/gate section or its musical quantizer. The build includes:
+
+```text
+marbles/random/random_sequence.h
+marbles/random/lag_processor.cc
+marbles/resources.cc
+stmlib/dsp/units.cc
+```
+
+`stmlib/dsp/units.cc` is required because the Marbles lag processor references the stmlib pitch-ratio lookup tables.
+
+A normal DSP rebuild is sufficient after changing the Dices C++ bridge:
+
+```bash
+npm run dsp:setup
+npm run dsp:build
+```
+
+The Dices WebAssembly artifact is generated locally and remains ignored by Git.

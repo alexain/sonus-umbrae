@@ -2,10 +2,11 @@ import './style.css';
 import { AudioEngine, type AudioLatencyMode } from './audio/engine';
 import { SonusEvaluationError, SonusRuntime, type InlineViewState, type LifeViewState, type ParameterViewState, type TuringViewState, type SchemeConnection, type SchemeModel, type SchemeNode } from './language/runtime';
 import { compileLanguageSource, LanguageError, parseProgramCapabilities, type ProgramCapability } from './language/language';
+import { parameterUpdatePolicy, type ParameterUpdatePolicy } from './language/parameter-policy';
 
 type Screen = 'live' | 'config' | 'help' | 'about' | 'scheme';
 
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Missing #app');
@@ -39,6 +40,7 @@ app.innerHTML = `
           <label class="config-row" data-config-key="output"><span>OUTPUT DEVICE</span><select id="config-output"><option value="">SYSTEM DEFAULT</option></select></label>
           <label class="config-row" data-config-key="sampleRate"><span>SAMPLE RATE</span><select id="config-sample-rate"><option value="0">DEVICE DEFAULT</option><option value="44100">44100 HZ</option><option value="48000">48000 HZ</option><option value="88200">88200 HZ</option><option value="96000">96000 HZ</option></select></label>
           <label class="config-row" data-config-key="latencyMode"><span>LATENCY MODE</span><select id="config-latency-mode"><option value="interactive">INTERACTIVE</option><option value="balanced">BALANCED</option><option value="playback">PLAYBACK</option></select></label>
+          <label class="config-row" data-config-key="outputLevel"><span>OUTPUT LEVEL</span><span><input id="config-output-level" type="range" min="0" max="200" step="1" value="100" aria-label="Output level" /> <span id="config-output-level-value">100%</span></span></label>
           <div class="config-info-row"><span>ACTIVE FORMAT</span><span id="config-audio-format">--</span></div>
           <div class="config-info-row"><span>LATENCY</span><span id="config-audio-latency">--</span></div>
         </div>
@@ -50,7 +52,7 @@ app.innerHTML = `
           <label class="config-row" data-config-key="liveRate"><span>LIVE CONTROL RATE</span><select id="config-live-rate"><option value="60">60 HZ</option><option value="30">30 HZ</option><option value="20">20 HZ</option><option value="15">15 HZ</option></select></label>
         </div>
         <div class="system-copy muted">↑ ↓ SELECT &nbsp; ← → CHANGE &nbsp; ENTER TOGGLE / SELECT</div>
-        <div class="system-copy muted">AUDIO DEVICE, SAMPLE RATE OR LATENCY MODE CHANGES REQUIRE ENGINE RESTART</div>
+        <div class="system-copy muted">OUTPUT LEVEL APPLIES IMMEDIATELY · DEVICE, SAMPLE RATE OR LATENCY MODE CHANGES REQUIRE ENGINE RESTART</div>
         <div class="system-copy muted">ESC  RETURN TO CODE</div>
       </div>
 
@@ -365,6 +367,8 @@ const configLiveRate = must<HTMLSelectElement>('config-live-rate');
 const configOutput = must<HTMLSelectElement>('config-output');
 const configSampleRate = must<HTMLSelectElement>('config-sample-rate');
 const configLatencyMode = must<HTMLSelectElement>('config-latency-mode');
+const configOutputLevel = must<HTMLInputElement>('config-output-level');
+const configOutputLevelValue = must<HTMLElement>('config-output-level-value');
 const configAudioFormat = must<HTMLElement>('config-audio-format');
 const configAudioLatency = must<HTMLElement>('config-audio-latency');
 const quickMenuOverlay = must<HTMLElement>('quick-menu-overlay');
@@ -410,6 +414,7 @@ type AppConfig = {
   sampleRate: SampleRateChoice;
   outputDeviceId: string;
   latencyMode: AudioLatencyMode;
+  outputLevel: number;
 };
 let appConfig: AppConfig = {
   showVariables: true,
@@ -419,6 +424,7 @@ let appConfig: AppConfig = {
   sampleRate: 0,
   outputDeviceId: '',
   latencyMode: 'interactive',
+  outputLevel: 100,
 };
 let configSelectionIndex = 0;
 let pendingAudioConfig: { sampleRate: SampleRateChoice; outputDeviceId: string; latencyMode: AudioLatencyMode } | null = null;
@@ -441,6 +447,7 @@ audioEngine.setPreferredAudioConfiguration({
   outputDeviceId: appConfig.outputDeviceId || null,
   latencyMode: appConfig.latencyMode,
 });
+audioEngine.setHardwareOutputLevel(appConfig.outputLevel);
 applyAppConfig();
 
 
@@ -458,9 +465,12 @@ function loadAppConfig(): void {
       sampleRate: parsed.sampleRate === 44100 || parsed.sampleRate === 48000 || parsed.sampleRate === 88200 || parsed.sampleRate === 96000 ? parsed.sampleRate : 0,
       outputDeviceId: typeof parsed.outputDeviceId === 'string' ? parsed.outputDeviceId : '',
       latencyMode: parsed.latencyMode === 'balanced' || parsed.latencyMode === 'playback' ? parsed.latencyMode : 'interactive',
+      outputLevel: Number.isFinite(parsed.outputLevel)
+        ? Math.max(0, Math.min(200, Number(parsed.outputLevel)))
+        : 100,
     };
   } catch {
-    appConfig = { showVariables: true, showMetrics: false, showDspStatus: true, liveControlHz: 60, sampleRate: 0, outputDeviceId: '', latencyMode: 'interactive' };
+    appConfig = { showVariables: true, showMetrics: false, showDspStatus: true, liveControlHz: 60, sampleRate: 0, outputDeviceId: '', latencyMode: 'interactive', outputLevel: 100 };
   }
 }
 
@@ -476,6 +486,9 @@ function applyAppConfig(): void {
   configSampleRate.value = String(appConfig.sampleRate);
   configOutput.value = appConfig.outputDeviceId;
   configLatencyMode.value = appConfig.latencyMode;
+  configOutputLevel.value = String(appConfig.outputLevel);
+  configOutputLevelValue.textContent = `${Math.round(appConfig.outputLevel)}%`;
+  audioEngine.setHardwareOutputLevel(appConfig.outputLevel);
   dspStatus.closest('.status-item')?.classList.toggle('hidden', !appConfig.showDspStatus);
   liveControlRefreshMs = Math.round(1000 / appConfig.liveControlHz);
   syncViews();
@@ -509,6 +522,13 @@ function activateConfigRow(direction: -1 | 0 | 1): void {
   if (control instanceof HTMLInputElement && control.type === 'checkbox') {
     control.checked = direction === 0 ? !control.checked : direction > 0;
     control.dispatchEvent(new Event('change', { bubbles: true }));
+  } else if (control instanceof HTMLInputElement && control.type === 'range') {
+    if (direction === 0) return;
+    const step = Number(control.step || '1') || 1;
+    const min = Number(control.min || '0');
+    const max = Number(control.max || '100');
+    control.value = String(Math.max(min, Math.min(max, Number(control.value) + direction * step)));
+    control.dispatchEvent(new Event('input', { bubbles: true }));
   } else if (control instanceof HTMLSelectElement) {
     cycleSelect(control, direction === 0 ? 1 : direction);
   }
@@ -880,7 +900,7 @@ function notify(text: string): void {
 function normalizeLanguageCommandCase(): void {
   const normalized = editor.value
     .replace(
-      /^(\s*)(use|voice|fx|filter|seq|play|set|clock|main)(?=\s|$)/gim,
+      /^(\s*)(use|voice|fx|filter|seq|register|play|set|clock|main)(?=\s|$)/gim,
       (_match, indentation: string, commandName: string) => `${indentation}${commandName.toUpperCase()}`,
     )
     .replace(
@@ -888,7 +908,7 @@ function normalizeLanguageCommandCase(): void {
       (_match, indentation: string) => `${indentation}LIVE`,
     )
     .replace(
-      /^(\s*)mod(?=\s+[A-Za-z_]\w*(?:\s+with\s+view)?\s*:)/gim,
+      /^(\s*)mod(?=\s+[A-Za-z_]\w*(?:\s+with\s+view(?:\s+\d+(?:\.\d+)?\s*[vx])?)?\s*:)/gim,
       (_match, indentation: string) => `${indentation}MOD`,
     )
     .replace(
@@ -1318,6 +1338,64 @@ function buildInlineSparkline(state: Extract<InlineViewState, { kind: 'scalar' }
   return svg;
 }
 
+type ModuleViewScale =
+  | { mode: 'default' }
+  | { mode: 'volts'; value: number }
+  | { mode: 'zoom'; value: number };
+
+function parseModuleViewScales(source: string): Map<string, ModuleViewScale> {
+  const result = new Map<string, ModuleViewScale>();
+  const scopes: Array<{ kind: 'voice' | 'fx' | 'other'; name: string; indentation: number }> = [];
+
+  for (const rawLine of source.split('\n')) {
+    const commentAt = commentStart(rawLine);
+    const code = commentAt < 0 ? rawLine : rawLine.slice(0, commentAt);
+    const trimmed = code.trim();
+    if (!trimmed) continue;
+    const indentation = code.length - code.trimStart().length;
+    while (scopes.length > 0 && indentation <= scopes[scopes.length - 1].indentation) scopes.pop();
+
+    const owner = trimmed.match(/^_?(VOICE|FX)\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+WITH\s+VIEW(?:\s+\d+(?:\.\d+)?\s*[VX])?)?\s*:/i);
+    if (owner) {
+      scopes.push({ kind: owner[1].toLowerCase() as 'voice' | 'fx', name: owner[2], indentation });
+      continue;
+    }
+
+    const mod = trimmed.match(/^MOD\s+([A-Za-z_][A-Za-z0-9_]*)\s+WITH\s+VIEW(?:\s+(\d+(?:\.\d+)?)\s*([VX]))?\s*:/i);
+    if (!mod) continue;
+    const ownerScope = [...scopes].reverse().find((scope) => scope.kind === 'voice' || scope.kind === 'fx');
+    const internalName = ownerScope ? `__mod_${ownerScope.name}_${mod[1]}` : mod[1];
+    if (mod[2] === undefined) result.set(internalName, { mode: 'default' });
+    else if (mod[3].toLowerCase() === 'v') result.set(internalName, { mode: 'volts', value: Number(mod[2]) });
+    else result.set(internalName, { mode: 'zoom', value: Number(mod[2]) });
+  }
+  return result;
+}
+
+function isDicesSignal(signal: string): boolean {
+  return /\.(?:x1|x2|x3|y)$/i.test(signal);
+}
+
+function naturalScopeRange(signals: readonly string[]): number {
+  return signals.some(isDicesSignal) ? 5 : 1;
+}
+
+function effectiveScopeRange(signals: readonly string[], scale: ModuleViewScale | undefined): number {
+  const natural = naturalScopeRange(signals);
+  if (!scale || scale.mode === 'default') return natural;
+  if (scale.mode === 'volts') return Math.max(0.0001, scale.value);
+  return Math.max(0.0001, natural / scale.value);
+}
+
+function scopeScaleLabel(signals: readonly string[], scale: ModuleViewScale | undefined): string {
+  const range = effectiveScopeRange(signals, scale);
+  if (signals.some(isDicesSignal) || scale?.mode === 'volts') {
+    return `±${Number.isInteger(range) ? range : Number(range.toFixed(2))}V`;
+  }
+  if (scale?.mode === 'zoom') return `${scale.value}X`;
+  return '';
+}
+
 function syncViews(): void {
   const signalViews = new Map(audioEngine.getViewSignals().map((view) => [view.signal, view.kind]));
   const explicitSignals = new Set(runtime.getExplicitSignalViews().map((view) => view.signal));
@@ -1328,6 +1406,7 @@ function syncViews(): void {
   const lifeViews = runtime.getLifeViews();
   const scheme = runtime.getSchemeModel();
   const nodes = new Map(scheme.nodes.map((node) => [node.id, node]));
+  const moduleViewScales = parseModuleViewScales(sourceText());
   const panels: HTMLElement[] = [];
 
   if (appConfig.showVariables) panels.push(buildVariablesPanel(variables));
@@ -1382,14 +1461,17 @@ function syncViews(): void {
     }
 
     const details = [...parameterViews.values()].filter((view) => view.signal.startsWith(`${node.id}.`));
+    const model = node.parameters.find((parameter) => parameter.name.toLowerCase() === 'model')?.value.toLowerCase();
     const compositeSignals = moduleViews.has(node.id)
-      ? / : (?:SWELL|MOD)$/i.test(node.label)
-        ? [1, 2, 3, 4].map((port) => `${node.id}.out${port}`)
-        : / : VOICE$/i.test(node.label)
-          ? [`${node.id}.out`, `${node.id}.aux`]
-          : / : (?:MIST|FX)$/i.test(node.label)
-            ? [`${node.id}.out_L`, `${node.id}.out_R`]
-            : []
+      ? / : MOD(?:\s+DICES)?$/i.test(node.label) && model === 'dices'
+        ? ['x1', 'x2', 'x3', 'y'].map((port) => `${node.id}.${port}`)
+        : / : (?:SWELL|MOD)$/i.test(node.label)
+          ? [1, 2, 3, 4].map((port) => `${node.id}.out${port}`)
+          : / : VOICE$/i.test(node.label)
+            ? [`${node.id}.out`, `${node.id}.aux`]
+            : / : (?:MIST|FX)$/i.test(node.label)
+              ? [`${node.id}.out_L`, `${node.id}.out_R`]
+              : []
       : [];
 
     // User-created modules exist in VARIABLES and SCHEME automatically, but a
@@ -1404,6 +1486,7 @@ function syncViews(): void {
       signals,
       compositeSignals,
       parameterDetails: details,
+      viewScale: moduleViewScales.get(node.id),
       defaultCollapsed: false,
     }));
   }
@@ -1553,6 +1636,7 @@ function buildModuleMonitorPanel(options: {
   compositeSignals?: string[];
   stereoLegend?: boolean;
   parameterDetails?: ParameterViewState[];
+  viewScale?: ModuleViewScale;
   defaultCollapsed: boolean;
 }): HTMLElement {
   const card = createMonitorCard(options.id, options.title, options.defaultCollapsed);
@@ -1565,37 +1649,40 @@ function buildModuleMonitorPanel(options: {
     section.className = 'monitor-signal monitor-composite';
     const label = document.createElement('div');
     label.className = 'monitor-section-label';
+    const compositeIsDices = options.compositeSignals!.some(isDicesSignal);
+    const scaleLabel = scopeScaleLabel(options.compositeSignals!, options.viewScale);
     label.textContent = options.id === 'Audio'
       ? 'STEREO OUT'
       : (/: (?:MIST|FX)$/.test(options.title))
         ? 'OUT L / R'
         : options.compositeSignals!.length === 2
           ? 'OUT / AUX'
-          : options.title.endsWith(': MOD')
-            ? 'A / B / C / D'
-            : 'OUT 1-4';
+          : compositeIsDices
+            ? `X1 / X2 / X3 / Y${scaleLabel ? ` · ${scaleLabel}` : ''}`
+            : / : MOD(?:\s+DICES)?$/i.test(options.title)
+              ? 'A / B / C / D'
+              : 'OUT 1-4';
 
     if (options.stereoLegend || (/: (?:MIST|FX)$/.test(options.title) && options.compositeSignals?.length === 2)) {
       const legend = document.createElement('span');
       legend.className = 'scope-stereo-legend';
       legend.innerHTML = '<span class="scope-legend-l">● L</span><span class="scope-legend-r">● R</span>';
       label.append(legend);
-    } else if (options.title.endsWith(': MOD') && options.compositeSignals?.length === 4) {
+    } else if (/ : MOD(?:\s+DICES)?$/i.test(options.title) && options.compositeSignals?.length === 4) {
+      const names = compositeIsDices ? ['X1', 'X2', 'X3', 'Y'] : ['A', 'B', 'C', 'D'];
       const legend = document.createElement('span');
       legend.className = 'scope-stereo-legend';
-      legend.innerHTML = [
-        '<span style="color:var(--scope-trace-1)">● A</span>',
-        '<span style="color:var(--scope-trace-2)">● B</span>',
-        '<span style="color:var(--scope-trace-3)">● C</span>',
-        '<span style="color:var(--scope-trace-4)">● D</span>',
-      ].join('');
+      legend.innerHTML = names.map((name, index) =>
+        `<span style="color:var(--scope-trace-${index + 1})">● ${name}</span>`
+      ).join('');
       label.append(legend);
     }
     const canvas = document.createElement('canvas');
     canvas.className = 'scope-canvas view-signal composite-scope';
     canvas.dataset.signals = options.compositeSignals!.join(',');
     canvas.dataset.kind = 'multi-signal';
-    if (options.title.endsWith(': MOD')) {
+    canvas.dataset.scopeRange = String(effectiveScopeRange(options.compositeSignals!, options.viewScale));
+    if (/ : MOD(?:\s+DICES)?$/i.test(options.title)) {
       canvas.dataset.modScope = 'true';
       canvas.dataset.modName = options.id;
     }
@@ -1614,6 +1701,7 @@ function buildModuleMonitorPanel(options: {
     canvas.className = `scope-canvas view-${signal.kind}`;
     canvas.dataset.signal = signal.signal;
     canvas.dataset.kind = signal.kind;
+    canvas.dataset.scopeRange = String(effectiveScopeRange([signal.signal], options.viewScale));
     canvas.setAttribute('aria-label', `${signal.signal} ${signal.kind} monitor`);
     section.append(label, canvas);
     body.append(section);
@@ -1878,7 +1966,8 @@ function drawScopes(): void {
         ctx.beginPath();
         for (let i = 0; i < data.length; i += 1) {
           const x = (i / (data.length - 1)) * width;
-          const y = height * 0.5 - data[i] * height * 0.42;
+          const displayValue = scopeDisplayValue(traceSignal, data[i], canvas);
+          const y = height * 0.5 - displayValue * height * 0.42;
           if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
         }
         ctx.stroke();
@@ -1904,7 +1993,8 @@ function drawScopes(): void {
       ctx.beginPath();
       for (let i = 0; i < data.length; i += 1) {
         const x = (i / (data.length - 1)) * width;
-        const y = height * 0.5 - data[i] * height * 0.42;
+        const displayValue = scopeDisplayValue(signal, data[i], canvas);
+        const y = height * 0.5 - displayValue * height * 0.42;
         if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       }
       ctx.stroke();
@@ -1988,6 +2078,14 @@ function formatMidiNote(midi: number): string {
   return cents === 0 ? `${name}${octave}` : `${name}${octave} ${cents > 0 ? '+' : ''}${cents}c`;
 }
 
+function scopeDisplayValue(signal: string, value: number, canvas: HTMLCanvasElement): number {
+  const configured = Number(canvas.dataset.scopeRange);
+  const range = Number.isFinite(configured) && configured > 0
+    ? configured
+    : naturalScopeRange([signal]);
+  return value / range;
+}
+
 function renderScheme(): void {
   const rawModel = runtime.getSchemeModel();
 
@@ -2004,13 +2102,14 @@ function renderScheme(): void {
     return true;
   });
   const model: SchemeModel = { nodes, connections: rawModel.connections };
+  const moduleViewScales = parseModuleViewScales(sourceText());
 
   schemeNodes.replaceChildren();
   schemeEdges.replaceChildren();
 
   const nodeElements = new Map<string, HTMLElement>();
   for (const node of model.nodes) {
-    const element = buildSchemeNode(node);
+    const element = buildSchemeNode(node, moduleViewScales.get(node.id));
     nodeElements.set(node.id, element);
     schemeNodes.append(element);
   }
@@ -2024,7 +2123,7 @@ function renderScheme(): void {
   });
 }
 
-function buildSchemeNode(node: SchemeNode): HTMLElement {
+function buildSchemeNode(node: SchemeNode, viewScale?: ModuleViewScale): HTMLElement {
   const element = document.createElement('section');
   element.className = 'scheme-node scheme-module-node';
   element.dataset.nodeId = node.id;
@@ -2056,16 +2155,22 @@ function buildSchemeNode(node: SchemeNode): HTMLElement {
 
     const label = document.createElement('div');
     label.className = 'scheme-view-label';
-    label.textContent = view.port;
+    const viewSignals = view.signals?.length ? view.signals : [view.signal];
+    const viewIsDices = viewSignals.some(isDicesSignal);
+    const scaleLabel = scopeScaleLabel(viewSignals, viewScale);
+    label.textContent = viewIsDices
+      ? `X1 / X2 / X3 / Y${scaleLabel ? ` · ${scaleLabel}` : ''}`
+      : view.port;
 
     const canvas = document.createElement('canvas');
     canvas.className = `scope-canvas scheme-scope view-${view.signalKind}`;
     canvas.dataset.signal = view.signal;
+    canvas.dataset.scopeRange = String(effectiveScopeRange(viewSignals, viewScale));
     if (view.signals?.length) {
       canvas.dataset.signals = view.signals.join(',');
       canvas.dataset.kind = 'multi-signal';
       canvas.classList.add('composite-scope');
-      if (node.label.endsWith(': MOD') && view.signals.length === 4) {
+      if (/ : MOD(?:\s+DICES)?$/i.test(node.label) && view.signals.length === 4) {
         canvas.dataset.modScope = 'true';
         canvas.dataset.modName = node.id;
       }
@@ -2450,12 +2555,13 @@ type LiveControlSource = {
   value: number;
   property: string;
   prefixColumns: number;
-  targetKind: 'voice' | 'fx' | 'filter';
+  targetKind: 'voice' | 'fx' | 'filter' | 'mod';
   targetName: string;
+  updatePolicy: ParameterUpdatePolicy;
 };
 
 type LiveBlockScope = {
-  kind: 'voice' | 'fx' | 'filter' | 'other';
+  kind: 'voice' | 'fx' | 'filter' | 'mod' | 'other';
   name: string;
   targetName: string;
   indentation: number;
@@ -2562,7 +2668,7 @@ function scanLiveControls(source: string): LiveControlSource[] {
     if (trimmed) {
       while (scopes.length > 0 && indentation <= scopes[scopes.length - 1].indentation) scopes.pop();
 
-      const header = trimmed.match(/^_?(VOICE|FX|FILTER|MOD|SEQ)\s+([A-Za-z_][A-Za-z0-9_]*)\s*:/i);
+      const header = trimmed.match(/^_?(VOICE|FX|FILTER|MOD|SEQ)\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+WITH\s+VIEW(?:\s+\d+(?:\.\d+)?\s*[VX])?)?\s*:/i);
       if (header) {
         const keyword = header[1].toLowerCase();
         const name = header[2];
@@ -2572,13 +2678,17 @@ function scanLiveControls(source: string): LiveControlSource[] {
           const ownerVoice = [...scopes].reverse().find((scope) => scope.kind === 'voice')?.name;
           const targetName = ownerVoice ? `__filter_${ownerVoice}_${name}` : name;
           scopes.push({ kind: 'filter', name, targetName, indentation, ownerVoice });
+        } else if (keyword === 'mod') {
+          scopes.push({ kind: 'mod', name, targetName: name, indentation });
         } else scopes.push({ kind: 'other', name, targetName: name, indentation });
       }
     }
 
     const match = code.match(/^(\s*)LIVE\s+([A-Za-z_][A-Za-z0-9_]*)\s+(\d+(?:\.\d+)?)(?=\s|$)/i);
     if (match) {
-      const scope = [...scopes].reverse().find((candidate) => candidate.kind === 'voice' || candidate.kind === 'fx' || candidate.kind === 'filter');
+      const scope = [...scopes].reverse().find((candidate) =>
+        candidate.kind === 'voice' || candidate.kind === 'fx' || candidate.kind === 'filter' || candidate.kind === 'mod'
+      );
       const literal = match[3];
       const localStart = match.index! + match[0].lastIndexOf(literal);
       const value = Number(literal);
@@ -2590,8 +2700,12 @@ function scanLiveControls(source: string): LiveControlSource[] {
           value,
           property: match[2],
           prefixColumns: localStart + literal.length,
-          targetKind: scope.kind as 'voice' | 'fx' | 'filter',
+          targetKind: scope.kind as 'voice' | 'fx' | 'filter' | 'mod',
           targetName: scope.targetName,
+          updatePolicy: parameterUpdatePolicy(
+            scope.kind as 'voice' | 'fx' | 'filter' | 'mod',
+            match[2],
+          ),
         });
       }
     }
@@ -2612,6 +2726,10 @@ function applyLiveControlRuntime(kind: string, name: string, property: string, v
     }
 
     if (kind === 'fx') {
+      if (key === 'reverse' || key === 'tape' || key === 'diffusion' || key === 'pingpong' || key === 'lines') {
+        audioEngine.setDelayParameter(name, key as 'reverse'|'tape'|'diffusion'|'pingpong'|'lines', value);
+        return;
+      }
       const aliases: Record<string, 'position' | 'size' | 'density' | 'texture' | 'mix' | 'spread' | 'feedback' | 'reverb'> = {
         position: 'position', predelay: 'position', size: 'size', density: 'density', bloom: 'density', diffuse: 'density',
         texture: 'texture', damp: 'texture', damping: 'texture', mix: 'mix', spread: 'spread', width: 'spread',
@@ -2666,7 +2784,11 @@ function commitLiveControlSource(): void {
   }, 0);
 }
 
-function replaceLiveControlValue(control: HTMLElement, value: number): void {
+function replaceLiveControlValue(
+  control: HTMLElement,
+  value: number,
+  updatePolicy: ParameterUpdatePolicy,
+): void {
   const start = Number(control.dataset.sourceStart);
   const end = Number(control.dataset.sourceEnd);
   if (!Number.isFinite(start) || !Number.isFinite(end)) return;
@@ -2683,12 +2805,14 @@ function replaceLiveControlValue(control: HTMLElement, value: number): void {
   editor.setSelectionRange(shift(selectionStart), shift(selectionEnd), selectionDirection);
   const readout = control.querySelector<HTMLElement>('.live-parameter-value');
   if (readout) readout.textContent = replacement;
-  scheduleLiveControlRuntimeUpdate(
-    control.dataset.targetKind ?? '',
-    control.dataset.targetName ?? '',
-    control.dataset.property ?? '',
-    Number(replacement),
-  );
+  if (updatePolicy === 'continuous') {
+    scheduleLiveControlRuntimeUpdate(
+      control.dataset.targetKind ?? '',
+      control.dataset.targetName ?? '',
+      control.dataset.property ?? '',
+      Number(replacement),
+    );
+  }
 }
 
 function renderLiveControls(): void {
@@ -2714,6 +2838,7 @@ function renderLiveControls(): void {
     control.dataset.targetKind = entry.targetKind;
     control.dataset.targetName = entry.targetName;
     control.dataset.property = entry.property;
+    control.dataset.updatePolicy = entry.updatePolicy;
     const preferredLeft = context.measureText(prefix).width + 8;
     control.style.left = `${preferredLeft - editor.scrollLeft}px`;
     control.style.top = `${(entry.line - 1) * lineHeight + inlineSpacerBeforePhysicalLine(entry.line) - editor.scrollTop}px`;
@@ -2726,8 +2851,12 @@ function renderLiveControls(): void {
     slider.value = String(entry.value);
     slider.setAttribute('aria-label', `Live ${entry.property}`);
     slider.addEventListener('pointerdown', (event) => event.stopPropagation());
-    slider.addEventListener('input', () => replaceLiveControlValue(control, Number(slider.value)));
+    slider.addEventListener('input', () =>
+      replaceLiveControlValue(control, Number(slider.value), entry.updatePolicy)
+    );
     slider.addEventListener('change', () => {
+      // `continuous` controls have already streamed their intermediate values.
+      // `commit` controls reach the runtime only here, through one hot-reload.
       commitLiveControlSource();
       renderSyntaxLayer();
       renderLineGutter();
@@ -3400,6 +3529,13 @@ configLiveRate.addEventListener('change', () => {
   appConfig.liveControlHz = hz === 30 || hz === 20 || hz === 15 ? hz : 60;
   saveAppConfig();
   applyAppConfig();
+});
+configOutputLevel.addEventListener('input', () => {
+  const level = Math.max(0, Math.min(200, Number(configOutputLevel.value)));
+  appConfig.outputLevel = level;
+  configOutputLevelValue.textContent = `${Math.round(level)}%`;
+  audioEngine.setHardwareOutputLevel(level);
+  saveAppConfig();
 });
 configSampleRate.addEventListener('change', () => {
   const value = Number(configSampleRate.value);

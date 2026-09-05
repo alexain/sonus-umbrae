@@ -514,6 +514,41 @@ property value [with property modifiers] every time [on timing modifiers]
 
 `every` stays at the end of the property expression.
 
+### Euclidean every
+
+`EVERY EUCLIDEAN hits/steps` is a beat-synchronous timing mode. It distributes
+`hits` as evenly as possible across `steps` ticks of the selected clock:
+
+```text
+TIMBRE rnd(20,80) EVERY EUCLIDEAN 5/16
+```
+
+The pattern advances one step on every tick of the master clock by default.
+Use the normal clock modifier to drive it from a derived or named clock:
+
+```text
+MORPH wander(30,70) EVERY EUCLIDEAN 3/8 WITH CLOCK slow
+```
+
+`ROTATE` rotates the Euclidean pattern without changing its hit count:
+
+```text
+MORPH rnd(20,80) EVERY EUCLIDEAN 5/16 WITH ROTATE 2
+```
+
+Timing modifiers compose normally:
+
+```text
+EVOLVE EVERY EUCLIDEAN 7/16 WITH CLOCK slow, ROTATE 3, CHANCE 80
+```
+
+`CHANCE` is evaluated only on Euclidean hit steps. `LOOSE` applies its normal
+timing looseness only to those hits. `ROTATE` is valid only with
+`EVERY EUCLIDEAN`.
+
+Euclidean timing is an `EVERY` mode rather than a `SEQ` model, so it can drive
+any property or state change that already accepts `EVERY`.
+
 ### Object-level every
 
 A `VOICE` or `FX` can declare a fallback cadence:
@@ -1229,6 +1264,98 @@ it changes. `ON CLOCK ...` determines which clock provides those beat steps.
 
 
 
+
+
+### Delay spread looseness
+
+For `FX ... model delay`, `spread` accepts an optional `with loose` modifier:
+
+```text
+FX echo:
+    model delay
+    lines 4
+    time 1 beat
+    spread 60 with loose 40
+```
+
+`spread` controls how far the delay lines separate in time and stereo. `loose`
+controls how strictly those times follow exact rhythmic subdivisions.
+
+- `loose 0` keeps the rhythmic multitap geometry exact.
+- Higher values progressively move the taps toward a freer cluster around the
+  reference time and add a small stable per-line offset.
+- The offset is stable for the life of the delay instance; it does not wander
+  continuously.
+- If omitted, `loose` defaults to `25`.
+
+`time` is the center of the delay-line distribution, not the last tap of a
+rhythmic grid. At higher `spread` values, some lines fall before the reference
+time and some after it. `loose` adds stable asymmetry between those lines;
+there is no implicit quantization to `1/N`, `2/N`, etc.
+
+`spread ... with loose ...` can also be combined with `every`; the timing
+modifier applies to changes of the spread value, while the `loose` amount stays
+attached to that spread declaration.
+
+## REGISTER
+
+`REGISTER` stores pitch values from a `SEQ` source. The first model is `shift`,
+an N-stage shift register. Stage `1` is always the newest value.
+
+```text
+REGISTER canon:
+    model shift
+    size 4
+    pitch melody
+    write every 1 beat
+```
+
+A Turing `SEQ` produces one pitch, so it can be consumed directly:
+
+```text
+REGISTER canon:
+    model shift
+    size 4
+    pitch melody
+    write every euclidean 5/16 with rotate 2
+```
+
+A Life `SEQ` exposes a pitch pool, so the register must select how to read it:
+
+```text
+REGISTER canon:
+    model shift
+    size 4
+    pitch ecosystem with random
+    write every 1 beat
+```
+
+Supported Life readers are `order`, `random`, `walk`, `reverse`, `pendulum`,
+`first`, and `last`.
+
+Register stages are referenced as pitch sources with one-based indices:
+
+```text
+VOICE one:
+    sound resonator.string
+    pitch canon.1
+
+VOICE two:
+    sound resonator.string
+    pitch canon.2
+```
+
+On each `write` event, the new pitch is inserted at stage `1`; older values move
+toward higher stages and the oldest value is discarded. `size` accepts values
+from 2 to 32.
+
+`write every ...` uses the normal global timing system, including beat, wall
+time, named clocks, Euclidean timing, `chance`, `loose`, and other supported
+`every` modifiers.
+
+`REGISTER` is stateful. Hot reload preserves its current stages and resizes them
+when `size` changes.
+
 ## SEQ and Turing Machine
 
 `SEQ` declares a reusable generative note source. Unlike a static `SET`, a
@@ -1673,3 +1800,256 @@ Omit the name to reset every active Life sequence:
 ```
 
 The new population uses the sequence's current `DENSITY` and optional `MAX` settings. Manual reset is independent of `EVOLVE` and does not require `RESPAWN`.
+
+### LIVE update semantics
+
+`LIVE` controls do not all update the runtime in the same way.
+
+Continuous parameters stream intermediate values while the control is moved. For
+example, a filter `cutoff` can be swept continuously.
+
+Commit parameters update the visible source value during editing, but the runtime
+receives the new value only when the edit is committed. This is used for
+structural or capture-time parameters whose intermediate drag values must not
+retroactively alter existing DSP state.
+
+The update policy belongs to the parameter schema, not to the slider widget, so
+the same semantics can be reused by future MIDI or external control surfaces.
+
+## Creative delay
+
+`FX` exposes a multi-line creative delay backed by DSPark for the forward delay path and a Sonus reverse-window layer for true backwards playback.
+
+```text
+FX echo:
+    model delay
+    lines 4
+    time 1/4 beat
+    spread 35
+    feedback 55
+    reverse 30
+    tape 45
+    diffusion 20
+    mix 35
+```
+
+`lines` selects 1..8 preallocated delay lines. `time` accepts `ms`, `sec`, or fractional `beat` values. `spread` distributes the lines around the base time and across the stereo field. `feedback`, `tape`, `diffusion`, and `mix` are continuous 0..100 controls.
+
+`reverse` is a 0..100 capture probability, not a global playback switch. At the beginning of each new delay window each line decides whether new material enters its forward or reverse path. `reverse 0` always captures forward; `reverse 100` always captures backwards. Once material has entered a path, its direction is preserved through feedback. Changing `reverse` live affects only newly captured material.
+
+Because `reverse` is a capture-time parameter, its `LIVE` slider uses commit semantics: moving the slider previews the source value, and the DSP receives the new probability only when the slider is released.
+
+The reverse path performs actual backwards buffer playback. It does not emulate reversal with filtering, modulation, or reversed feedback polarity.
+
+
+Reverse windows are atomic. Changing delay geometry (`time`, `spread`, or
+`lines`) starts future reverse captures on a clean window boundary so a reversed
+segment is never split across two different window lengths. With more active
+lines, the maximum temporal spread widens automatically to keep dense delay
+configurations from collapsing into a tight cluster.
+
+### Probabilistic delay pitch shifting
+
+The creative delay can transpose newly captured material before it enters the
+delay/feedback network:
+
+```text
+FX echo:
+    model delay
+    pitch 40 with semitones [-12 7 12]
+```
+
+`40` is the probability that a new delay window is transposed. If a pitch event
+is selected, one non-zero shift is chosen from the supplied pool and remains
+part of that material through its feedback lifetime.
+
+Two convenience forms are also supported:
+
+```text
+pitch 35 with octaves [-1 1]
+pitch 50 with scale minor
+```
+
+`octaves` is converted to semitones. `scale` uses the scale's interval set as a
+pool of transpositions. The current DSPark pitch shifter supports shifts from
+-12 to +12 semitones, so this first version is limited to one octave down/up.
+
+Absolute note names are intentionally not accepted here: transposing arbitrary
+audio *to* an absolute note would require pitch detection/quantization, which is
+a separate processor.
+
+### Delay ping-pong
+
+`pingpong 0..100` now controls actual cross-feedback rather than only cross-mixing
+the wet output. At `100`, local same-side feedback is removed and recirculation
+is fed into the opposite stereo side; intermediate values blend local and
+cross-feedback.
+
+### MOD dices
+
+`dices` is the Sonus random-voltage modulator derived from the MIT-licensed
+Marbles random-voltage core. It exposes only the X/Y-style random modulation
+features; Marbles' trigger/gate section and internal musical quantizer are not
+included.
+
+```text
+MOD rnd:
+    model dices
+    rate 1 beat
+    spread 60
+    bias 50
+    steps 35
+    deja 20
+    length 8
+    diversity 50
+```
+
+Outputs:
+
+```text
+rnd.x1
+rnd.x2
+rnd.x3
+rnd.y
+```
+
+`x1`, `x2`, and `x3` update at `rate`. `y` is a slower smooth/random channel
+running at one sixteenth of the X rate.
+
+Parameters:
+
+- `rate`: accepts `hz`, `beat`, `sec`, or `ms`.
+- `spread 0..100`: controls the width/shape of the random distribution.
+- `bias 0..100`: biases the distribution toward lower or higher values.
+- `steps 0..100`: below 50 the signal becomes increasingly smooth, 50 is
+  sample-and-hold, above 50 it becomes progressively more stepped/quantized.
+- `deja 0..100`: controls the tendency to reuse the stored random sequence;
+  0 is fresh random, 100 is a locked loop.
+- `length 1..16`: length of the deja-vu memory.
+- `diversity 0..100`: increases the difference in behaviour between X1, X2 and
+  X3 while leaving them under the same macro controls.
+
+The output domain is control voltage style `-5..+5`, matching the existing MOD
+routing domain.
+
+`dices` can be used in parameter modulation:
+
+```text
+FILTER tone:
+    model svf
+    cutoff rnd.x1 with depth 50
+```
+
+or in explicit routes:
+
+```text
+rnd.y -> someDestination.in
+```
+
+
+<!-- SONUS-0.3.0-LANGUAGE -->
+## MOD `dices` — random-voltage modulation (0.3.0)
+
+`dices` is the Sonus Umbrae random-voltage `MOD` backend. It is derived from selected MIT-licensed Mutable Instruments Marbles random-voltage components, but it does not expose Marbles' trigger/gate section or its internal musical quantizer.
+
+```text
+MOD rnd WITH VIEW:
+    model dices
+    rate 1 beat
+    spread 60
+    bias 50
+    steps 35
+    deja 20
+    length 8
+    diversity 50
+```
+
+The four outputs are:
+
+```text
+rnd.x1
+rnd.x2
+rnd.x3
+rnd.y
+```
+
+`x1`, `x2`, and `x3` update at the configured `rate`. `y` is intentionally slower and runs at one sixteenth of the X rate.
+
+### Dices parameters
+
+- `rate <value>` — accepts `hz`, `beat`, `sec`, or `ms`.
+- `spread 0..100` — controls the width/shape of the random distribution.
+- `bias 0..100` — biases the random distribution toward lower or higher values.
+- `steps 0..100` — below 50 becomes progressively smoother; 50 is sample-and-hold; above 50 becomes progressively more stepped/quantized.
+- `deja 0..100` — controls reuse of stored random material; 0 favours fresh material, 100 locks the stored loop.
+- `length 1..16` — length of the deja-vu memory.
+- `diversity 0..100` — progressively differentiates the statistical behaviour of `x1`, `x2`, and `x3`.
+
+Dices outputs use a real control-voltage-style domain of approximately `-5V..+5V`. Routing uses the original values; view scaling never changes the modulation signal itself.
+
+### LIVE Dices parameters
+
+The Dices `0..100` macro parameters can be exposed with the normal `LIVE` prefix:
+
+```text
+MOD rnd:
+    model dices
+    LIVE spread 60
+    LIVE bias 50
+    LIVE steps 35
+    LIVE deja 20
+    LIVE diversity 50
+```
+
+For 0.3.0 these controls use **commit-on-release** semantics. The slider edits the source value directly, but the runtime applies the new Dices setting when the edit is committed rather than streaming every intermediate value into the DSP.
+
+`length` remains a discrete `1..16` parameter and is not presented as a normal 0..100 macro slider.
+
+### Module view scale
+
+A module view without an explicit scale uses the natural range of that module:
+
+```text
+MOD rnd WITH VIEW:
+    model dices
+```
+
+For Dices the natural vertical range is `±5V`.
+
+An explicit voltage range can be requested:
+
+```text
+MOD rnd WITH VIEW 2V:
+    model dices
+```
+
+This displays `-2V..+2V`. Values outside the requested display range are allowed to leave the visible area; they are not clamped in the signal path.
+
+A relative zoom can also be requested:
+
+```text
+MOD rnd WITH VIEW 2X:
+    model dices
+```
+
+`2X` magnifies the natural view by two. For a Dices `±5V` natural range, `2X` therefore displays approximately `±2.5V`.
+
+`0.5X` widens the view; for Dices it displays approximately `±10V`.
+
+The same view-scale syntax is intended as the common module-view convention. The `V` form is most meaningful for control-voltage-domain signals, while `X` is a unit-independent visual zoom.
+
+Dices composite views are labelled `X1 / X2 / X3 / Y` in both the Live sidebar and Scheme.
+
+## Configuration output level (0.3.0)
+
+The Configuration screen includes a persistent `OUTPUT LEVEL` control in the range `0..200%`.
+
+`OUTPUT LEVEL` is an application/hardware preference and is not part of the `.sum` program. It is stored in browser local storage and applies immediately without restarting the audio engine.
+
+It is deliberately distinct from:
+
+```text
+MAIN LEVEL 70
+```
+
+`MAIN LEVEL` is part of the musical patch and travels with the source file. `OUTPUT LEVEL` compensates for the playback environment and the desired application-wide hardware level.

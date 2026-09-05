@@ -29,3 +29,18 @@ Mutable Instruments is a registered trademark. Sonus Umbrae is independent and i
 The `mist.*` FX family uses MIT-licensed STM32F DSP from **Patrick Dowling's SuperParasites** project and its permissively licensed upstream lineage.
 
 Upstream: https://github.com/patrickdowling/superparasites
+
+## DSPark
+
+The creative delay uses DSPark by Cristian Moresi as its forward delay DSP core. DSPark is distributed under the MIT License. The build setup fetches the upstream v1.7.0 source from https://github.com/CristianMoresi/DSPark. Sonus Umbrae adds its own multi-line routing and reverse-window processing layer around that core.
+
+## Mutable Instruments Marbles random-voltage core
+
+Sonus Umbrae uses selected MIT-licensed Marbles random-voltage and lag-processing components by **Emilie Gillet / Mutable Instruments** for the `MOD dices` backend.
+
+Upstream: https://github.com/pichenettes/eurorack  
+Utility library: https://github.com/pichenettes/stmlib
+
+The Sonus integration intentionally omits Marbles' T/gate section and internal musical quantizer. Sonus Umbrae supplies its own timing, routing, language, visualization and macro-control layer and exposes the integration under the independent model name `dices`.
+
+Mutable Instruments is a registered trademark. Sonus Umbrae is independent and is not affiliated with or endorsed by Mutable Instruments.

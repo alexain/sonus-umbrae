@@ -1,3 +1,10 @@
+import {
+  MODE_INTERVALS,
+  midiFromNote,
+  midiFromRoot,
+  midiToFrequency,
+} from './parser/pitch';
+
 export type LanguageDiagnostic = {
   line: number;
   message: string;
@@ -67,7 +74,7 @@ export function parseProgramCapabilities(source: string): ProgramCapabilitySet {
   return { capabilities, directiveLine, directiveText };
 }
 
-type SourceKind = 'voice' | 'note' | 'freq' | 'time' | 'clock' | 'trigger' | 'scalar' | 'scale' | 'seq' | 'envelope';
+type SourceKind = 'voice' | 'note' | 'freq' | 'time' | 'clock' | 'trigger' | 'scalar' | 'scale' | 'seq' | 'register' | 'envelope';
 
 type SourceDefinition =
   | { kind: 'scalar'; internalName?: string }
@@ -77,6 +84,7 @@ type SourceDefinition =
   | { kind: 'note'; values: number[]; display: string; favor: SequenceFavorEntry[]; internalName?: string }
   | { kind: 'scale'; values: number[]; display: string; internalName?: string }
   | { kind: 'seq'; model: 'turing' | 'life' | null; values: number[]; display: string; internalName?: string }
+  | { kind: 'register'; size: number; display: string; internalName?: string }
   | { kind: 'envelope'; spec: EnvelopeSpec; display: string; internalName?: string };
 
 
@@ -140,6 +148,19 @@ type SeqState = {
   material: 'notes' | 'scale' | 'freqs' | null;
 };
 
+type RegisterState = {
+  name: string;
+  line: number;
+  indentation: number;
+  modelId: 'shift' | null;
+  size: number;
+  sourceName: string | null;
+  readerMode: 'direct' | 'order' | 'random' | 'walk' | 'reverse' | 'pendulum' | 'first' | 'last';
+  readerAmount: number;
+  hasWrite: boolean;
+};
+
+
 type ClockState = {
   name: string;
   line: number;
@@ -154,7 +175,7 @@ type ClockState = {
 
 
 
-type FxParameter = 'position' | 'size' | 'pitch' | 'density' | 'texture' | 'mix' | 'spread' | 'feedback' | 'reverb';
+type FxParameter = 'position' | 'size' | 'pitch' | 'density' | 'texture' | 'mix' | 'spread' | 'feedback' | 'reverb' | 'lines' | 'reverse' | 'tape' | 'diffusion' | 'pingpong';
 
 type FxModelSchema = {
   lowLevelMode: string;
@@ -168,11 +189,13 @@ type ModState = {
   line: number;
   indentation: number;
   ownerVoice: string | null;
+  modelId: 'swell' | 'dices';
 };
 
 type ModSourceDefinition = {
   internalName: string;
   ownerVoice: string | null;
+  modelId: 'swell' | 'dices';
 };
 
 
@@ -197,28 +220,6 @@ type TimingModifiers = {
 };
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const NOTE = /^([A-Ga-g])([#b]?)(-?\d+)$/;
-const NOTE_WITHOUT_OCTAVE = /^([A-Ga-g])([#b]?)$/;
-
-const NOTE_INDEX: Record<string, number> = {
-  C: 0,
-  'C#': 1,
-  Db: 1,
-  D: 2,
-  'D#': 3,
-  Eb: 3,
-  E: 4,
-  F: 5,
-  'F#': 6,
-  Gb: 6,
-  G: 7,
-  'G#': 8,
-  Ab: 8,
-  A: 9,
-  'A#': 10,
-  Bb: 10,
-  B: 11,
-};
 
 type SoundParameterSchema = { min: number; max: number; modulatable: boolean };
 type SoundEngineSchema = {
@@ -284,6 +285,10 @@ const SKY_PARAMETERS = new Set<FxParameter>([
   'position', 'size', 'density', 'texture', 'mix', 'spread', 'feedback', 'reverb',
 ]);
 
+const DELAY_PARAMETERS = new Set<FxParameter>([
+  'mix', 'spread', 'feedback', 'lines', 'reverse', 'pitch', 'tape', 'diffusion', 'pingpong',
+]);
+
 const FX_MODEL_REGISTRY: Record<string, FxModelSchema> = {
   'mist.grain':     { lowLevelMode: 'granular',        parameters: MIST_PARAMETERS, musicalPitch: true },
   'mist.stretch':   { lowLevelMode: 'stretch',         parameters: MIST_PARAMETERS, musicalPitch: true },
@@ -294,22 +299,9 @@ const FX_MODEL_REGISTRY: Record<string, FxModelSchema> = {
   'mist.repeat':    { lowLevelMode: 'beat_repeat',     parameters: MIST_PARAMETERS, musicalPitch: true },
   'mist.smear':     { lowLevelMode: 'spectral_clouds', parameters: MIST_PARAMETERS, musicalPitch: true },
   'sky':            { lowLevelMode: 'sky',             parameters: SKY_PARAMETERS, musicalPitch: false },
+  'delay':          { lowLevelMode: 'delay',           parameters: DELAY_PARAMETERS, musicalPitch: false },
 };
 
-
-const MODE_INTERVALS: Record<string, number[]> = {
-  major: [0, 2, 4, 5, 7, 9, 11],
-  ionian: [0, 2, 4, 5, 7, 9, 11],
-  minor: [0, 2, 3, 5, 7, 8, 10],
-  aeolian: [0, 2, 3, 5, 7, 8, 10],
-  dorian: [0, 2, 3, 5, 7, 9, 10],
-  phrygian: [0, 1, 3, 5, 7, 8, 10],
-  lydian: [0, 2, 4, 6, 7, 9, 11],
-  mixolydian: [0, 2, 4, 5, 7, 9, 10],
-  locrian: [0, 1, 3, 5, 6, 8, 10],
-  'major-pentatonic': [0, 2, 4, 7, 9],
-  'minor-pentatonic': [0, 3, 5, 7, 10],
-};
 
 function stripComment(line: string): string {
   let quote: '"' | "'" | null = null;
@@ -330,32 +322,6 @@ function stripComment(line: string): string {
   }
   return line;
 }
-
-function midiFromNote(value: string): number | null {
-  const match = value.match(NOTE);
-  if (!match) return null;
-  const [, rawName, accidental, rawOctave] = match;
-  const name = `${rawName.toUpperCase()}${accidental}`;
-  const pitchClass = NOTE_INDEX[name];
-  if (pitchClass === undefined) return null;
-  const octave = Number(rawOctave);
-  return (octave + 1) * 12 + pitchClass;
-}
-
-function midiFromRoot(value: string, octave = 4): number | null {
-  const match = value.match(NOTE_WITHOUT_OCTAVE);
-  if (!match) return null;
-  const [, rawName, accidental] = match;
-  const name = `${rawName.toUpperCase()}${accidental}`;
-  const pitchClass = NOTE_INDEX[name];
-  if (pitchClass === undefined) return null;
-  return (octave + 1) * 12 + pitchClass;
-}
-
-function midiToFrequency(midi: number): number {
-  return 440 * 2 ** ((midi - 69) / 12);
-}
-
 
 function formatSourceNumber(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
@@ -902,6 +868,20 @@ function compileVoiceProperty(
     throw new LanguageError([{ line, message: "FROM is no longer supported; use the source name directly" }]);
   }
   if (key === 'pitch') {
+    const registerEndpoint = value.match(/^([A-Za-z_][A-Za-z0-9_]*)\.(\d+)$/);
+    if (registerEndpoint) {
+      const definition = sourceDefinitions.get(registerEndpoint[1]);
+      if (!definition || definition.kind !== 'register') {
+        throw new LanguageError([{ line, message: `unknown REGISTER source '${registerEndpoint[1]}'` }]);
+      }
+      const stage = Number(registerEndpoint[2]);
+      if (!Number.isInteger(stage) || stage < 1 || stage > definition.size) {
+        throw new LanguageError([{ line, message: `REGISTER '${registerEndpoint[1]}' stage must be from 1 to ${definition.size}` }]);
+      }
+      claimPitchProperty(voice, 'note', line, 'VOICE');
+      return `${voice.name}.freq(440); __registerpitch(${JSON.stringify(voice.name)},${JSON.stringify(registerEndpoint[1])},${stage});`;
+    }
+
     const explicit = value.match(/^(notes|freqs|scale)\s+(.+)$/i);
     if (explicit) {
       key = explicit[1].toLowerCase() === 'notes' ? 'note' : explicit[1].toLowerCase() === 'freqs' ? 'freq' : 'scale';
@@ -1251,6 +1231,7 @@ type EverySpec = {
   loose: boolean;
   clockSource: string;
   clockPrelude: string;
+  euclidean: { hits: number; steps: number; rotate: number } | null;
 };
 
 function splitEveryClause(value: string): { base: string; every: string | null } {
@@ -1293,9 +1274,23 @@ function parseEverySpec(
 
   let amount: number;
   let unit: 'ms' | 'sec' | 'beat';
+  let euclidean: { hits: number; steps: number; rotate: number } | null = null;
 
+  const euclideanMatch = base.match(/^euclidean\s+(\d+)\s*\/\s*(\d+)$/i);
   const literal = base.match(/^(\d+(?:\.\d+)?)\s+(ms|sec|secs|second|seconds|beat|beats)$/i);
-  if (literal) {
+  if (euclideanMatch) {
+    const hits = Number(euclideanMatch[1]);
+    const steps = Number(euclideanMatch[2]);
+    if (!Number.isInteger(steps) || steps < 1) {
+      throw new LanguageError([{ line, message: 'EUCLIDEAN steps must be a positive integer' }]);
+    }
+    if (!Number.isInteger(hits) || hits < 1 || hits > steps) {
+      throw new LanguageError([{ line, message: 'EUCLIDEAN hits must be an integer from 1 to steps' }]);
+    }
+    amount = 1;
+    unit = 'beat';
+    euclidean = { hits, steps, rotate: 0 };
+  } else if (literal) {
     amount = numberValue(literal[1], line, 'every');
     unit = normalizeCycleUnit(literal[2], line);
   } else if (IDENTIFIER.test(base)) {
@@ -1307,7 +1302,7 @@ function parseEverySpec(
     amount = definition.amount;
     unit = definition.unit;
   } else {
-    throw new LanguageError([{ line, message: 'every expects <time> or a SET time variable' }]);
+    throw new LanguageError([{ line, message: 'every expects <time>, EUCLIDEAN <hits>/<steps>, or a SET time variable' }]);
   }
 
   if (amount <= 0) throw new LanguageError([{ line, message: 'every interval must be greater than 0' }]);
@@ -1320,6 +1315,16 @@ function parseEverySpec(
   const timingModifiers: string[] = [];
 
   for (const modifier of modifiers) {
+    const rotate = modifier.match(/^rotate\s+(-?\d+)$/i);
+    if (rotate) {
+      if (!euclidean) {
+        throw new LanguageError([{ line, message: 'ROTATE is available only for EVERY EUCLIDEAN' }]);
+      }
+      const rawRotate = Number(rotate[1]);
+      euclidean.rotate = ((rawRotate % euclidean.steps) + euclidean.steps) % euclidean.steps;
+      continue;
+    }
+
     const clock = modifier.match(/^clock\s+(.+)$/i);
     if (!clock) {
       timingModifiers.push(modifier);
@@ -1353,12 +1358,93 @@ function parseEverySpec(
   }
 
   const timing = parseTimingModifiers(timingModifiers, line, unit);
-  return { amount, unit, ...timing, clockSource, clockPrelude };
+  if (euclidean) {
+    clockSource = `__euclidean_${euclidean.hits}_${euclidean.steps}_${euclidean.rotate}__${clockSource}`;
+  }
+  return { amount, unit, ...timing, clockSource, clockPrelude, euclidean };
 }
 
 function everyDirective(name: string, spec: EverySpec): string {
   const prefix = spec.clockPrelude ? `${spec.clockPrelude} ` : '';
   return `${prefix}__cycle(${JSON.stringify(name)},${spec.amount},${JSON.stringify(spec.unit)},${spec.chance},${spec.drift},${spec.loose},${JSON.stringify(spec.clockSource)});`;
+}
+
+function requireRegisterReady(register: RegisterState | null, diagnostics: LanguageDiagnostic[]): void {
+  if (!register) return;
+  if (!register.modelId) diagnostics.push({ line: register.line, message: `REGISTER '${register.name}' requires model shift` });
+  if (!register.sourceName) diagnostics.push({ line: register.line, message: `REGISTER '${register.name}' requires pitch <SEQ source>` });
+  if (!register.hasWrite) diagnostics.push({ line: register.line, message: `REGISTER '${register.name}' requires write every ...` });
+}
+
+function compileRegisterProperty(
+  register: RegisterState,
+  property: string,
+  rawValue: string,
+  line: number,
+  sourceDefinitions: Map<string, SourceDefinition>,
+): string {
+  const key = property.toLowerCase();
+  const value = rawValue.trim();
+
+  if (key === 'model') {
+    if (!/^shift$/i.test(value)) throw new LanguageError([{ line, message: `unknown REGISTER model '${value}'` }]);
+    register.modelId = 'shift';
+    return `__registermodel(${JSON.stringify(register.name)},"shift");`;
+  }
+
+  if (key === 'size') {
+    const size = numberValue(value, line, 'REGISTER size');
+    if (!Number.isInteger(size) || size < 2 || size > 32) {
+      throw new LanguageError([{ line, message: 'REGISTER size expects an integer from 2 to 32' }]);
+    }
+    register.size = size;
+    const definition = sourceDefinitions.get(register.name);
+    if (definition?.kind === 'register') definition.size = size;
+    return `__registersize(${JSON.stringify(register.name)},${size});`;
+  }
+
+  if (key === 'pitch') {
+    const direct = splitWith(value);
+    if (!IDENTIFIER.test(direct.base)) {
+      throw new LanguageError([{ line, message: 'REGISTER pitch expects a SEQ source name' }]);
+    }
+    const definition = sourceDefinitions.get(direct.base);
+    if (!definition || definition.kind !== 'seq') {
+      throw new LanguageError([{ line, message: `REGISTER pitch source '${direct.base}' must be a SEQ` }]);
+    }
+
+    let readerMode: RegisterState['readerMode'] = 'direct';
+    let readerAmount = 0;
+    if (definition.model === 'life') {
+      if (direct.modifiers.length !== 1) {
+        throw new LanguageError([{ line, message: `SEQ life pool '${direct.base}' requires one reader mode: order, random, walk, reverse, pendulum, first, or last` }]);
+      }
+      const reader = direct.modifiers[0].match(/^(order|random|reverse|pendulum|first|last|walk(?:\s+\d+(?:\.\d+)?)?)$/i);
+      if (!reader) throw new LanguageError([{ line, message: `unsupported REGISTER Life reader mode '${direct.modifiers[0]}'` }]);
+      const walk = direct.modifiers[0].match(/^walk(?:\s+(\d+(?:\.\d+)?))?$/i);
+      readerMode = walk ? 'walk' : direct.modifiers[0].toLowerCase() as RegisterState['readerMode'];
+      readerAmount = walk ? (walk[1] === undefined ? 1 : numberValue(walk[1], line, 'walk')) : 0;
+      if (readerAmount < 0) throw new LanguageError([{ line, message: 'walk amount must be greater than 0' }]);
+    } else if (direct.modifiers.length > 0) {
+      throw new LanguageError([{ line, message: `SEQ turing source '${direct.base}' does not accept REGISTER reader modifiers` }]);
+    }
+
+    register.sourceName = direct.base;
+    register.readerMode = readerMode;
+    register.readerAmount = readerAmount;
+    return `__registersource(${JSON.stringify(register.name)},${JSON.stringify(direct.base)},${JSON.stringify(readerMode)},${readerAmount});`;
+  }
+
+  if (key === 'write') {
+    const match = value.match(/^every\s+(.+)$/i);
+    if (!match) throw new LanguageError([{ line, message: 'REGISTER write expects every <time>' }]);
+    const timing = parseEverySpec(match[1], line, sourceDefinitions);
+    register.hasWrite = true;
+    const prefix = timing.clockPrelude ? `${timing.clockPrelude}\n` : '';
+    return `${prefix}__registerwrite(${JSON.stringify(register.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
+  }
+
+  throw new LanguageError([{ line, message: `unknown REGISTER property '${property}'` }]);
 }
 
 function requireSeqReady(seq: SeqState | null, diagnostics: LanguageDiagnostic[]): void {
@@ -1897,6 +1983,63 @@ function compileModProperty(mod: ModState, property: string, rawValue: string, l
   const key = property.toLowerCase();
   const value = rawValue.trim();
 
+  if (key === 'model') {
+    const model = value.toLowerCase();
+    if (model !== 'swell' && model !== 'dices') {
+      throw new LanguageError([{ line, message: 'MOD model expects swell or dices' }]);
+    }
+    mod.modelId = model as 'swell' | 'dices';
+    return `__modset(${JSON.stringify(mod.internalName)},"model",${JSON.stringify(model)});`;
+  }
+
+  if (mod.modelId === 'dices') {
+    if (key === 'rate') {
+      let match = value.match(/^(\d+(?:\.\d+)?)\s*hz$/i);
+      if (match) {
+        const hz = Number(match[1]);
+        if (!Number.isFinite(hz) || hz <= 0) throw new LanguageError([{ line, message: 'MOD rate must be greater than 0' }]);
+        return `__modset(${JSON.stringify(mod.internalName)},"freq",${JSON.stringify(String(hz))});`;
+      }
+      match = value.match(/^(\d+(?:\.\d+)?)\s+beats?$/i);
+      if (match) {
+        const beats = Number(match[1]);
+        if (!Number.isFinite(beats) || beats <= 0) throw new LanguageError([{ line, message: 'MOD rate must be greater than 0' }]);
+        return `__modset(${JSON.stringify(mod.internalName)},"ratebeat",${JSON.stringify(String(beats))});`;
+      }
+      match = value.match(/^(\d+(?:\.\d+)?)\s+(?:sec|secs|second|seconds)$/i);
+      if (match) {
+        const seconds = Number(match[1]);
+        if (!Number.isFinite(seconds) || seconds <= 0) throw new LanguageError([{ line, message: 'MOD rate must be greater than 0' }]);
+        return `__modset(${JSON.stringify(mod.internalName)},"freq",${JSON.stringify(String(1 / seconds))});`;
+      }
+      match = value.match(/^(\d+(?:\.\d+)?)\s+ms$/i);
+      if (match) {
+        const ms = Number(match[1]);
+        if (!Number.isFinite(ms) || ms <= 0) throw new LanguageError([{ line, message: 'MOD rate must be greater than 0' }]);
+        return `__modset(${JSON.stringify(mod.internalName)},"freq",${JSON.stringify(String(1000 / ms))});`;
+      }
+      throw new LanguageError([{ line, message: 'MOD dices rate expects hz, beat, sec, or ms' }]);
+    }
+
+    if (key === 'length') {
+      const amount = Number(value);
+      if (!Number.isInteger(amount) || amount < 1 || amount > 16) {
+        throw new LanguageError([{ line, message: 'MOD dices length expects an integer from 1 to 16' }]);
+      }
+      return `__modset(${JSON.stringify(mod.internalName)},"length",${JSON.stringify(String(amount))});`;
+    }
+
+    if (key === 'spread' || key === 'bias' || key === 'steps' || key === 'deja' || key === 'diversity') {
+      const amount = Number(value);
+      if (!Number.isFinite(amount) || amount < 0 || amount > 100) {
+        throw new LanguageError([{ line, message: `MOD dices ${key} expects 0..100` }]);
+      }
+      return `__modset(${JSON.stringify(mod.internalName)},${JSON.stringify(key)},${JSON.stringify(String(amount))});`;
+    }
+
+    throw new LanguageError([{ line, message: `unknown MOD dices property '${property}'` }]);
+  }
+
   if (key === 'rate') {
     let match = value.match(/^(\d+(?:\.\d+)?)\s*hz$/i);
     if (match) {
@@ -1997,7 +2140,7 @@ function compileModulationRoute(
   line: number,
   modSources: Map<string, ModSourceDefinition>,
 ): string | null {
-  const match = value.match(/^([A-Za-z_][A-Za-z0-9_]*)\.([a-d])(?:\s+with\s+depth\s+(-?\d+(?:\.\d+)?))?$/i);
+  const match = value.match(/^([A-Za-z_][A-Za-z0-9_]*)\.(a|b|c|d|x1|x2|x3|y)(?:\s+with\s+depth\s+(-?\d+(?:\.\d+)?))?$/i);
   if (!match) return null;
   const source = modSources.get(modSourceKey(voice.name, match[1])) ?? modSources.get(match[1]);
   if (!source) throw new LanguageError([{ line, message: `unknown MOD source '${match[1]}'` }]);
@@ -2005,8 +2148,10 @@ function compileModulationRoute(
   if (!Number.isFinite(depth) || depth < -100 || depth > 100) {
     throw new LanguageError([{ line, message: 'modulation depth must be between -100 and 100' }]);
   }
-  const port = ({ a: 1, b: 2, c: 3, d: 4 } as const)[match[2].toLowerCase() as 'a'|'b'|'c'|'d'];
-  return `${source.internalName}.out${port}(${depth}) -> ${voice.name}.${parameter};`;
+  const token = match[2].toLowerCase();
+  const port = ({ a: 1, b: 2, c: 3, d: 4, x1: 1, x2: 2, x3: 3, y: 4 } as const)[token as 'a'|'b'|'c'|'d'|'x1'|'x2'|'x3'|'y'];
+  const sourcePort = source.modelId === 'dices' ? (['x1','x2','x3','y'] as const)[port - 1] : `out${port}`;
+  return `${source.internalName}.${sourcePort}(${depth}) -> ${voice.name}.${parameter};`;
 }
 
 
@@ -2017,7 +2162,7 @@ function compileFxModulation(
   line: number,
   modSources: Map<string, ModSourceDefinition>,
 ): string | null {
-  const match = value.match(/^([A-Za-z_][A-Za-z0-9_]*)\.([a-d])(?:\s+with\s+depth\s+(-?\d+(?:\.\d+)?))?$/i);
+  const match = value.match(/^([A-Za-z_][A-Za-z0-9_]*)\.(a|b|c|d|x1|x2|x3|y)(?:\s+with\s+depth\s+(-?\d+(?:\.\d+)?))?$/i);
   if (!match) return null;
   const source = modSources.get(modSourceKey(fx.name, match[1])) ?? modSources.get(match[1]);
   if (!source) throw new LanguageError([{ line, message: `unknown MOD source '${match[1]}'` }]);
@@ -2025,7 +2170,8 @@ function compileFxModulation(
   if (!Number.isFinite(depth) || depth < -100 || depth > 100) {
     throw new LanguageError([{ line, message: 'modulation depth must be between -100 and 100' }]);
   }
-  const channel = ({ a: 1, b: 2, c: 3, d: 4 } as const)[match[2].toLowerCase() as 'a'|'b'|'c'|'d'];
+  const token = match[2].toLowerCase();
+  const channel = ({ a: 1, b: 2, c: 3, d: 4, x1: 1, x2: 2, x3: 3, y: 4 } as const)[token as 'a'|'b'|'c'|'d'|'x1'|'x2'|'x3'|'y'];
   return `__fxmod(${JSON.stringify(fx.name)},${JSON.stringify(parameter)},${JSON.stringify(source.internalName)},${channel},${depth});`;
 }
 
@@ -2069,6 +2215,7 @@ function compileFxProperty(
     if (!schema) throw new LanguageError([{ line, message: `unknown FX model '${modelId}'` }]);
     fx.modelId = modelId;
     fx.hasModel = true;
+    if (modelId === 'delay') return `__fxmeta(${JSON.stringify(fx.name)},${JSON.stringify(modelId)});`;
     return `${fx.name}.mode(${JSON.stringify(schema.lowLevelMode)});\n__fxmeta(${JSON.stringify(fx.name)},${JSON.stringify(modelId)});`;
   }
 
@@ -2094,7 +2241,91 @@ function compileFxProperty(
   };
   const effectiveKey = fx.modelId === 'sky' ? (skyAliases[key] ?? key) : key;
 
-  if (key === 'freeze' || key === 'reverse') {
+  if (fx.modelId === 'delay') {
+    if (key === 'time') {
+      const tm = value.match(/^((?:\d+(?:\.\d+)?)|(?:\d+(?:\.\d+)?\s*\/\s*\d+(?:\.\d+)?))\s*(ms|sec|secs|second|seconds|beat|beats)$/i);
+      if (!tm) throw new LanguageError([{ line, message: 'delay time expects <value> ms, sec, or beat' }]);
+      const amount = parsePositiveAmount(tm[1], line, 'delay time');
+      const unit = normalizeCycleUnit(tm[2], line);
+      return `__delaytime(${JSON.stringify(fx.name)},${amount},${JSON.stringify(unit)});`;
+    }
+    if (key === 'spread') {
+      const everySplit = splitEveryClause(value);
+      const looseMatch = everySplit.base.match(/^(.*?)(?:\s+with\s+loose\s+(\d+(?:\.\d+)?))?$/i);
+      if (!looseMatch) throw new LanguageError([{ line, message: 'delay spread expects <0..100> [with loose <0..100>]' }]);
+      const expression = scalarExpressionFromSource(looseMatch[1].trim(), sourceDefinitions);
+      const loose = looseMatch[2] === undefined ? 25 : numberValue(looseMatch[2], line, 'delay spread loose');
+      const literal = Number(expression);
+      if (Number.isFinite(literal) && (literal < 0 || literal > 100)) {
+        throw new LanguageError([{ line, message: 'delay spread expects 0..100' }]);
+      }
+      if (loose < 0 || loose > 100) {
+        throw new LanguageError([{ line, message: 'delay spread loose expects 0..100' }]);
+      }
+      const looseDirective = `__delayparamdefault(${JSON.stringify(fx.name)},"spreadloose",${JSON.stringify(String(loose))});`;
+      if (everySplit.every) {
+        const timing = parseEverySpec(everySplit.every, line, sourceDefinitions);
+        const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+        return `${looseDirective} ${prefix}__delayparamcycle(${JSON.stringify(fx.name)},"spread",${JSON.stringify(expression)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
+      }
+      return `__delayparamdefault(${JSON.stringify(fx.name)},"spread",${JSON.stringify(expression)}); ${looseDirective}`;
+    }
+    if (key === 'pitch') {
+      const match = value.match(/^(\d+(?:\.\d+)?)\s+with\s+(semitones|octaves|scale)\s+(.+)$/i);
+      if (!match) {
+        throw new LanguageError([{ line, message: 'delay pitch expects <probability> with semitones [...], octaves [...], or scale <mode>' }]);
+      }
+      const probability = numberValue(match[1], line, 'delay pitch probability');
+      if (probability < 0 || probability > 100) {
+        throw new LanguageError([{ line, message: 'delay pitch probability expects 0..100' }]);
+      }
+      const kind = match[2].toLowerCase();
+      const body = match[3].trim();
+      let shifts: number[] = [];
+      if (kind === 'scale') {
+        const intervals = MODE_INTERVALS[body.toLowerCase()];
+        if (!intervals) throw new LanguageError([{ line, message: `unknown delay pitch scale '${body}'` }]);
+        shifts = [...intervals].filter((value) => value >= -12 && value <= 12);
+      } else {
+        const list = body.match(/^\[\s*([^\]]*)\s*\]$/);
+        if (!list) throw new LanguageError([{ line, message: `delay pitch ${kind} expects a numeric list` }]);
+        const raw = list[1].trim();
+        if (!raw) throw new LanguageError([{ line, message: `delay pitch ${kind} list cannot be empty` }]);
+        shifts = raw.split(/[\s,]+/).filter(Boolean).map((token) => numberValue(token, line, `delay pitch ${kind}`));
+        if (kind === 'octaves') shifts = shifts.map((value) => value * 12);
+      }
+      if (shifts.length === 0 || shifts.some((value) => value < -12 || value > 12)) {
+        throw new LanguageError([{ line, message: 'delay pitch shifts must resolve within -12..12 semitones' }]);
+      }
+      const paddedShifts = Array.from({ length: 16 }, (_, index) => shifts[index] ?? 0);
+      return [
+        `__delayparamdefault(${JSON.stringify(fx.name)},"pitchprob",${JSON.stringify(String(probability))});`,
+        `__delayparamdefault(${JSON.stringify(fx.name)},"pitchcount",${JSON.stringify(String(shifts.length))});`,
+        ...paddedShifts.map((shift, index) =>
+          `__delayparamdefault(${JSON.stringify(fx.name)},${JSON.stringify(`pitch${index}`)},${JSON.stringify(String(shift))});`
+        ),
+      ].join(' ');
+    }
+    if (key === 'lines') {
+      const n = numberValue(value, line, 'delay lines');
+      if (!Number.isInteger(n) || n < 1 || n > 8) throw new LanguageError([{ line, message: 'delay lines expects an integer from 1 to 8' }]);
+      return `__delayparam(${JSON.stringify(fx.name)},"lines",${n});`;
+    }
+    if (key === 'reverse' || key === 'tape' || key === 'diffusion' || key === 'pingpong') {
+      const split = splitEveryClause(value);
+      const expression = scalarExpressionFromSource(split.base, sourceDefinitions);
+      const literal = Number(expression);
+      if (Number.isFinite(literal) && (literal < 0 || literal > 100)) throw new LanguageError([{ line, message: `delay ${key} expects 0..100` }]);
+      if (split.every) {
+        const timing = parseEverySpec(split.every, line, sourceDefinitions);
+        const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+        return `${prefix}__delayparamcycle(${JSON.stringify(fx.name)},${JSON.stringify(key)},${JSON.stringify(expression)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
+      }
+      return `__delayparamdefault(${JSON.stringify(fx.name)},${JSON.stringify(key)},${JSON.stringify(expression)});`;
+    }
+  }
+
+  if (key === 'freeze' || (key === 'reverse' && fx.modelId !== 'delay')) {
     if (!/^(on|off|true|false)$/i.test(value)) {
       throw new LanguageError([{ line, message: `${key} expects on or off` }]);
     }
@@ -2810,7 +3041,9 @@ export function compileLanguageSource(source: string): string {
     return created;
   };
   const seqs = new Set<string>();
+  const registers = new Set<string>();
   let currentSeq: SeqState | null = null;
+  let currentRegister: RegisterState | null = null;
   let currentClock: ClockState | null = null;
   let currentVoice: VoiceState | null = null;
   let currentFx: FxState | null = null;
@@ -2838,6 +3071,7 @@ export function compileLanguageSource(source: string): string {
     try {
       if (currentMod && indentation <= currentMod.indentation) currentMod = null;
       if (currentSeq && indentation <= currentSeq.indentation) { requireSeqReady(currentSeq, diagnostics); currentSeq = null; }
+      if (currentRegister && indentation <= currentRegister.indentation) { requireRegisterReady(currentRegister, diagnostics); currentRegister = null; }
       if (currentClock && indentation <= currentClock.indentation) { requireClockReady(currentClock, diagnostics); currentClock = null; }
       if (currentFilter && indentation <= currentFilter.indentation) {
         requireFilterModel(currentFilter, diagnostics);
@@ -2861,14 +3095,39 @@ export function compileLanguageSource(source: string): string {
         continue;
       }
 
+      const registerMatch = trimmed.match(/^REGISTER\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*$/i);
+      if (registerMatch) {
+        if (indentation > 0) throw new LanguageError([{ line: lineNumber, message: 'REGISTER declarations are top-level only' }]);
+        requireVoiceSound(currentVoice, diagnostics);
+        requireFxModel(currentFx, diagnostics);
+        requireSeqReady(currentSeq, diagnostics);
+        requireRegisterReady(currentRegister, diagnostics);
+        currentVoice = null; currentFx = null; currentFilter = null; currentMod = null; currentSeq = null; currentRegister = null;
+        const name = registerMatch[1];
+        if (voices.has(name) || fxs.has(name) || filters.has(name) || scalarNames.has(name) || seqs.has(name) || registers.has(name) || sourceDefinitions.has(name)) {
+          throw new LanguageError([{ line: lineNumber, message: `REGISTER '${name}' conflicts with an existing object or variable` }]);
+        }
+        registers.add(name);
+        sourceKinds.set(name, 'register');
+        sourceDefinitions.set(name, { kind: 'register', size: 4, display: `REGISTER ${name}` });
+        currentRegister = {
+          name, line: lineNumber, indentation, modelId: null, size: 4,
+          sourceName: null, readerMode: 'direct', readerAmount: 0, hasWrite: false,
+        };
+        output[index] = `__register(${JSON.stringify(name)});`;
+        continue;
+      }
+
       const seqMatch = trimmed.match(/^SEQ\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
       if (seqMatch) {
         if (indentation > 0) throw new LanguageError([{ line: lineNumber, message: 'SEQ declarations are top-level only' }]);
         requireVoiceSound(currentVoice, diagnostics);
         requireFxModel(currentFx, diagnostics);
+        requireRegisterReady(currentRegister, diagnostics);
+        currentRegister = null;
         currentVoice = null; currentFx = null; currentFilter = null; currentMod = null;
         const name = seqMatch[1];
-        if (voices.has(name) || fxs.has(name) || filters.has(name) || scalarNames.has(name) || seqs.has(name) || seqs.has(name)) {
+        if (voices.has(name) || fxs.has(name) || filters.has(name) || scalarNames.has(name) || seqs.has(name) || registers.has(name)) {
           throw new LanguageError([{ line: lineNumber, message: `SEQ '${name}' conflicts with an existing object or variable` }]);
         }
         seqs.add(name);
@@ -2887,6 +3146,13 @@ export function compileLanguageSource(source: string): string {
         continue;
       }
 
+      if (currentRegister && indentation > currentRegister.indentation) {
+        const propertyMatch = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s+(.+)$/);
+        if (!propertyMatch) throw new LanguageError([{ line: lineNumber, message: 'expected REGISTER property and value' }]);
+        output[index] = compileRegisterProperty(currentRegister, propertyMatch[1], propertyMatch[2], lineNumber, sourceDefinitions);
+        continue;
+      }
+
       if (currentSeq && indentation > currentSeq.indentation) {
         const propertyMatch = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s+(.+)$/);
         if (!propertyMatch) throw new LanguageError([{ line: lineNumber, message: 'expected SEQ property and value' }]);
@@ -2894,9 +3160,15 @@ export function compileLanguageSource(source: string): string {
         continue;
       }
 
-      const modMatch = trimmed.match(/^MOD\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
+      const modMatch = trimmed.match(/^MOD\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view)(?:\s+(\d+(?:\.\d+)?)\s*([vx]))?)?\s*:\s*$/i);
       if (modMatch) {
         const name = modMatch[1];
+        if (modMatch[2] && modMatch[3] !== undefined) {
+          const viewAmount = Number(modMatch[3]);
+          if (!Number.isFinite(viewAmount) || viewAmount <= 0) {
+            throw new LanguageError([{ line: lineNumber, message: 'MOD WITH VIEW scale must be greater than 0' }]);
+          }
+        }
         const ownerObject = indentation > 0
           ? (currentVoice?.name ?? currentFx?.name ?? null)
           : null;
@@ -2915,17 +3187,38 @@ export function compileLanguageSource(source: string): string {
         const scopeKey = modSourceKey(ownerObject, name);
         if (modSources.has(scopeKey)) throw new LanguageError([{ line: lineNumber, message: `MOD '${name}' is already defined in this scope` }]);
         const internalName = ownerObject ? `__mod_${ownerObject}_${name}` : name;
-        currentMod = { name, internalName, line: lineNumber, indentation, ownerVoice: ownerObject };
-        modSources.set(scopeKey, { internalName, ownerVoice: ownerObject });
+        currentMod = { name, internalName, line: lineNumber, indentation, ownerVoice: ownerObject, modelId: 'swell' };
+        modSources.set(scopeKey, { internalName, ownerVoice: ownerObject, modelId: 'swell' });
         const viewDirective = modMatch[2] ? `\n${internalName}.view();` : '';
         output[index] = `${internalName} = Swell();\n__modmeta(${JSON.stringify(internalName)},${JSON.stringify(name)},${JSON.stringify(ownerObject ?? '')});${viewDirective}`;
         continue;
       }
 
       if (currentMod && indentation > currentMod.indentation) {
-        const propertyMatch = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s+(.+)$/);
+        const propertyMatch = trimmed.match(/^(LIVE\s+)?([A-Za-z_][A-Za-z0-9_]*)\s+(.+)$/i);
         if (!propertyMatch) throw new LanguageError([{ line: lineNumber, message: 'expected MOD property and value' }]);
-        output[index] = compileModProperty(currentMod, propertyMatch[1], propertyMatch[2], lineNumber);
+        const live = Boolean(propertyMatch[1]);
+        const property = propertyMatch[2];
+        const value = propertyMatch[3].trim();
+        if (live) {
+          const key = property.toLowerCase();
+          if (key === 'rate' || key === 'length' || key === 'model') {
+            throw new LanguageError([{ line: lineNumber, message: `LIVE is not available for MOD ${property.toUpperCase()}` }]);
+          }
+          if (!['spread', 'bias', 'steps', 'deja', 'diversity'].includes(key)) {
+            throw new LanguageError([{ line: lineNumber, message: `LIVE is not available for MOD property '${property}'` }]);
+          }
+          const literal = value.match(/^(\d+(?:\.\d+)?)(?=\s|$)/);
+          if (!literal) throw new LanguageError([{ line: lineNumber, message: 'LIVE MOD currently requires a literal 0..100 value' }]);
+          const amount = Number(literal[1]);
+          if (!Number.isFinite(amount) || amount < 0 || amount > 100) {
+            throw new LanguageError([{ line: lineNumber, message: 'LIVE MOD currently requires a literal 0..100 value' }]);
+          }
+        }
+        output[index] = compileModProperty(currentMod, property, value, lineNumber);
+        const scopeKey = modSourceKey(currentMod.ownerVoice, currentMod.name);
+        const source = modSources.get(scopeKey);
+        if (source) source.modelId = currentMod.modelId;
         continue;
       }
 
@@ -3127,12 +3420,12 @@ export function compileLanguageSource(source: string): string {
       }
 
       if (/^[A-Za-z_][A-Za-z0-9_]*\s*:/.test(trimmed)) {
-        throw new LanguageError([{ line: lineNumber, message: 'only VOICE, FX, FILTER, MOD, SEQ and CLOCK blocks are supported' }]);
+        throw new LanguageError([{ line: lineNumber, message: 'only VOICE, FX, FILTER, MOD, SEQ, REGISTER and CLOCK blocks are supported' }]);
       }
 
       throw new LanguageError([{
         line: lineNumber,
-        message: 'each top-level statement must begin with VOICE, FX, FILTER, MOD, SEQ, SET, CLOCK, MAIN, or PLAY',
+        message: 'each top-level statement must begin with VOICE, FX, FILTER, MOD, SEQ, REGISTER, SET, CLOCK, MAIN, or PLAY',
       }]);
     } catch (error) {
       if (error instanceof LanguageError) diagnostics.push(...error.diagnostics);
@@ -3144,6 +3437,7 @@ export function compileLanguageSource(source: string): string {
   requireFxModel(currentFx, diagnostics);
   requireFilterModel(currentFilter, diagnostics);
   requireSeqReady(currentSeq, diagnostics);
+  requireRegisterReady(currentRegister, diagnostics);
 
   if (diagnostics.length > 0) throw new LanguageError(diagnostics);
   return output.join('\n');

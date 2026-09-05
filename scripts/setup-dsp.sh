@@ -6,6 +6,7 @@ VENDOR="$ROOT/vendor/eurorack"
 SUPERPARASITES="$ROOT/vendor/superparasites"
 CLOUDSEED="$ROOT/vendor/cloudseed-core"
 DAISYSP="$ROOT/vendor/daisysp"
+DSPARK="$ROOT/vendor/dspark"
 
 if ! command -v git >/dev/null 2>&1; then
   echo "git is required" >&2
@@ -38,6 +39,15 @@ else
 fi
 
 
+
+if ! git -C "$DSPARK" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  mkdir -p "$ROOT/vendor"
+  echo "Fetching DSPark DSP sources (creative delay)..."
+  git clone --depth 1 --branch v1.7.0 https://github.com/CristianMoresi/DSPark.git "$DSPARK"
+else
+  echo "DSPark sources already present: $DSPARK"
+fi
+
 if ! git -C "$DAISYSP" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   mkdir -p "$ROOT/vendor"
   echo "Fetching DaisySP DSP sources..."
@@ -57,6 +67,14 @@ fi
 
 if [[ ! -f "$VENDOR/tides2/poly_slope_generator.h" ]]; then
   echo "Tides 2018 DSP sources are incomplete: $VENDOR/tides2 is missing" >&2
+  exit 1
+fi
+
+if [[ ! -f "$VENDOR/marbles/random/random_sequence.h" || \
+      ! -f "$VENDOR/marbles/random/lag_processor.cc" || \
+      ! -f "$VENDOR/marbles/resources.cc" || \
+      ! -f "$VENDOR/stmlib/dsp/units.cc" ]]; then
+  echo "Marbles random-voltage DSP sources are incomplete: Marbles/stmlib support files are missing" >&2
   exit 1
 fi
 
@@ -89,6 +107,12 @@ if [[ ! -f "$CLOUDSEED/DSP/ReverbController.h" || \
   exit 1
 fi
 
+
+
+if [[ ! -f "$DSPARK/Effects/Delay.h" || ! -f "$DSPARK/Core/AudioSpec.h" ]]; then
+  echo "DSPark delay sources are incomplete" >&2
+  exit 1
+fi
 
 if [[ ! -f "$DAISYSP/Source/Filters/svf.h" || ! -f "$DAISYSP/Source/Filters/svf.cpp" || ! -f "$DAISYSP/Source/Utility/dsp.h" ]]; then
   echo "DaisySP SVF sources are incomplete" >&2
