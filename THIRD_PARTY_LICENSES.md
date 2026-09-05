@@ -6,7 +6,7 @@ The active DSP build is intentionally limited to permissively licensed code.
 
 ## Mutable Instruments Eurorack STM32F DSP
 
-Current use: macro synthesis (`macro.*` / Plaits DSP), `matter` physical modelling (Elements), `resonator.*` (Rings), and the four-output modulation backend (Tides 2018).
+Current use: macro synthesis (`macro.*` / Plaits DSP), `matter` physical modelling (Elements), `resonator.*` (Rings), the four-output modulation backend (Tides 2018), and selected Marbles random-voltage components used by `MOD dices`.
 
 - Original author: Emilie Gillet / Mutable Instruments
 - Upstream: https://github.com/pichenettes/eurorack
@@ -65,3 +65,16 @@ The UI may prefer locally installed fonts such as Departure Mono. Font binaries 
 ## DSPark
 
 DSPark is licensed under the MIT License. Copyright (c) Cristian Moresi. See the upstream `vendor/dspark/LICENSE` after running `npm run dsp:setup` for the complete license text retained with the fetched source.
+
+
+<!-- SONUS-0.3.0-MARBLES-LICENSE -->
+## Mutable Instruments Marbles / stmlib — Dices
+
+Current use: selected random-voltage and lag-processing components for the Sonus `MOD dices` backend.
+
+- Original author: Emilie Gillet / Mutable Instruments
+- Upstream: https://github.com/pichenettes/eurorack
+- Utility library: https://github.com/pichenettes/stmlib
+- License of the source portions used by Sonus Umbrae: MIT
+
+Sonus Umbrae does not expose the complete Marbles module. The Dices integration intentionally omits the T/gate section and Marbles' internal musical quantizer. Sonus supplies its own timing, routing, language, view and control abstractions around the selected random-voltage algorithms.

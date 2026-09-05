@@ -18,6 +18,7 @@ Sonus Umbrae is not built around one synthesizer family or one upstream hardware
 - `matter` physical modelling derived from Mutable Instruments Elements DSP.
 - `resonator.*` models derived from Mutable Instruments Rings DSP, including internal polyphony and stereo MAIN/AUX behaviour.
 - Four-output modulation derived from Mutable Instruments Tides 2018 DSP.
+- `MOD ... model dices` random-voltage modulation derived from selected MIT-licensed Mutable Instruments Marbles components, exposing `x1`, `x2`, `x3` and slow `y` outputs.
 - `mist.*` stereo effects derived from the permissively licensed SuperParasites/Clouds family.
 - `sky` ambient reverb based on Ghost Note Audio CloudSeedCore.
 - Multimode `svf` filtering based on Electrosmith DaisySP, with simultaneous `lp`/`hp`/`bp`/`np` outputs and low-pass as the default.
@@ -56,6 +57,20 @@ Any `EVERY`-driven change can use clock-synchronous Euclidean timing, for exampl
 
 ### Creative delay
 
-`FX ... model delay` is a WASM creative multi-line delay. It supports 1..8 lines, musical or absolute delay times, stereo/time spread, feedback, probabilistic true reverse capture, tape-coloured feedback, diffusion, and wet/dry mix. Reverse decisions apply only to newly captured windows and remain attached to those tails through feedback.
+`FX ... model delay` is a WASM creative multi-line delay. It supports 1..8 lines, musical or absolute delay times, stereo/time spread, feedback, probabilistic true reverse capture, probabilistic discrete-window pitch shifting, ping-pong stereo motion, tape-coloured feedback, diffusion, and wet/dry mix. Reverse decisions apply only to newly captured windows and remain attached to those tails through feedback.
 
 Delay `spread` can be loosened without exposing per-line timing: `spread 60 with loose 40`. `loose 0` is regular but unquantized; the default is `25` for more independent line spacing.
+
+
+<!-- SONUS-0.3.0-README -->
+## 0.3.0 highlights
+
+The 0.3.0 release expands Sonus Umbrae's generative modulation and performance tooling:
+
+- `MOD ... model dices`, a Marbles-derived random-voltage backend with `x1`, `x2`, `x3`, and slow `y` outputs.
+- Dices controls for `rate`, `spread`, `bias`, `steps`, `deja`, `length`, and `diversity`.
+- `LIVE` editor controls for Dices parameters; these currently use commit-on-release semantics.
+- Module view scaling with `WITH VIEW`, `WITH VIEW <n>V`, and `WITH VIEW <n>X`.
+- Dices views preserve their real `-5V..+5V` control-voltage domain and label traces as `X1 / X2 / X3 / Y`.
+- The creative delay gains discrete-window probabilistic pitch shifting and ping-pong behaviour in addition to reverse/tape/diffusion processing.
+- Configuration now includes a persistent `OUTPUT LEVEL` control, independent from script-level `MAIN LEVEL`.

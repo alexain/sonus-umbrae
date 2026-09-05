@@ -410,3 +410,21 @@ The 0.2.x environment now treats `Esc` as a compact live-performance menu and `>
 - [x] Creative multi-line WASM delay: DSPark forward core, true reverse-window playback, probabilistic non-retroactive reverse capture, spread, feedback, tape colour, diffusion, and live parameter policies.
 
 - [x] Dices random modulator: Marbles-derived X1/X2/X3/Y core with spread, bias, steps, deja, length and diversity.
+
+
+<!-- SONUS-0.3.0-ROADMAP -->
+## 0.3.0 milestone
+
+0.3.0 consolidates the first generative-modulation and creative-delay expansion:
+
+- [x] `MOD dices` Marbles-derived random-voltage backend.
+- [x] Dices `x1`, `x2`, `x3`, and slow `y` outputs.
+- [x] `spread`, `bias`, `steps`, `deja`, `length`, and `diversity` controls.
+- [x] Dices `LIVE` editor integration with commit-on-release policy.
+- [x] Voltage-aware and relative module-view scales (`WITH VIEW <n>V`, `WITH VIEW <n>X`).
+- [x] Preservation of raw CV-domain values through slow-scope telemetry.
+- [x] Creative delay probabilistic pitch shifting using discrete window state.
+- [x] Creative delay ping-pong support.
+- [x] Persistent application-level output gain in Configuration.
+
+Post-0.3.0 candidates remain separate milestones: a polyphonic chord-oriented sound generator, logic/control objects, dedicated drum/sample playback, additional random/chaotic modulator families, and further REGISTER consumers.

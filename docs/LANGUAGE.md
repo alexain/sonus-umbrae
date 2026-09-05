@@ -1945,3 +1945,111 @@ or in explicit routes:
 ```text
 rnd.y -> someDestination.in
 ```
+
+
+<!-- SONUS-0.3.0-LANGUAGE -->
+## MOD `dices` — random-voltage modulation (0.3.0)
+
+`dices` is the Sonus Umbrae random-voltage `MOD` backend. It is derived from selected MIT-licensed Mutable Instruments Marbles random-voltage components, but it does not expose Marbles' trigger/gate section or its internal musical quantizer.
+
+```text
+MOD rnd WITH VIEW:
+    model dices
+    rate 1 beat
+    spread 60
+    bias 50
+    steps 35
+    deja 20
+    length 8
+    diversity 50
+```
+
+The four outputs are:
+
+```text
+rnd.x1
+rnd.x2
+rnd.x3
+rnd.y
+```
+
+`x1`, `x2`, and `x3` update at the configured `rate`. `y` is intentionally slower and runs at one sixteenth of the X rate.
+
+### Dices parameters
+
+- `rate <value>` — accepts `hz`, `beat`, `sec`, or `ms`.
+- `spread 0..100` — controls the width/shape of the random distribution.
+- `bias 0..100` — biases the random distribution toward lower or higher values.
+- `steps 0..100` — below 50 becomes progressively smoother; 50 is sample-and-hold; above 50 becomes progressively more stepped/quantized.
+- `deja 0..100` — controls reuse of stored random material; 0 favours fresh material, 100 locks the stored loop.
+- `length 1..16` — length of the deja-vu memory.
+- `diversity 0..100` — progressively differentiates the statistical behaviour of `x1`, `x2`, and `x3`.
+
+Dices outputs use a real control-voltage-style domain of approximately `-5V..+5V`. Routing uses the original values; view scaling never changes the modulation signal itself.
+
+### LIVE Dices parameters
+
+The Dices `0..100` macro parameters can be exposed with the normal `LIVE` prefix:
+
+```text
+MOD rnd:
+    model dices
+    LIVE spread 60
+    LIVE bias 50
+    LIVE steps 35
+    LIVE deja 20
+    LIVE diversity 50
+```
+
+For 0.3.0 these controls use **commit-on-release** semantics. The slider edits the source value directly, but the runtime applies the new Dices setting when the edit is committed rather than streaming every intermediate value into the DSP.
+
+`length` remains a discrete `1..16` parameter and is not presented as a normal 0..100 macro slider.
+
+### Module view scale
+
+A module view without an explicit scale uses the natural range of that module:
+
+```text
+MOD rnd WITH VIEW:
+    model dices
+```
+
+For Dices the natural vertical range is `±5V`.
+
+An explicit voltage range can be requested:
+
+```text
+MOD rnd WITH VIEW 2V:
+    model dices
+```
+
+This displays `-2V..+2V`. Values outside the requested display range are allowed to leave the visible area; they are not clamped in the signal path.
+
+A relative zoom can also be requested:
+
+```text
+MOD rnd WITH VIEW 2X:
+    model dices
+```
+
+`2X` magnifies the natural view by two. For a Dices `±5V` natural range, `2X` therefore displays approximately `±2.5V`.
+
+`0.5X` widens the view; for Dices it displays approximately `±10V`.
+
+The same view-scale syntax is intended as the common module-view convention. The `V` form is most meaningful for control-voltage-domain signals, while `X` is a unit-independent visual zoom.
+
+Dices composite views are labelled `X1 / X2 / X3 / Y` in both the Live sidebar and Scheme.
+
+## Configuration output level (0.3.0)
+
+The Configuration screen includes a persistent `OUTPUT LEVEL` control in the range `0..200%`.
+
+`OUTPUT LEVEL` is an application/hardware preference and is not part of the `.sum` program. It is stored in browser local storage and applies immediately without restarting the audio engine.
+
+It is deliberately distinct from:
+
+```text
+MAIN LEVEL 70
+```
+
+`MAIN LEVEL` is part of the musical patch and travels with the source file. `OUTPUT LEVEL` compensates for the playback environment and the desired application-wide hardware level.

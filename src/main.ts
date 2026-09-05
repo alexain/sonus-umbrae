@@ -6,7 +6,7 @@ import { parameterUpdatePolicy, type ParameterUpdatePolicy } from './language/pa
 
 type Screen = 'live' | 'config' | 'help' | 'about' | 'scheme';
 
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Missing #app');

@@ -36,4 +36,11 @@ The creative delay uses DSPark by Cristian Moresi as its forward delay DSP core.
 
 ## Mutable Instruments Marbles random-voltage core
 
-Sonus Umbrae uses selected MIT-licensed Marbles random-voltage components for the `MOD dices` backend. Original code copyright Emilie Gillet. The Sonus integration intentionally omits the Marbles T/gate section and musical quantizer.
+Sonus Umbrae uses selected MIT-licensed Marbles random-voltage and lag-processing components by **Emilie Gillet / Mutable Instruments** for the `MOD dices` backend.
+
+Upstream: https://github.com/pichenettes/eurorack  
+Utility library: https://github.com/pichenettes/stmlib
+
+The Sonus integration intentionally omits Marbles' T/gate section and internal musical quantizer. Sonus Umbrae supplies its own timing, routing, language, visualization and macro-control layer and exposes the integration under the independent model name `dices`.
+
+Mutable Instruments is a registered trademark. Sonus Umbrae is independent and is not affiliated with or endorsed by Mutable Instruments.
