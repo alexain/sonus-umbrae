@@ -900,8 +900,9 @@ function notify(text: string): void {
 function normalizeLanguageCommandCase(): void {
   const normalized = editor.value
     .replace(
-      /^(\s*)(use|voice|fx|filter|seq|register|out|set|clock|main)(?=\s|$)/gim,
-      (_match, indentation: string, commandName: string) => `${indentation}${commandName.toUpperCase()}`,
+      /^(\s*)(_?)(use|voice|drumkit|fx|filter|seq|register|out|set|clock|main)(?=\s|$)/gim,
+      (_match, indentation: string, disabled: string, commandName: string) =>
+        `${indentation}${disabled}${commandName.toUpperCase()}`,
     )
     .replace(
       /^(\s*)live(?=\s+[A-Za-z_]\w*\s+)/gim,
@@ -3480,7 +3481,7 @@ editor.addEventListener('keydown', (event) => {
 
     let indentation = currentIndent;
     if (!trimmed) indentation = currentIndent.length >= 4 ? currentIndent.slice(0, -4) : '';
-    else if (/^_?(VOICE|FX|FILTER|MOD|SEQ|CLOCK)\b.*:\s*$/i.test(trimmed)) indentation = `${currentIndent}    `;
+    else if (/^_?(VOICE|DRUMKIT|FX|FILTER|MOD|SEQ|CLOCK)\b.*:\s*$/i.test(trimmed)) indentation = `${currentIndent}    `;
 
     editor.setRangeText(`\n${indentation}`, start, end, 'end');
 

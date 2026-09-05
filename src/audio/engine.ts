@@ -17,8 +17,14 @@ function publicAssetUrl(path: string): string {
   return `${cleanBase}${cleanPath}`;
 }
 
-const DEFAULT_HARDWARE_OUTPUT_GAIN = 0.12;
+const DEFAULT_HARDWARE_OUTPUT_GAIN = 0.18;
 const DEFAULT_HARDWARE_OUTPUT_LEVEL = 100;
+
+// Backend calibration trims. These compensate for the native output level of
+// different DSP engines without changing the public LEVEL/AT semantics.
+const RESONATOR_OUTPUT_TRIM = 3.0;
+const DRUMKIT_OUTPUT_TRIM = 6.0;
+
 
 export interface AudioProgram {
   clock: { bpm: number; jitter: number; drift: number };
@@ -980,7 +986,7 @@ export class AudioEngine {
     });
     const mainGain = context.createGain();
     const auxGain = context.createGain();
-    const level = Math.max(0, Math.min(1, definition.level / 100));
+    const level = Math.max(0, Math.min(1, definition.level / 100)) * RESONATOR_OUTPUT_TRIM;
     mainGain.gain.value = level;
     auxGain.gain.value = level;
     node.connect(mainGain, 0, 0);
@@ -1023,7 +1029,9 @@ export class AudioEngine {
 
     const context = this.ensureContext();
     if (resonator.enabled !== definition.enabled || resonator.level !== definition.level) {
-      const level = definition.enabled ? Math.max(0, Math.min(1, definition.level / 100)) : 0;
+      const level = definition.enabled
+        ? Math.max(0, Math.min(1, definition.level / 100)) * RESONATOR_OUTPUT_TRIM
+        : 0;
       resonator.mainGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
       resonator.auxGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
     }
@@ -1214,6 +1222,8 @@ export class AudioEngine {
     const context = this.ensureContext();
     const node = new AudioWorkletNode(context, 'sonus-drumkit', { numberOfInputs:0, numberOfOutputs:1, outputChannelCount:[2], channelCount:2, channelCountMode:'explicit', channelInterpretation:'discrete', processorOptions:{ wasmBytes:this.drumkitWasmBytes.slice(0) } });
     const outputSplitter=context.createChannelSplitter(2), outputL=context.createGain(), outputR=context.createGain();
+    outputL.gain.value = DRUMKIT_OUTPUT_TRIM;
+    outputR.gain.value = DRUMKIT_OUTPUT_TRIM;
     node.connect(outputSplitter); outputSplitter.connect(outputL,0,0); outputSplitter.connect(outputR,1,0);
     this.drumkits.set(definition.name,{node,outputSplitter,outputL,outputR});
   }
@@ -1851,8 +1861,9 @@ export class AudioEngine {
     const resonator = this.resonators.get(name);
     if (resonator) {
       resonator.level = level;
-      resonator.mainGain.gain.setTargetAtTime(gain, context.currentTime, 0.008);
-      resonator.auxGain.gain.setTargetAtTime(gain, context.currentTime, 0.008);
+      const calibratedGain = gain * RESONATOR_OUTPUT_TRIM;
+      resonator.mainGain.gain.setTargetAtTime(calibratedGain, context.currentTime, 0.008);
+      resonator.auxGain.gain.setTargetAtTime(calibratedGain, context.currentTime, 0.008);
       return;
     }
     const matter = this.matters.get(name);
@@ -1994,7 +2005,9 @@ export class AudioEngine {
       const resonator = this.resonators.get(name);
       if (resonator) {
         resonator.enabled = !disabled;
-        const level = disabled ? 0 : Math.max(0, Math.min(1, resonator.level / 100));
+        const level = disabled
+          ? 0
+          : Math.max(0, Math.min(1, resonator.level / 100)) * RESONATOR_OUTPUT_TRIM;
         resonator.mainGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
         resonator.auxGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
         return;
