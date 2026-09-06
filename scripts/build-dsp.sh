@@ -7,7 +7,8 @@ SUPERPARASITES="$ROOT/vendor/superparasites"
 CLOUDSEED="$ROOT/vendor/cloudseed-core"
 DAISYSP="$ROOT/vendor/daisysp"
 DSPARK="$ROOT/vendor/dspark"
-VOICE_OUTPUT="$ROOT/public/dsp/voice.wasm"
+MACRO_OUTPUT="$ROOT/public/dsp/macro.wasm"
+DAISY_OSCILLATORS_OUTPUT="$ROOT/public/dsp/daisy-oscillators.wasm"
 SWELL_OUTPUT="$ROOT/public/dsp/swell.wasm"
 DICES_OUTPUT="$ROOT/public/dsp/dices.wasm"
 MIST_OUTPUT="$ROOT/public/dsp/mist.wasm"
@@ -27,7 +28,7 @@ if [[ ! -d "$VENDOR/plaits" ]]; then
   exit 1
 fi
 
-mkdir -p "$(dirname "$VOICE_OUTPUT")"
+mkdir -p "$(dirname "$MACRO_OUTPUT")"
 rm -f "$ROOT/public/dsp/liquid.wasm"
 PLAITS_DSP=()
 while IFS= read -r source; do
@@ -49,11 +50,11 @@ em++ \
   -s ALLOW_MEMORY_GROWTH=0 \
   -s INITIAL_MEMORY=33554432 \
   -s FILESYSTEM=0 \
-  -s EXPORTED_FUNCTIONS='["_su_voice_create","_su_voice_destroy","_su_voice_set_model","_su_voice_set_frequency","_su_voice_set_harmo","_su_voice_set_timbre","_su_voice_set_morph","_su_voice_set_v_oct","_su_voice_set_trigger","_su_voice_process","_su_voice_out","_su_voice_aux"]' \
+  -s EXPORTED_FUNCTIONS='["_su_macro_create","_su_macro_destroy","_su_macro_set_model","_su_macro_set_frequency","_su_macro_set_harmo","_su_macro_set_timbre","_su_macro_set_morph","_su_macro_set_v_oct","_su_macro_set_trigger","_su_macro_process","_su_macro_out","_su_macro_aux"]' \
   -Wl,--no-entry \
-  -o "$VOICE_OUTPUT"
+  -o "$MACRO_OUTPUT"
 
-echo "Built $VOICE_OUTPUT"
+echo "Built $MACRO_OUTPUT"
 
 
 echo "Building Matter (Mutable Instruments Elements backend)..."
@@ -223,6 +224,24 @@ em++ \
   -o "$DELAY_OUTPUT"
 
 echo "Built $DELAY_OUTPUT (DSPark + Sonus reverse/multiline layer)"
+
+echo "Building DaisySP basic oscillator module..."
+em++ \
+  -std=c++17 \
+  -O3 \
+  -I"$DAISYSP/Source" \
+  -I"$DAISYSP/Source/Utility" \
+  "$ROOT/dsp/daisy_oscillator_bridge.cc" \
+  "$DAISYSP/Source/Synthesis/oscillator.cpp" \
+  -s STANDALONE_WASM=1 \
+  -s ALLOW_MEMORY_GROWTH=0 \
+  -s INITIAL_MEMORY=4194304 \
+  -s FILESYSTEM=0 \
+  -s EXPORTED_FUNCTIONS='["_su_daisy_oscillator_create","_su_daisy_oscillator_destroy","_su_daisy_oscillator_set_sample_rate","_su_daisy_oscillator_set_waveform","_su_daisy_oscillator_set_frequency","_su_daisy_oscillator_set_width","_su_daisy_oscillator_out","_su_daisy_oscillator_process"]' \
+  -Wl,--no-entry \
+  -o "$DAISY_OSCILLATORS_OUTPUT"
+
+echo "Built $DAISY_OSCILLATORS_OUTPUT (Electrosmith DaisySP Oscillator backend)"
 
 echo "Building DaisySP filter module (SVF)..."
 em++ \

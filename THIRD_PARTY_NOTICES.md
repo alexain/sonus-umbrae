@@ -10,11 +10,11 @@ Ghost Note Audio is the original author of the CloudSeedCore code used by this b
 
 ## Electrosmith DaisySP
 
-The Sonus Umbrae `svf` filter backend uses DaisySP code by **Electrosmith, Corp.**, distributed under the MIT License.
+The Sonus Umbrae basic oscillator VOICE backend and `svf` filter backend use DaisySP code by **Electrosmith, Corp.**, distributed under the MIT License.
 
 Upstream: https://github.com/electro-smith/DaisySP
 
-The current `daisy-filters.wasm` build uses DaisySP's double-sampled stable state-variable filter implementation. Sonus Umbrae currently exposes the simultaneous low-pass, high-pass, band-pass and notch responses as `lp`, `hp`, `bp` and `np`; DaisySP's peak response remains internal to the backend.
+The current `daisy-oscillators.wasm` build uses DaisySP's oscillator implementation for `sine`, `triangle`, `sawtooth`, `ramp`, and `square` VOICE sounds. `daisy-filters.wasm` uses DaisySP's double-sampled stable state-variable filter implementation; Sonus exposes its low-pass, high-pass, band-pass and notch responses as `lp`, `hp`, `bp` and `np`.
 
 ## Mutable Instruments STM32F DSP
 

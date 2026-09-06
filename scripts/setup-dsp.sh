@@ -114,8 +114,10 @@ if [[ ! -f "$DSPARK/Effects/Delay.h" || ! -f "$DSPARK/Core/AudioSpec.h" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$DAISYSP/Source/Filters/svf.h" || ! -f "$DAISYSP/Source/Filters/svf.cpp" || ! -f "$DAISYSP/Source/Utility/dsp.h" ]]; then
-  echo "DaisySP SVF sources are incomplete" >&2
+if [[ ! -f "$DAISYSP/Source/Filters/svf.h" || ! -f "$DAISYSP/Source/Filters/svf.cpp" || \
+      ! -f "$DAISYSP/Source/Synthesis/oscillator.h" || ! -f "$DAISYSP/Source/Synthesis/oscillator.cpp" || \
+      ! -f "$DAISYSP/Source/Utility/dsp.h" ]]; then
+  echo "DaisySP oscillator/SVF sources are incomplete" >&2
   exit 1
 fi
 

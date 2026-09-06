@@ -38,7 +38,6 @@ const RESERVED_IDENTIFIERS = new Set([
   'svf',
   'pattern',
   'scale',
-  'osc',
   'gain',
 
   // Current expression functions.
@@ -211,18 +210,13 @@ export class SonusEvaluationError extends SyntaxError {
   }
 }
 
-interface OscillatorDefinition {
-  frequency: number;
-  parameters: Map<string, string>;
-}
-
 interface GainDefinition {
   level: number;
   parameters: Map<string, string>;
 }
 
-type VoiceEngineKind = 'macro' | 'matter' | 'resonator';
-type VoiceParameterName = 'harmo' | 'timbre' | 'morph' | 'geometry' | 'structure' | 'brightness' | 'damping' | 'position' | 'space' | 'bow' | 'bowTimbre' | 'blow' | 'blowTimbre' | 'strike' | 'strikeTimbre';
+type VoiceEngineKind = 'macro' | 'matter' | 'resonator' | 'oscillator';
+type VoiceParameterName = 'harmo' | 'timbre' | 'morph' | 'width' | 'geometry' | 'structure' | 'brightness' | 'damping' | 'position' | 'space' | 'bow' | 'bowTimbre' | 'blow' | 'blowTimbre' | 'strike' | 'strikeTimbre';
 
 interface VoiceDefinition {
   disabled: boolean;
@@ -236,6 +230,7 @@ interface VoiceDefinition {
   harmo: number;
   timbre: number;
   morph: number;
+  width: number;
   geometry: number;
   structure: number;
   brightness: number;
@@ -919,7 +914,6 @@ export class SonusRuntime {
       this.drumHumanizeState.clear();
       this.randomState = 0x6d2b79f5;
     }
-    const oscillators = new Map<string, OscillatorDefinition>();
     const gains = new Map<string, GainDefinition>();
     const voices = new Map<string, VoiceDefinition>();
     const swells = new Map<string, SwellDefinition>();
@@ -1339,7 +1333,7 @@ export class SonusRuntime {
           diagnostics.push({ line: lineNumber, message: reservationError });
           continue;
         }
-        if (objectExists(name, oscillators, gains, voices) || clockSources.has(name)) {
+        if (objectExists(name, gains, voices) || clockSources.has(name)) {
           diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` });
           continue;
         }
@@ -1369,22 +1363,10 @@ export class SonusRuntime {
         continue;
       }
 
-      const oscillatorDeclaration = parseOscillatorDeclaration(line);
-      if (oscillatorDeclaration) {
-        const { name, calls } = oscillatorDeclaration;
-        if (swells.has(name) || reservedOrDuplicate(name, oscillators, gains, voices, diagnostics, lineNumber)) { if (swells.has(name)) diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue; }
-
-        const definition: OscillatorDefinition = { frequency: 440, parameters: new Map() };
-        oscillators.set(name, definition);
-        void calls;
-        results.push({ message: `${name} = osc` });
-        continue;
-      }
-
       const gainDeclaration = parseGainDeclaration(line);
       if (gainDeclaration) {
         const { name, calls } = gainDeclaration;
-        if (swells.has(name) || reservedOrDuplicate(name, oscillators, gains, voices, diagnostics, lineNumber)) { if (swells.has(name)) diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue; }
+        if (swells.has(name) || reservedOrDuplicate(name, gains, voices, diagnostics, lineNumber)) { if (swells.has(name)) diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue; }
 
         const definition: GainDefinition = { level: 100, parameters: new Map() };
         gains.set(name, definition);
@@ -1396,7 +1378,7 @@ export class SonusRuntime {
       const voiceDeclaration = parseVoiceDeclaration(line);
       if (voiceDeclaration) {
         const { name, calls } = voiceDeclaration;
-        if (swells.has(name) || reservedOrDuplicate(name, oscillators, gains, voices, diagnostics, lineNumber)) { if (swells.has(name)) diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue; }
+        if (swells.has(name) || reservedOrDuplicate(name, gains, voices, diagnostics, lineNumber)) { if (swells.has(name)) diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue; }
 
         const definition: VoiceDefinition = {
           disabled: false,
@@ -1410,6 +1392,7 @@ export class SonusRuntime {
           harmo: 50,
           timbre: 50,
           morph: 50,
+          width: 50,
           geometry: 45,
           structure: 50,
           brightness: 65,
@@ -1443,7 +1426,7 @@ export class SonusRuntime {
           diagnostics.push({ line: lineNumber, message: reservationError });
           continue;
         }
-        if (objectExists(name, oscillators, gains, voices) || swells.has(name) || clockSources.has(name)) {
+        if (objectExists(name, gains, voices) || swells.has(name) || clockSources.has(name)) {
           diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` });
           continue;
         }
@@ -1475,7 +1458,7 @@ export class SonusRuntime {
         const { name } = filterDeclaration;
         const reservationError = name.startsWith('__filter_') ? null : identifierReservationError(name);
         if (reservationError) { diagnostics.push({ line: lineNumber, message: reservationError }); continue; }
-        if (objectExists(name, oscillators, gains, voices) || swells.has(name) || mists.has(name) || filters.has(name) || clockSources.has(name)) {
+        if (objectExists(name, gains, voices) || swells.has(name) || mists.has(name) || filters.has(name) || clockSources.has(name)) {
           diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` }); continue;
         }
         filters.set(name, {
@@ -1501,7 +1484,7 @@ export class SonusRuntime {
           diagnostics.push({ line: lineNumber, message: reservationError });
           continue;
         }
-        if (objectExists(name, oscillators, gains, voices) || swells.has(name) || mists.has(name) || clockSources.has(name)) {
+        if (objectExists(name, gains, voices) || swells.has(name) || mists.has(name) || clockSources.has(name)) {
           diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` });
           continue;
         }
@@ -1533,14 +1516,13 @@ export class SonusRuntime {
       const [name, parameter, qualifier] = path;
       if (qualifier !== undefined && qualifier !== 'base') return undefined;
       if (name === 'Clock' && parameter === 'bpm') return clockBpm;
-      const oscillator = oscillators.get(name);
       const voice = voices.get(name);
       const gain = gains.get(name);
       const swell = swells.get(name);
-      if (parameter === 'freq') return oscillator?.frequency ?? voice?.frequency ?? swell?.frequency;
+      if (parameter === 'freq') return voice?.frequency ?? swell?.frequency;
       if (parameter === 'level') return gain?.level;
       if (parameter === 'model') return voice?.model;
-      if (voice && (parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph')) return voice[parameter];
+      if (voice && (parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph' || parameter === 'width')) return voice[parameter];
       if (swell && (parameter === 'slope' || parameter === 'shape' || parameter === 'smooth' || parameter === 'shift')) return swell[parameter];
       return undefined;
     };
@@ -1688,15 +1670,6 @@ export class SonusRuntime {
     for (const { source: line, line: lineNumber } of lines) {
       if (parseLanguageDrumkitDirective(line) || parseLanguageDrumkitMetaDirective(line) || parseLanguageDrumSlotDirective(line) || parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageSeqModel(line) || parseLanguageSeqSize(line) || parseLanguageLifeDensity(line) || parseLanguageLifeReader(line) || parseLanguageLifeEvolve(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageEnvelopeDirective(line, lineNumber) || parseLanguageFxMetadata(line) || parseLanguageDelayTime(line) || parseLanguageDelayParam(line, lineNumber) || parseLanguageDelayParamDefault(line, lineNumber) || parseLanguageDelayParamCycle(line, lineNumber) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
 
-      const oscillatorDeclaration = parseOscillatorDeclaration(line);
-      if (oscillatorDeclaration) {
-        const definition = oscillators.get(oscillatorDeclaration.name)!;
-        for (const call of oscillatorDeclaration.calls) {
-          const error = applyOscillatorCall(oscillatorDeclaration.name, definition, call, views, (expr) => evalValue(expr, lineNumber));
-          if (error) diagnostics.push({ line: lineNumber, message: error });
-        }
-        continue;
-      }
       const gainDeclaration = parseGainDeclaration(line);
       if (gainDeclaration) {
         const definition = gains.get(gainDeclaration.name)!;
@@ -1752,7 +1725,7 @@ export class SonusRuntime {
           diagnostics.push({ line: lineNumber, message: reservationError });
           continue;
         }
-        if (objectExists(variableName, oscillators, gains, voices) || clockSources.has(variableName)) {
+        if (objectExists(variableName, gains, voices) || clockSources.has(variableName)) {
           diagnostics.push({ line: lineNumber, message: `cannot assign scalar value to object: ${variableName}` });
           continue;
         }
@@ -1770,9 +1743,8 @@ export class SonusRuntime {
           assignedValue = bpm;
           results.push({ message: `Clock ${formatNumber(bpm)} BPM` });
         } else if (parameter === 'freq') {
-          const oscillator = oscillators.get(objectName);
           const voice = voices.get(objectName);
-          if (!oscillator && !voice) {
+          if (!voice) {
             diagnostics.push({ line: lineNumber, message: `unknown frequency-capable object: ${objectName}` });
             continue;
           }
@@ -1780,29 +1752,9 @@ export class SonusRuntime {
           if (frequency === undefined) continue;
           const error = frequencyError(frequency);
           if (error) { diagnostics.push({ line: lineNumber, message: error }); continue; }
-          if (oscillator) {
-            oscillator.frequency = frequency;
-            oscillator.parameters.delete('NOTE');
-            oscillator.parameters.set('FREQ', `${formatNumber(frequency)} HZ`);
-          } else if (voice) {
-            voice.frequency = frequency;
-            voice.parameters.set('FREQ', `${formatNumber(frequency)} HZ`);
-          }
+          voice!.frequency = frequency;
+          voice!.parameters.set('FREQ', `${formatNumber(frequency)} HZ`);
           assignedValue = frequency;
-        } else if (parameter === 'note') {
-          const oscillator = oscillators.get(objectName);
-          if (!oscillator) {
-            diagnostics.push({ line: lineNumber, message: `unknown osc object: ${objectName}` });
-            continue;
-          }
-          const note = evalNumber(rawValue, lineNumber, 'note');
-          if (note === undefined) continue;
-          const error = noteError(note);
-          if (error) { diagnostics.push({ line: lineNumber, message: error }); continue; }
-          oscillator.frequency = midiToFrequency(note);
-          oscillator.parameters.delete('FREQ');
-          oscillator.parameters.set('NOTE', formatNumber(note));
-          assignedValue = note;
         } else if (parameter === 'level') {
           const gain = gains.get(objectName);
           if (!gain) {
@@ -1830,7 +1782,7 @@ export class SonusRuntime {
             continue;
           }
           assignedValue = voice.engine === 'macro' ? voice.model : voice.soundId;
-        } else if (['harmo','timbre','morph','strength','contour','body','brightness','damping','position','space'].includes(parameter)) {
+        } else if (['harmo','timbre','morph','width','strength','contour','body','brightness','damping','position','space'].includes(parameter)) {
           const voice = voices.get(objectName);
           if (!voice) {
             diagnostics.push({ line: lineNumber, message: `unknown Voice object: ${objectName}` });
@@ -1864,7 +1816,7 @@ export class SonusRuntime {
           diagnostics.push({ line: lineNumber, message: reservationError });
           continue;
         }
-        if (objectExists(name, oscillators, gains, voices) || clockSources.has(name)) {
+        if (objectExists(name, gains, voices) || clockSources.has(name)) {
           diagnostics.push({ line: lineNumber, message: `cannot assign scalar value to object: ${name}` });
           continue;
         }
@@ -1901,10 +1853,9 @@ export class SonusRuntime {
       match = line.match(/^([A-Za-z_]\w*)\.freq\(\s*(.+)\s*\)\s*$/);
       if (match) {
         const [, name, rawFrequency] = match;
-        const oscillator = oscillators.get(name);
         const voice = voices.get(name);
         const swell = swells.get(name);
-        if (!oscillator && !voice && !swell) {
+        if (!voice && !swell) {
           diagnostics.push({ line: lineNumber, message: `unknown frequency-capable object: ${name}` });
           continue;
         }
@@ -1926,40 +1877,10 @@ export class SonusRuntime {
             continue;
           }
 
-          if (oscillator) {
-            oscillator.frequency = frequency;
-            oscillator.parameters.delete('NOTE');
-            oscillator.parameters.set('FREQ', `${formatNumber(frequency)} HZ`);
-          } else if (voice) {
-            voice.frequency = frequency;
-            voice.parameters.set('FREQ', `${formatNumber(frequency)} HZ`);
-          }
+          voice!.frequency = frequency;
+          voice!.parameters.set('FREQ', `${formatNumber(frequency)} HZ`);
         }
         results.push({ message: `${name}.freq ${formatNumber(frequency)} hz` });
-        continue;
-      }
-
-      match = line.match(/^([A-Za-z_]\w*)\.note\(\s*(.+)\s*\)\s*$/);
-      if (match) {
-        const [, name, rawNote] = match;
-        const oscillator = oscillators.get(name);
-        if (!oscillator) {
-          diagnostics.push({ line: lineNumber, message: `unknown osc object: ${name}` });
-          continue;
-        }
-
-        const note = evalNumber(rawNote, lineNumber, 'note');
-        if (note === undefined) continue;
-        const error = noteError(note);
-        if (error) {
-          diagnostics.push({ line: lineNumber, message: error });
-          continue;
-        }
-
-        oscillator.frequency = midiToFrequency(note);
-        oscillator.parameters.delete('FREQ');
-        oscillator.parameters.set('NOTE', formatNumber(note));
-        results.push({ message: `${name}.note ${formatNumber(note)}` });
         continue;
       }
 
@@ -2128,7 +2049,7 @@ export class SonusRuntime {
         continue;
       }
 
-      match = line.match(/^([A-Za-z_]\w*)\.(harmo|timbre|morph|geometry|structure|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)\(\s*(.+)\s*\)\s*$/);
+      match = line.match(/^([A-Za-z_]\w*)\.(harmo|timbre|morph|width|geometry|structure|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)\(\s*(.+)\s*\)\s*$/);
       if (match) {
         const [, name, parameter, rawValue] = match;
         const voice = voices.get(name);
@@ -2168,22 +2089,20 @@ export class SonusRuntime {
         continue;
       }
 
-      match = line.match(/^([A-Za-z_]\w*)\.(freq|harmo|timbre|morph|model|level|slope|shape|smooth|shift)\.view\(\s*\)\s*$/);
+      match = line.match(/^([A-Za-z_]\w*)\.(freq|harmo|timbre|morph|width|model|level|slope|shape|smooth|shift)\.view\(\s*\)\s*$/);
       if (match) {
         const [, name, parameter] = match;
-        const oscillator = oscillators.get(name);
-        const voice = voices.get(name);
+          const voice = voices.get(name);
         const gain = gains.get(name);
         const swell = swells.get(name);
         let value: string | null = null;
 
         if (parameter === 'freq') {
-          if (oscillator) value = `${formatNumber(oscillator.frequency)} HZ`;
-          else if (voice) value = `${formatNumber(voice.frequency)} HZ`;
+          if (voice) value = `${formatNumber(voice.frequency)} HZ`;
           else if (swell) value = `${formatNumber(swell.frequency)} HZ`;
         } else if (parameter === 'model' && voice) {
-          value = formatVoiceModel(voice.model);
-        } else if ((parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph') && voice) {
+          value = voice.engine === 'macro' ? formatVoiceModel(voice.model) : voice.soundId.toUpperCase();
+        } else if ((parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph' || parameter === 'width') && voice) {
           value = `${formatNumber(voice[parameter])}%`;
         } else if (parameter === 'level' && gain) {
           value = `${formatNumber(gain.level)}%`;
@@ -2271,7 +2190,7 @@ export class SonusRuntime {
         if (voices.has(name) && explicitOut) {
           views.set(`${name}.out`, 'signal');
           results.push({ message: `${name}.out view` });
-        } else if (oscillators.has(name) || gains.has(name)) {
+        } else if (gains.has(name)) {
           views.set(`${name}.out`, 'signal');
           results.push({ message: `${name}.out view` });
         } else {
@@ -2288,7 +2207,7 @@ export class SonusRuntime {
         const { sourceName, sourcePort, amountExpression, targetName, targetPort } = parsedRoute;
         if (sourceName !== 'Clock'
           && !clockSources.has(sourceName)
-          && !objectExists(sourceName, oscillators, gains, voices)
+          && !objectExists(sourceName, gains, voices)
           && !swells.has(sourceName)
           && !mists.has(sourceName)
           && !filters.has(sourceName)
@@ -2641,7 +2560,7 @@ export class SonusRuntime {
           const [, name] = match;
           const reservationError = identifierReservationError(name);
           if (reservationError) diagnostics.push({ line: statementLine, message: reservationError });
-          else if (objectExists(name, oscillators, gains, voices) || clockSources.has(name)) {
+          else if (objectExists(name, gains, voices) || clockSources.has(name)) {
             diagnostics.push({ line: statementLine, message: `cannot assign scalar value to object: ${name}` });
           }
           continue;
@@ -2678,7 +2597,6 @@ export class SonusRuntime {
     for (const [name] of clockSources) {
       if (!name.startsWith('__clock_')) variableViews.push({ name, value: 'Clock' });
     }
-    for (const [name] of oscillators) variableViews.push({ name, value: 'Osc' });
     for (const [name] of gains) variableViews.push({ name, value: 'Gain' });
     for (const [name] of languageTurings) variableViews.push({ name, value: 'Seq' });
     for (const [name] of languageLives) variableViews.push({ name, value: 'Seq' });
@@ -2691,19 +2609,17 @@ export class SonusRuntime {
       if (kind !== 'parameter') continue;
 
       const [name, parameter] = signal.split('.');
-      const oscillator = oscillators.get(name);
       const voice = voices.get(name);
       const gain = gains.get(name);
       const swell = swells.get(name);
       let value: string | null = null;
 
       if (parameter === 'freq') {
-        if (oscillator) value = `${formatNumber(oscillator.frequency)} HZ`;
-        else if (voice) value = `${formatNumber(voice.frequency)} HZ`;
+        if (voice) value = `${formatNumber(voice.frequency)} HZ`;
         else if (swell) value = `${formatNumber(swell.frequency)} HZ`;
       } else if (parameter === 'model' && voice) {
-        value = formatVoiceModel(voice.model);
-      } else if ((parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph') && voice) {
+        value = voice.engine === 'macro' ? formatVoiceModel(voice.model) : voice.soundId.toUpperCase();
+      } else if ((parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph' || parameter === 'width') && voice) {
         value = `${formatNumber(voice[parameter])}%`;
       } else if (parameter === 'level' && gain) {
         value = `${formatNumber(gain.level)}%`;
@@ -2851,16 +2767,6 @@ export class SonusRuntime {
       ...[...clockSources.entries()]
         .filter(([name]) => name.toLowerCase() !== 'clock' && !name.startsWith('__clock_'))
         .map(([name, definition]) => ({ id: name, label: `${name.toUpperCase()} : CLOCK`, kind: 'module' as const, parameters: [...definition.parameters.entries()].map(([parameterName, value]) => ({ name: parameterName, value })), views: embeddedViews.get(name) })),
-      ...[...oscillators.entries()].map(([name, definition]) => ({
-        id: name,
-        label: `${name.toUpperCase()} : OSC`,
-        kind: 'module' as const,
-        parameters: [...definition.parameters.entries()].map(([parameterName, value]) => ({
-          name: parameterName,
-          value,
-        })),
-        views: embeddedViews.get(name),
-      })),
       ...[...voices.entries()].map(([name, definition]) => ({
         id: name,
         label: `${name.toUpperCase()} : VOICE`,
@@ -3009,10 +2915,6 @@ export class SonusRuntime {
         ...[...clockSources.entries()].map(([name, definition]) => ({ name, rate: definition.rate, jitter: definition.jitter, drift: definition.drift, enabled: !definition.disabled })),
         ...whenHandlers.filter((handler) => handler.sourceName !== 'Clock').map((handler) => ({ name: handler.sourceName, rate: handler.rate, jitter: masterJitter, drift: masterTimingDrift, enabled: true })),
       ],
-      oscillators: [...oscillators.entries()].map(([name, definition]) => ({
-        name,
-        frequency: definition.frequency,
-      })),
       matters: [...voices.entries()]
         .filter(([, definition]) => definition.engine === 'matter')
         .map(([name, definition]) => ({
@@ -3052,7 +2954,18 @@ export class SonusRuntime {
           damping: definition.damping,
           position: definition.position,
         })),
-      voices: [...voices.entries()]
+      basicVoices: [...voices.entries()]
+        .filter(([, definition]) => definition.engine === 'oscillator')
+        .map(([name, definition]) => ({
+          name,
+          enabled: !definition.disabled,
+          waveform: definition.soundId as 'sine' | 'triangle' | 'sawtooth' | 'ramp' | 'square',
+          level: definition.level,
+          frequency: definition.frequency,
+          dynamicPitch: languageSequences.has(name) || languageTuringVoiceSources.has(name),
+          width: definition.width,
+        })),
+      macros: [...voices.entries()]
         .filter(([, definition]) => definition.engine === 'macro')
         .map(([name, definition]) => ({
           name,
@@ -4411,7 +4324,7 @@ export class SonusRuntime {
             match = line.match(/^([A-Za-z_]\w*)\s*=\s*(.+)$/);
             if (match) {
               const [, name, expression] = match;
-              if (identifierReservationError(name) || objectExists(name, oscillators, gains, voices) || clockSources.has(name)) continue;
+              if (identifierReservationError(name) || objectExists(name, gains, voices) || clockSources.has(name)) continue;
               const value = evalValue(expression, lineNumber);
               if (value !== undefined) {
                 variables.set(name, value);
@@ -5039,7 +4952,7 @@ function parseLanguageParameterCycleDirective(
   lineNumber: number,
 ): LanguageParameterCycleDefinition | null {
   const match = line.match(
-    /^__paramcycle\("([A-Za-z_]\w*)","(harmo|timbre|morph|geometry|structure|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)","((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/,
+    /^__paramcycle\("([A-Za-z_]\w*)","(harmo|timbre|morph|width|geometry|structure|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)","((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/,
   );
   if (!match) return null;
 
@@ -5069,7 +4982,7 @@ function parseLanguageParameterDefaultDirective(
   lineNumber: number,
 ): LanguageParameterDefaultDefinition | null {
   const match = line.match(
-    /^__paramdefault\("([A-Za-z_]\w*)","(harmo|timbre|morph|geometry|structure|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)","((?:[^"\\]|\\.)*)"\)$/,
+    /^__paramdefault\("([A-Za-z_]\w*)","(harmo|timbre|morph|width|geometry|structure|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)","((?:[^"\\]|\\.)*)"\)$/,
   );
   if (!match) return null;
 
@@ -5245,10 +5158,6 @@ function parseClockRate(value: string): { rate: number; label: string } | null {
   return { rate: match[1] === '/' ? 1 / n : n, label: `${match[1]}${formatNumber(n)}` };
 }
 
-function parseOscillatorDeclaration(line: string): ObjectDeclaration | null {
-  return parseDeclaration(line, 'osc');
-}
-
 function parseGainDeclaration(line: string): ObjectDeclaration | null {
   return parseDeclaration(line, 'gain');
 }
@@ -5370,7 +5279,6 @@ function identifierReservationError(name: string): string | null {
 
 function reservedOrDuplicate(
   name: string,
-  oscillators: Map<string, OscillatorDefinition>,
   gains: Map<string, GainDefinition>,
   voices: Map<string, VoiceDefinition>,
   diagnostics: SonusDiagnostic[],
@@ -5381,7 +5289,7 @@ function reservedOrDuplicate(
     diagnostics.push({ line: lineNumber, message: reservationError });
     return true;
   }
-  if (objectExists(name, oscillators, gains, voices)) {
+  if (objectExists(name, gains, voices)) {
     diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` });
     return true;
   }
@@ -5390,11 +5298,10 @@ function reservedOrDuplicate(
 
 function objectExists(
   name: string,
-  oscillators: Map<string, OscillatorDefinition>,
   gains: Map<string, GainDefinition>,
   voices: Map<string, VoiceDefinition>,
 ): boolean {
-  return oscillators.has(name) || gains.has(name) || voices.has(name);
+  return gains.has(name) || voices.has(name);
 }
 
 function applyFilterCall(
@@ -5639,45 +5546,6 @@ function applySwellCall(
   }
 }
 
-function applyOscillatorCall(
-  objectName: string,
-  oscillator: OscillatorDefinition,
-  call: ChainedCall,
-  views: Map<string, ViewKind>,
-  evaluate: (expression: string) => ScalarValue | undefined,
-): string | null {
-  switch (call.name) {
-    case 'freq': {
-      const value = evaluate(call.argument);
-      if (value === undefined) return null;
-      if (typeof value !== 'number') return 'freq expects one numeric expression';
-      const error = frequencyError(value);
-      if (error) return error;
-      oscillator.frequency = value;
-      oscillator.parameters.delete('NOTE');
-      oscillator.parameters.set('FREQ', `${formatNumber(value)} HZ`);
-      return null;
-    }
-    case 'note': {
-      const value = evaluate(call.argument);
-      if (value === undefined) return null;
-      if (typeof value !== 'number') return 'note expects one numeric expression';
-      const error = noteError(value);
-      if (error) return error;
-      oscillator.frequency = midiToFrequency(value);
-      oscillator.parameters.delete('FREQ');
-      oscillator.parameters.set('NOTE', formatNumber(value));
-      return null;
-    }
-    case 'view':
-      if (call.argument.length > 0) return 'view does not accept parameters yet';
-      views.set(`${objectName}.out`, 'signal');
-      return null;
-    default:
-      return `unknown osc method: ${call.name}`;
-  }
-}
-
 function applyGainCall(
   objectName: string,
   gain: GainDefinition,
@@ -5766,6 +5634,7 @@ function applyVoiceCall(
     case 'harmo':
     case 'timbre':
     case 'morph':
+    case 'width':
     case 'geometry':
     case 'structure':
     case 'brightness':
@@ -5825,6 +5694,13 @@ function applyVoiceModelValue(voice: VoiceDefinition, value: ScalarValue): strin
       voice.parameters.set('MODEL', normalized.toUpperCase());
       return null;
     }
+    if (normalized === 'sine' || normalized === 'triangle' || normalized === 'sawtooth' || normalized === 'ramp' || normalized === 'square') {
+      voice.engine = 'oscillator';
+      voice.soundId = normalized;
+      voice.lpg = false;
+      voice.parameters.set('MODEL', normalized.toUpperCase());
+      return null;
+    }
     const resonatorModels: Record<string, number> = {
       'resonator.modal': 0,
       'resonator.sympathetic': 1,
@@ -5841,7 +5717,7 @@ function applyVoiceModelValue(voice: VoiceDefinition, value: ScalarValue): strin
     }
   }
   const model = parseVoiceModelValue(value);
-  if (model === null) return 'model expects a macro.*, matter, or resonator.* sound';
+  if (model === null) return 'model expects macro.*, matter, resonator.*, sine, triangle, sawtooth, ramp, or square';
   voice.engine = 'macro';
   voice.model = model;
   voice.soundId = formatVoiceModelId(model);
@@ -5891,11 +5767,6 @@ function frequencyError(value: number): string | null {
     : null;
 }
 
-function noteError(value: number): string | null {
-  return !Number.isFinite(value) || value < 0 || value > 127
-    ? 'note must be between 0 and 127'
-    : null;
-}
 
 function gainLevelError(value: number): string | null {
   return !Number.isFinite(value) || value < -100 || value > 100

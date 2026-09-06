@@ -261,6 +261,18 @@ sound macro.fm
 
 Only parameters supported by the selected engine are accepted.
 
+Basic DaisySP oscillator sounds are also available:
+
+```text
+sound sine
+sound triangle
+sound sawtooth
+sound ramp
+sound square
+```
+
+The basic oscillators inherit the normal VOICE pitch, level, routing and timing behaviour. `square` additionally exposes `WIDTH 0..100`, defaulting to 50; the other basic oscillator sounds have no sound-specific parameters.
+
 Typical macro-engine parameters include:
 
 ```text

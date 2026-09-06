@@ -39,7 +39,7 @@ Ghost Note Audio's upstream README explicitly permits both free and commercial u
 
 ## Electrosmith DaisySP
 
-Current use: the `svf` multimode FILTER backend. The build currently compiles only DaisySP's state-variable-filter implementation into `daisy-filters.wasm`.
+Current use: the basic oscillator VOICE backend and the `svf` multimode FILTER backend. The build compiles DaisySP's oscillator implementation into `daisy-oscillators.wasm` and its state-variable-filter implementation into `daisy-filters.wasm`.
 
 - Copyright: Electrosmith, Corp.
 - Upstream: https://github.com/electro-smith/DaisySP

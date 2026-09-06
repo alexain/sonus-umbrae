@@ -339,7 +339,18 @@ const RESONATOR_PARAMETERS: Record<string, SoundParameterSchema> = {
   position: { min: 0, max: 100, modulatable: false },
 };
 
+
+const SQUARE_PARAMETERS: Record<string, SoundParameterSchema> = {
+  width: { min: 0, max: 100, modulatable: false },
+};
+
 const SOUND_ENGINE_REGISTRY: Record<string, SoundEngineSchema> = {
+  'sine': { parameters: {}, options: new Set() },
+  'triangle': { parameters: {}, options: new Set() },
+  'sawtooth': { parameters: {}, options: new Set() },
+  'ramp': { parameters: {}, options: new Set() },
+  'square': { parameters: SQUARE_PARAMETERS, options: new Set() },
+
   'macro.analog': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
   'macro.waves': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
   'macro.fm': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
@@ -1193,7 +1204,7 @@ function compileVoiceProperty(
         }
       }
       voice.soundId = soundId;
-      const lpg = soundId === 'matter' ? '' : `\n${voice.name}.lpg(${seen.has('lpg')});`;
+      const lpg = soundId.startsWith('macro.') ? `\n${voice.name}.lpg(${seen.has('lpg')});` : '';
       return `${voice.name}.model(${JSON.stringify(soundId)});${lpg}`;
     }
 

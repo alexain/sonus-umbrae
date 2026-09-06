@@ -30,11 +30,16 @@ export interface AudioProgram {
   clock: { bpm: number; jitter: number; drift: number };
   mainLevel: number;
   clockSources: Array<{ name: string; rate: number; jitter: number; drift: number; enabled: boolean }>;
-  oscillators: Array<{
+  basicVoices: Array<{
     name: string;
+    enabled: boolean;
+    waveform: 'sine' | 'triangle' | 'sawtooth' | 'ramp' | 'square';
+    level: number;
     frequency: number;
+    dynamicPitch?: boolean;
+    width: number;
   }>;
-  voices: Array<{
+  macros: Array<{
     name: string;
     enabled: boolean;
     model: number;
@@ -192,11 +197,17 @@ export type AudioEngineConfiguration = {
 };
 
 
-interface OscillatorVoice {
-  oscillator: OscillatorNode;
+interface BasicVoice {
+  enabled: boolean;
+  node: AudioWorkletNode;
   output: GainNode;
+  vOctInput: GainNode;
+  waveform: AudioProgram['basicVoices'][number]['waveform'];
+  level: number;
   frequency: number;
+  width: number;
 }
+
 
 interface GainVoice {
   node: GainNode;
@@ -435,9 +446,9 @@ export class AudioEngine {
   private hardwareOutputLevel = DEFAULT_HARDWARE_OUTPUT_LEVEL;
   private testOscillator: OscillatorNode | null = null;
   private testGain: GainNode | null = null;
-  private oscillators = new Map<string, OscillatorVoice>();
+  private basicVoices = new Map<string, BasicVoice>();
   private gains = new Map<string, GainVoice>();
-  private voices = new Map<string, MacroVoice>();
+  private macros = new Map<string, MacroVoice>();
   private matters = new Map<string, MatterVoice>();
   private resonators = new Map<string, ResonatorVoice>();
   private swells = new Map<string, SwellVoice>();
@@ -452,7 +463,8 @@ export class AudioEngine {
   private masterClockBpm = 0;
   private masterClockEnabled = true;
   private clockTransportRunning = true;
-  private voiceWasmBytes: ArrayBuffer | null = null;
+  private macroWasmBytes: ArrayBuffer | null = null;
+  private daisyOscillatorsWasmBytes: ArrayBuffer | null = null;
   private matterWasmBytes: ArrayBuffer | null = null;
   private resonatorWasmBytes: ArrayBuffer | null = null;
   private swellWasmBytes: ArrayBuffer | null = null;
@@ -462,7 +474,8 @@ export class AudioEngine {
   private skyWasmBytes: ArrayBuffer | null = null;
   private delayWasmBytes: ArrayBuffer | null = null;
   private daisyFiltersWasmBytes: ArrayBuffer | null = null;
-  private voiceWorkletLoaded = false;
+  private macroWorkletLoaded = false;
+  private daisyOscillatorsWorkletLoaded = false;
   private matterWorkletLoaded = false;
   private resonatorWorkletLoaded = false;
   private swellWorkletLoaded = false;
@@ -489,7 +502,7 @@ export class AudioEngine {
           : 'suspended',
       sampleRate: this.context?.sampleRate ?? null,
       testFrequency: this.testOscillator?.frequency.value ?? null,
-      objectCount: this.oscillators.size + this.gains.size + this.voices.size + this.matters.size + this.resonators.size + this.swells.size + this.dices.size + this.drumkits.size + this.mists.size + this.skies.size + this.delays.size + this.filters.size + this.clocks.size,
+      objectCount: this.basicVoices.size + this.gains.size + this.macros.size + this.matters.size + this.resonators.size + this.swells.size + this.dices.size + this.drumkits.size + this.mists.size + this.skies.size + this.delays.size + this.filters.size + this.clocks.size,
       routeCount: this.routes.size,
     };
   }
@@ -503,7 +516,8 @@ export class AudioEngine {
   async start(): Promise<void> {
     const context = this.ensureContext();
     await this.applyRequestedOutputDevice(context);
-    await this.ensureVoiceRuntime();
+    await this.ensureMacroRuntime();
+    await this.ensureDaisyOscillatorsRuntime();
     await this.ensureMatterRuntime();
     await this.ensureResonatorRuntime();
     await this.ensureSwellRuntime();
@@ -596,7 +610,8 @@ export class AudioEngine {
 
   applyProgram(program: AudioProgram, options: { hotReload?: boolean } = {}): void {
     const hotReload = options.hotReload ?? false;
-    if ((program.voices.length > 0 && !this.voiceWorkletLoaded) ||
+    if ((program.macros.length > 0 && !this.macroWorkletLoaded) ||
+        (program.basicVoices.length > 0 && !this.daisyOscillatorsWorkletLoaded) ||
         (program.matters.length > 0 && !this.matterWorkletLoaded) ||
         (program.resonators.length > 0 && !this.resonatorWorkletLoaded) ||
         (program.swells.length > 0 && !this.swellWorkletLoaded) ||
@@ -618,8 +633,8 @@ export class AudioEngine {
       this.audioOutR.gain.setTargetAtTime(level, context.currentTime, 0.008);
     }
     const desiredClockSources = new Map(program.clockSources.map((definition) => [definition.name, definition]));
-    const desiredOscillators = new Map(program.oscillators.map((definition) => [definition.name, definition]));
-    const desiredVoices = new Map(program.voices.map((definition) => [definition.name, definition]));
+    const desiredBasicVoices = new Map(program.basicVoices.map((definition) => [definition.name, definition]));
+    const desiredMacros = new Map(program.macros.map((definition) => [definition.name, definition]));
     const desiredMatters = new Map(program.matters.map((definition) => [definition.name, definition]));
     const desiredResonators = new Map(program.resonators.map((definition) => [definition.name, definition]));
     const desiredSwells = new Map(program.swells.map((definition) => [definition.name, definition]));
@@ -645,8 +660,8 @@ export class AudioEngine {
       if (!desiredRoutes.has(key)) this.removeRoute(key);
     }
 
-    for (const [name] of this.oscillators) {
-      if (!desiredOscillators.has(name)) this.removeOscillator(name);
+    for (const [name] of this.basicVoices) {
+      if (!desiredBasicVoices.has(name)) this.removeBasicVoice(name);
     }
 
     for (const [name] of this.gains) {
@@ -657,8 +672,8 @@ export class AudioEngine {
       if (!desiredFilters.has(name)) this.removeFilter(name);
     }
 
-    for (const [name] of this.voices) {
-      if (!desiredVoices.has(name)) this.removeVoice(name);
+    for (const [name] of this.macros) {
+      if (!desiredMacros.has(name)) this.removeMacro(name);
     }
 
     for (const [name] of this.matters) {
@@ -694,14 +709,14 @@ export class AudioEngine {
     for (const definition of program.clockSources) this.createOrUpdateClock(definition.name, definition.rate, definition.jitter, definition.drift, definition.enabled);
     this.updateAllClocks();
 
-    for (const definition of program.oscillators) {
-      this.createOscillator(definition.name);
-      this.setOscillatorFrequency(definition.name, definition.frequency, false);
+    for (const definition of program.basicVoices) {
+      this.createBasicVoice(definition);
+      this.updateBasicVoice(definition, hotReload);
     }
 
-    for (const definition of program.voices) {
-      this.createVoice(definition);
-      this.updateVoice(definition, hotReload);
+    for (const definition of program.macros) {
+      this.createMacro(definition);
+      this.updateMacro(definition, hotReload);
     }
 
     for (const definition of program.matters) {
@@ -759,35 +774,85 @@ export class AudioEngine {
     this.emit();
   }
 
-  createOscillator(name: string): void {
-    if (this.oscillators.has(name)) return;
-
-    const context = this.ensureContext();
-    const oscillator = context.createOscillator();
-    const output = context.createGain();
-
-    oscillator.type = 'sine';
-    oscillator.frequency.setValueAtTime(440, context.currentTime);
-    output.gain.value = 1;
-    oscillator.connect(output);
-    oscillator.start();
-
-    this.oscillators.set(name, {
-      oscillator,
-      output,
-      frequency: 440,
-    });
-  }
-
-  private createVoice(definition: AudioProgram['voices'][number]): void {
-    if (this.voices.has(definition.name)) return;
-    if (!this.voiceWorkletLoaded || !this.voiceWasmBytes) {
-      throw new Error('Voice DSP is not ready; run :start after building the DSP');
+  private createBasicVoice(definition: AudioProgram['basicVoices'][number]): void {
+    if (this.basicVoices.has(definition.name)) return;
+    if (!this.daisyOscillatorsWorkletLoaded || !this.daisyOscillatorsWasmBytes) {
+      throw new Error('DaisySP oscillator DSP is not ready; run :start after building the DSP');
     }
 
     const context = this.ensureContext();
-    const wasmBytes = this.voiceWasmBytes.slice(0);
-    const node = new AudioWorkletNode(context, 'sonus-voice', {
+    const node = new AudioWorkletNode(context, 'sonus-daisy-oscillator', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [1],
+      processorOptions: {
+        wasmBytes: this.daisyOscillatorsWasmBytes.slice(0),
+        hostSampleRate: context.sampleRate,
+      },
+    });
+    const output = context.createGain();
+    const vOctInput = context.createGain();
+    vOctInput.gain.value = 1;
+    vOctInput.connect(node, 0, 0);
+    const level = definition.enabled ? Math.max(0, Math.min(1, definition.level / 100)) : 0;
+    output.gain.value = level;
+    node.connect(output, 0, 0);
+    this.basicVoices.set(definition.name, {
+      enabled: definition.enabled,
+      node,
+      output,
+      vOctInput,
+      waveform: definition.waveform,
+      level: definition.level,
+      frequency: definition.frequency,
+      width: definition.width,
+    });
+    node.port.postMessage({
+      type: 'params',
+      waveform: definition.waveform,
+      frequency: definition.frequency,
+      width: definition.width / 100,
+    });
+  }
+
+  private updateBasicVoice(definition: AudioProgram['basicVoices'][number], hotReload = false): void {
+    const voice = this.basicVoices.get(definition.name);
+    if (!voice) return;
+    const frequency = hotReload && definition.dynamicPitch ? voice.frequency : definition.frequency;
+    const unchanged = voice.enabled === definition.enabled
+      && voice.waveform === definition.waveform
+      && voice.level === definition.level
+      && Math.abs(voice.frequency - frequency) < 0.0001
+      && voice.width === definition.width;
+    if (unchanged) return;
+
+    const context = this.ensureContext();
+    if (voice.enabled !== definition.enabled || voice.level !== definition.level) {
+      const level = definition.enabled ? Math.max(0, Math.min(1, definition.level / 100)) : 0;
+      voice.output.gain.setTargetAtTime(level, context.currentTime, 0.008);
+    }
+    voice.enabled = definition.enabled;
+    voice.waveform = definition.waveform;
+    voice.level = definition.level;
+    voice.frequency = frequency;
+    voice.width = definition.width;
+    voice.node.port.postMessage({
+      type: 'params',
+      waveform: definition.waveform,
+      frequency,
+      width: definition.width / 100,
+    });
+  }
+
+  private createMacro(definition: AudioProgram['macros'][number]): void {
+    if (this.macros.has(definition.name)) return;
+    if (!this.macroWorkletLoaded || !this.macroWasmBytes) {
+      throw new Error('Macro DSP is not ready; run :start after building the DSP');
+    }
+
+    const context = this.ensureContext();
+    const wasmBytes = this.macroWasmBytes.slice(0);
+    const node = new AudioWorkletNode(context, 'sonus-macro', {
       numberOfInputs: 5,
       numberOfOutputs: 2,
       outputChannelCount: [1, 1],
@@ -812,7 +877,7 @@ export class AudioEngine {
     timbreInput.connect(node, 0, 3);
     morphInput.connect(node, 0, 4);
 
-    this.voices.set(definition.name, {
+    this.macros.set(definition.name, {
       enabled: definition.enabled,
       node,
       outGain,
@@ -831,8 +896,8 @@ export class AudioEngine {
     });
   }
 
-  private updateVoice(definition: AudioProgram['voices'][number], hotReload = false): void {
-    const voice = this.voices.get(definition.name);
+  private updateMacro(definition: AudioProgram['macros'][number], hotReload = false): void {
+    const voice = this.macros.get(definition.name);
     if (!voice) return;
     const frequency = hotReload && definition.dynamicPitch ? voice.frequency : definition.frequency;
     const unchanged = voice.enabled === definition.enabled
@@ -1092,12 +1157,15 @@ export class AudioEngine {
     });
 
     if (definition.ownerVoice) {
-      const voice = this.voices.get(definition.ownerVoice);
+      const voice = this.macros.get(definition.ownerVoice);
+      const basicVoice = this.basicVoices.get(definition.ownerVoice);
       const matter = this.matters.get(definition.ownerVoice);
-      if (!voice && !matter) throw new Error(`embedded FILTER '${definition.displayName}' references unknown VOICE '${definition.ownerVoice}'`);
+      if (!voice && !basicVoice && !matter) throw new Error(`embedded FILTER '${definition.displayName}' references unknown VOICE '${definition.ownerVoice}'`);
       if (voice) {
         voice.outGain.connect(input);
         voice.auxGain.connect(input);
+      } else if (basicVoice) {
+        basicVoice.output.connect(input);
       } else if (matter) {
         matter.mainGain.connect(input);
         matter.auxGain.connect(input);
@@ -1464,27 +1532,6 @@ export class AudioEngine {
     this.gains.set(name, { node, level: 100 });
   }
 
-  setOscillatorFrequency(name: string, frequency: number, emit = true): void {
-    if (!Number.isFinite(frequency) || frequency < 20 || frequency > 20000) {
-      throw new RangeError('frequency must be between 20 and 20000 Hz');
-    }
-
-    const voice = this.requireOscillator(name);
-    const context = this.ensureContext();
-    voice.frequency = frequency;
-    voice.oscillator.frequency.setTargetAtTime(frequency, context.currentTime, 0.008);
-    if (emit) this.emit();
-  }
-
-  setOscillatorNote(name: string, midiNote: number): void {
-    if (!Number.isFinite(midiNote) || midiNote < 0 || midiNote > 127) {
-      throw new RangeError('note must be between 0 and 127');
-    }
-
-    const frequency = 440 * 2 ** ((midiNote - 69) / 12);
-    this.setOscillatorFrequency(name, frequency);
-  }
-
   setGainLevel(name: string, level: number, emit = true): void {
     if (!Number.isFinite(level) || level < 0 || level > 100) {
       throw new RangeError('gain level must be between 0 and 100');
@@ -1698,7 +1745,7 @@ export class AudioEngine {
     if (!match) throw new Error(`unknown signal: ${signal}`);
     const [, name, port] = match;
 
-    const voice = this.voices.get(name);
+    const voice = this.macros.get(name);
     if (voice) return { node: port === 'aux' ? voice.auxGain : voice.outGain, output: 0 };
     const matter = this.matters.get(name);
     if (matter) return { node: port === 'aux' ? matter.auxGain : matter.mainGain, output: 0 };
@@ -1706,8 +1753,8 @@ export class AudioEngine {
     if (resonator) return { node: port === 'aux' ? resonator.auxGain : resonator.mainGain, output: 0 };
 
     if (port === 'aux') throw new Error(`aux output is not available on ${name}`);
-    const oscillator = this.oscillators.get(name);
-    if (oscillator) return { node: oscillator.output, output: 0 };
+    const basicVoice = this.basicVoices.get(name);
+    if (basicVoice) return { node: basicVoice.output, output: 0 };
     const gain = this.gains.get(name);
     if (gain) return { node: gain.node, output: 0 };
     throw new Error(`unknown object: ${name}`);
@@ -1746,7 +1793,7 @@ export class AudioEngine {
 
     const trigger = port.match(/^([A-Za-z_]\w*)\.trig$/);
     if (trigger) {
-      const voice = this.voices.get(trigger[1]);
+      const voice = this.macros.get(trigger[1]);
       if (voice) return { node: voice.node, input: 0 };
       const swell = this.swells.get(trigger[1]);
       if (swell) return { node: swell.node, input: 0 };
@@ -1764,8 +1811,10 @@ export class AudioEngine {
 
     const vOct = port.match(/^([A-Za-z_]\w*)\.v_oct$/);
     if (vOct) {
-      const voice = this.voices.get(vOct[1]);
+      const voice = this.macros.get(vOct[1]);
       if (voice) return { node: voice.vOctInput, input: 0 };
+      const basicVoice = this.basicVoices.get(vOct[1]);
+      if (basicVoice) return { node: basicVoice.vOctInput, input: 0 };
       const swell = this.swells.get(vOct[1]);
       if (swell) return { node: swell.node, input: 2 };
       throw new Error(`unknown v_oct input: ${vOct[1]}`);
@@ -1773,7 +1822,7 @@ export class AudioEngine {
 
     const parameter = port.match(/^([A-Za-z_]\w*)\.(harmo|timbre|morph)$/);
     if (parameter) {
-      const voice = this.voices.get(parameter[1]);
+      const voice = this.macros.get(parameter[1]);
       if (!voice) throw new Error(`unknown Voice parameter input: ${parameter[1]}`);
       const input = parameter[2] === 'harmo'
         ? voice.harmoInput
@@ -1805,7 +1854,26 @@ export class AudioEngine {
 
 
   readVoicePitchMidi(name: string): number | null {
-    const voice = this.voices.get(name);
+    const basicVoice = this.basicVoices.get(name);
+    if (basicVoice) {
+      const context = this.ensureContext();
+      const analyserKey = `${name}.v_oct`;
+      let analyser = this.controlMonitors.get(analyserKey);
+      if (!analyser) {
+        analyser = context.createAnalyser();
+        analyser.fftSize = 32;
+        analyser.smoothingTimeConstant = 0;
+        basicVoice.vOctInput.connect(analyser);
+        this.controlMonitors.set(analyserKey, analyser);
+      }
+      const data = new Float32Array(32);
+      analyser.getFloatTimeDomainData(data);
+      const volts = data[data.length - 1] ?? 0;
+      const baseMidi = 69 + 12 * Math.log2(basicVoice.frequency / 440);
+      return baseMidi + volts * 12;
+    }
+
+    const voice = this.macros.get(name);
     if (!voice) return null;
 
     // The analyser is intentionally short: v/oct is a control signal and the
@@ -1849,7 +1917,7 @@ export class AudioEngine {
       matter.node.port.postMessage({ type: 'trigger' });
       return;
     }
-    const voice = this.voices.get(name);
+    const voice = this.macros.get(name);
     if (!voice || !voice.lpg) return;
     voice.node.port.postMessage({ type: 'trigger' });
   }
@@ -1873,7 +1941,13 @@ export class AudioEngine {
       matter.auxGain.gain.setTargetAtTime(gain, context.currentTime, 0.008);
       return;
     }
-    const voice = this.voices.get(name);
+    const basicVoice = this.basicVoices.get(name);
+    if (basicVoice) {
+      basicVoice.level = level;
+      basicVoice.output.gain.setTargetAtTime(gain, context.currentTime, 0.008);
+      return;
+    }
+    const voice = this.macros.get(name);
     if (!voice) throw new Error(`unknown Voice object: ${name}`);
     voice.level = level;
     voice.outGain.gain.setTargetAtTime(gain, context.currentTime, 0.008);
@@ -1882,7 +1956,7 @@ export class AudioEngine {
 
   setVoiceParameter(
     name: string,
-    parameter: 'freq' | 'model' | 'harmo' | 'timbre' | 'morph' | 'geometry' | 'structure' | 'brightness' | 'damping' | 'position' | 'space' | 'bow' | 'bowTimbre' | 'blow' | 'blowTimbre' | 'strike' | 'strikeTimbre',
+    parameter: 'freq' | 'model' | 'harmo' | 'timbre' | 'morph' | 'width' | 'geometry' | 'structure' | 'brightness' | 'damping' | 'position' | 'space' | 'bow' | 'bowTimbre' | 'blow' | 'blowTimbre' | 'strike' | 'strikeTimbre',
     value: number,
   ): void {
     const resonator = this.resonators.get(name);
@@ -1923,7 +1997,23 @@ export class AudioEngine {
       return;
     }
 
-    const voice = this.voices.get(name);
+    const basicVoice = this.basicVoices.get(name);
+    if (basicVoice) {
+      if (parameter === 'freq') {
+        basicVoice.frequency = value;
+        basicVoice.node.port.postMessage({ type: 'params', frequency: value });
+        return;
+      }
+      if (parameter === 'width') {
+        if (basicVoice.waveform !== 'square') throw new RangeError('WIDTH is only available for SOUND square');
+        basicVoice.width = value;
+        basicVoice.node.port.postMessage({ type: 'params', width: value / 100 });
+        return;
+      }
+      return;
+    }
+
+    const voice = this.macros.get(name);
     if (!voice) throw new Error(`unknown Voice object: ${name}`);
     if (parameter === 'freq') {
       voice.frequency = value;
@@ -2020,7 +2110,14 @@ export class AudioEngine {
         matter.auxGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
         return;
       }
-      const voice = this.voices.get(name);
+      const basicVoice = this.basicVoices.get(name);
+      if (basicVoice) {
+        basicVoice.enabled = !disabled;
+        const level = disabled ? 0 : Math.max(0, Math.min(1, basicVoice.level / 100));
+        basicVoice.output.gain.setTargetAtTime(level, context.currentTime, 0.008);
+        return;
+      }
+      const voice = this.macros.get(name);
       if (!voice) return;
       voice.enabled = !disabled;
       const level = disabled ? 0 : Math.max(0, Math.min(1, voice.level / 100));
@@ -2340,8 +2437,8 @@ export class AudioEngine {
     // Disconnect only generator/modulator sources. Downstream processors and
     // their routes stay alive, allowing reverb/delay/filter tails to decay.
     const musicalSources = new Set([
-      ...this.oscillators.keys(),
-      ...this.voices.keys(),
+      ...this.basicVoices.keys(),
+      ...this.macros.keys(),
       ...this.matters.keys(),
       ...this.resonators.keys(),
       ...this.swells.keys(),
@@ -2397,28 +2494,21 @@ export class AudioEngine {
     this.routes.delete(key);
   }
 
-  private removeOscillator(name: string): void {
-    const voice = this.oscillators.get(name);
+  private removeBasicVoice(name: string): void {
+    const voice = this.basicVoices.get(name);
     if (!voice) return;
-
-    const context = this.context;
-    if (context) {
-      const now = context.currentTime;
-      voice.output.gain.cancelScheduledValues(now);
-      voice.output.gain.setValueAtTime(voice.output.gain.value, now);
-      voice.output.gain.linearRampToValueAtTime(0, now + 0.01);
-      voice.oscillator.stop(now + 0.015);
-    } else {
-      voice.oscillator.stop();
-    }
-
     this.removeView(`${name}.out`);
-
-    voice.oscillator.addEventListener('ended', () => {
-      voice.oscillator.disconnect();
-      voice.output.disconnect();
-    }, { once: true });
-    this.oscillators.delete(name);
+    const controlMonitor = this.controlMonitors.get(`${name}.v_oct`);
+    if (controlMonitor) {
+      try { voice.vOctInput.disconnect(controlMonitor); } catch {}
+      controlMonitor.disconnect();
+      this.controlMonitors.delete(`${name}.v_oct`);
+    }
+    try { voice.vOctInput.disconnect(); } catch {}
+    try { voice.output.disconnect(); } catch {}
+    try { voice.node.disconnect(); } catch {}
+    voice.node.port.close();
+    this.basicVoices.delete(name);
   }
 
   private removeSwell(name: string): void {
@@ -2455,11 +2545,15 @@ export class AudioEngine {
     const filter = this.filters.get(name);
     if (!filter) return;
     if (filter.ownerVoice) {
-      const voice = this.voices.get(filter.ownerVoice);
+      const voice = this.macros.get(filter.ownerVoice);
+      const basicVoice = this.basicVoices.get(filter.ownerVoice);
       const matter = this.matters.get(filter.ownerVoice);
       if (voice) {
         try { voice.outGain.disconnect(filter.input); } catch {}
         try { voice.auxGain.disconnect(filter.input); } catch {}
+      }
+      if (basicVoice) {
+        try { basicVoice.output.disconnect(filter.input); } catch {}
       }
       if (matter) {
         try { matter.mainGain.disconnect(filter.input); } catch {}
@@ -2540,8 +2634,8 @@ export class AudioEngine {
     this.resonators.delete(name);
   }
 
-  private removeVoice(name: string): void {
-    const voice = this.voices.get(name);
+  private removeMacro(name: string): void {
+    const voice = this.macros.get(name);
     if (!voice) return;
     this.removeView(`${name}.out`);
     this.removeView(`${name}.aux`);
@@ -2561,7 +2655,7 @@ export class AudioEngine {
     voice.auxGain.disconnect();
     voice.node.disconnect();
     voice.node.port.close();
-    this.voices.delete(name);
+    this.macros.delete(name);
   }
 
   private removeGain(name: string): void {
@@ -2570,12 +2664,6 @@ export class AudioEngine {
     this.removeView(`${name}.out`);
     voice.node.disconnect();
     this.gains.delete(name);
-  }
-
-  private requireOscillator(name: string): OscillatorVoice {
-    const voice = this.oscillators.get(name);
-    if (!voice) throw new Error(`unknown object: ${name}`);
-    return voice;
   }
 
   private requireGain(name: string): GainVoice {
@@ -2687,17 +2775,29 @@ export class AudioEngine {
     this.resonatorWorkletLoaded = true;
   }
 
-  private async ensureVoiceRuntime(): Promise<void> {
-    if (this.voiceWorkletLoaded && this.voiceWasmBytes) return;
+  private async ensureDaisyOscillatorsRuntime(): Promise<void> {
+    if (this.daisyOscillatorsWorkletLoaded && this.daisyOscillatorsWasmBytes) return;
+    const context = this.ensureContext();
+    const response = await fetch(publicAssetUrl('/dsp/daisy-oscillators.wasm'));
+    if (!response.ok) {
+      throw new Error('DaisySP oscillator DSP missing. Run npm run dsp:setup and npm run dsp:build.');
+    }
+    this.daisyOscillatorsWasmBytes = await response.arrayBuffer();
+    await context.audioWorklet.addModule(publicAssetUrl('/worklets/daisy-oscillator-processor.js'));
+    this.daisyOscillatorsWorkletLoaded = true;
+  }
+
+  private async ensureMacroRuntime(): Promise<void> {
+    if (this.macroWorkletLoaded && this.macroWasmBytes) return;
 
     const context = this.ensureContext();
-    const response = await fetch(publicAssetUrl('/dsp/voice.wasm'));
+    const response = await fetch(publicAssetUrl('/dsp/macro.wasm'));
     if (!response.ok) {
-      throw new Error('Voice DSP missing. Run npm run dsp:setup and npm run dsp:build.');
+      throw new Error('Macro DSP missing. Run npm run dsp:setup and npm run dsp:build.');
     }
-    this.voiceWasmBytes = await response.arrayBuffer();
-    await context.audioWorklet.addModule(publicAssetUrl('/worklets/voice-processor.js'));
-    this.voiceWorkletLoaded = true;
+    this.macroWasmBytes = await response.arrayBuffer();
+    await context.audioWorklet.addModule(publicAssetUrl('/worklets/macro-processor.js'));
+    this.macroWorkletLoaded = true;
   }
 
   private async applyRequestedOutputDevice(context: AudioContext): Promise<void> {
@@ -2723,8 +2823,8 @@ export class AudioEngine {
     for (const name of [...this.drumkits.keys()]) this.removeDrumkit(name);
     for (const name of [...this.resonators.keys()]) this.removeResonator(name);
     for (const name of [...this.matters.keys()]) this.removeMatter(name);
-    for (const name of [...this.voices.keys()]) this.removeVoice(name);
-    for (const name of [...this.oscillators.keys()]) this.removeOscillator(name);
+    for (const name of [...this.macros.keys()]) this.removeMacro(name);
+    for (const name of [...this.basicVoices.keys()]) this.removeBasicVoice(name);
     for (const name of [...this.gains.keys()]) this.removeGain(name);
     for (const signal of [...this.views.keys()]) this.removeView(signal);
     for (const monitor of this.controlMonitors.values()) { try { monitor.disconnect(); } catch {} }
@@ -2740,7 +2840,10 @@ export class AudioEngine {
     this.hardwareGain = null;
     this.context = null;
     this.pendingProgram = null;
-    this.voiceWorkletLoaded = false;
+    this.macroWasmBytes = null;
+    this.daisyOscillatorsWasmBytes = null;
+    this.macroWorkletLoaded = false;
+    this.daisyOscillatorsWorkletLoaded = false;
     this.matterWorkletLoaded = false;
     this.resonatorWorkletLoaded = false;
     this.swellWorkletLoaded = false;

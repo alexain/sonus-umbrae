@@ -11,7 +11,7 @@ namespace {
 
 constexpr int kRenderCapacity = 128;
 
-struct VoiceState {
+struct MacroState {
   plaits::Voice voice;
   plaits::Patch patch;
   plaits::Modulations modulations;
@@ -20,7 +20,7 @@ struct VoiceState {
   float aux[kRenderCapacity];
   float trigger = 0.0f;
 
-  VoiceState() {
+  MacroState() {
     stmlib::BufferAllocator allocator(shared_buffer, sizeof(shared_buffer));
     voice.Init(&allocator);
 
@@ -55,38 +55,38 @@ float FrequencyToMidi(float frequency) {
 
 extern "C" {
 
-VoiceState* su_voice_create() {
-  return new VoiceState();
+MacroState* su_macro_create() {
+  return new MacroState();
 }
 
-void su_voice_destroy(VoiceState* state) {
+void su_macro_destroy(MacroState* state) {
   delete state;
 }
 
-void su_voice_set_model(VoiceState* state, int model) {
+void su_macro_set_model(MacroState* state, int model) {
   if (!state) return;
   state->patch.engine = ToInternalEngine(model);
 }
 
-void su_voice_set_frequency(VoiceState* state, float frequency) {
+void su_macro_set_frequency(MacroState* state, float frequency) {
   if (!state || !std::isfinite(frequency) || frequency <= 0.0f) return;
   state->patch.note = FrequencyToMidi(frequency);
 }
 
-void su_voice_set_harmo(VoiceState* state, float value) {
+void su_macro_set_harmo(MacroState* state, float value) {
   if (state) state->patch.harmonics = Clamp01(value);
 }
 
-void su_voice_set_timbre(VoiceState* state, float value) {
+void su_macro_set_timbre(MacroState* state, float value) {
   if (state) state->patch.timbre = Clamp01(value);
 }
 
-void su_voice_set_morph(VoiceState* state, float value) {
+void su_macro_set_morph(MacroState* state, float value) {
   if (state) state->patch.morph = Clamp01(value);
 }
 
 
-void su_voice_set_v_oct(VoiceState* state, float value) {
+void su_macro_set_v_oct(MacroState* state, float value) {
   if (!state || !std::isfinite(value)) return;
   // Sonus Umbrae represents V/OCT as logical volts: +1.0 raises the pitch by
   // one octave, -1.0 lowers it by one octave. Plaits expects note modulation
@@ -94,14 +94,14 @@ void su_voice_set_v_oct(VoiceState* state, float value) {
   state->modulations.note = value * 12.0f;
 }
 
-void su_voice_set_trigger(VoiceState* state, float value, int patched) {
+void su_macro_set_trigger(MacroState* state, float value, int patched) {
   if (!state) return;
   // A patched trigger drives Plaits' internal excitation/LPG path.
   state->trigger = value;
   state->modulations.trigger_patched = patched != 0;
 }
 
-void su_voice_process(VoiceState* state, int size) {
+void su_macro_process(MacroState* state, int size) {
   if (!state) return;
   size = std::max(0, std::min(size, kRenderCapacity));
 
@@ -120,11 +120,11 @@ void su_voice_process(VoiceState* state, int size) {
   }
 }
 
-float* su_voice_out(VoiceState* state) {
+float* su_macro_out(MacroState* state) {
   return state ? state->out : nullptr;
 }
 
-float* su_voice_aux(VoiceState* state) {
+float* su_macro_aux(MacroState* state) {
   return state ? state->aux : nullptr;
 }
 
