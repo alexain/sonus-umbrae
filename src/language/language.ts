@@ -981,6 +981,128 @@ function compileCompositeEdgeDirective(ownerName: string, relation: string, valu
   return `__compositeedge(${JSON.stringify(ownerName)},${JSON.stringify(relation)},${JSON.stringify(edge[1])},${JSON.stringify(edge[2])},${JSON.stringify(JSON.stringify(params))});`;
 }
 
+
+function compileCompositeTuneDirective(
+  ownerName: string,
+  value: string,
+  line: number,
+  sourceDefinitions: Map<string, SourceDefinition>,
+): string {
+  const target = value.match(/^([A-Za-z_][A-Za-z0-9_]*)\s+(.+)$/i);
+  if (!target) throw new LanguageError([{ line, message: 'tune expects <node> pitch <PitchExpression> or <node> with octave/detune/ratio modifiers' }]);
+  const node = target[1];
+  const body = target[2].trim();
+
+  const relative = body.match(/^with\s+(.+)$/i);
+  if (relative) {
+    let octave = 0;
+    let detune = 0;
+    let ratio = 1;
+    let seen = 0;
+    for (const item of relative[1].split(',').map((part) => part.trim()).filter(Boolean)) {
+      const parsed = item.match(/^(octave|detune|ratio)\s+(-?\d+(?:\.\d+)?)$/i);
+      if (!parsed) throw new LanguageError([{ line, message: `invalid tune modifier '${item}'; use octave <integer>, detune <cents>, or ratio <number>` }]);
+      const key = parsed[1].toLowerCase();
+      const amount = Number(parsed[2]);
+      if (key === 'octave') {
+        if (!Number.isInteger(amount) || amount < -8 || amount > 8) throw new LanguageError([{ line, message: 'tune octave expects an integer from -8 to 8' }]);
+        octave = amount;
+      } else if (key === 'detune') {
+        if (amount < -1200 || amount > 1200) throw new LanguageError([{ line, message: 'tune detune expects -1200..1200 cents' }]);
+        detune = amount;
+      } else {
+        if (!Number.isFinite(amount) || amount <= 0 || amount > 32) throw new LanguageError([{ line, message: 'tune ratio expects a value greater than 0 and at most 32' }]);
+        ratio = amount;
+      }
+      seen += 1;
+    }
+    if (seen === 0) throw new LanguageError([{ line, message: 'tune with requires octave, detune, or ratio' }]);
+    const payload = { mode: 'relative', octave, detune, ratio };
+    return `__compositetune(${JSON.stringify(ownerName)},${JSON.stringify(node)},${JSON.stringify(JSON.stringify(payload))});`;
+  }
+
+  const absolute = body.match(/^pitch\s+(.+)$/i);
+  if (!absolute) throw new LanguageError([{ line, message: 'tune expects either PITCH ... or WITH octave/detune/ratio; the two modes cannot be combined' }]);
+  const split = splitEveryClause(absolute[1].trim());
+  const pitchText = split.base.trim();
+  const explicit = pitchText.match(/^(notes|freqs|scale)\s+(.+)$/i);
+  if (!explicit) {
+    throw new LanguageError([{ line, message: 'tune <node> pitch expects NOTES [...], FREQS [...], or SCALE ...' }]);
+  }
+
+  const kind = explicit[1].toLowerCase();
+  let values: number[] = [];
+  let selectionMode: SelectionMode = 'order';
+  let selectionAmount = 0;
+  let favor: SequenceFavorEntry[] = [];
+
+  if (kind === 'scale') {
+    const direct = splitWith(explicit[2].trim());
+    const source = IDENTIFIER.test(direct.base) ? sourceDefinitions.get(direct.base) : undefined;
+    if (source) {
+      if (source.kind !== 'scale') throw new LanguageError([{ line, message: `source '${direct.base}' is ${source.kind}, expected SCALE source` }]);
+      values = source.values;
+      const selection = parseSelectionMode(direct.modifiers, line, 'tune scale');
+      selectionMode = selection.mode;
+      selectionAmount = selection.amount;
+      favor = selection.favor;
+    } else {
+      const parsed = parseScaleSpec(explicit[2].trim(), line, true);
+      if (!parsed) throw new LanguageError([{ line, message: 'tune pitch scale expects root and mode, optionally WITH RANGE and a selection modifier' }]);
+      values = parsed.values;
+      selectionMode = parsed.mode;
+      selectionAmount = parsed.amount;
+      favor = parsed.favor;
+    }
+  } else {
+    const direct = splitWith(explicit[2].trim());
+    const source = IDENTIFIER.test(direct.base) ? sourceDefinitions.get(direct.base) : undefined;
+    if (kind === 'notes') {
+      let inlineFavor: SequenceFavorEntry[] = [];
+      if (source) {
+        if (source.kind !== 'note' && source.kind !== 'scale') throw new LanguageError([{ line, message: `source '${direct.base}' is ${source.kind}, expected NOTES-compatible source` }]);
+        values = source.values;
+        if (source.kind === 'note') inlineFavor = source.favor;
+      } else {
+        const noteTokens = parseList(direct.base, line, 'tune notes').map((token) => parseNoteSequenceToken(token, line));
+        values = noteTokens.map((token) => {
+          const midi = midiFromNote(token.note);
+          if (midi === null) throw new LanguageError([{ line, message: `invalid note '${token.note}'` }]);
+          return midiToFrequency(midi);
+        });
+        inlineFavor = noteTokens.flatMap((token) => token.favor ? [token.favor] : []);
+      }
+      const selection = parseSelectionMode(direct.modifiers, line, 'tune notes');
+      selectionMode = selection.mode;
+      selectionAmount = selection.amount;
+      favor = mergeFavor(inlineFavor, selection.favor);
+      validateFavorForMode(favor, selectionMode, line, 'tune notes');
+    } else {
+      if (source) {
+        if (source.kind !== 'freq') throw new LanguageError([{ line, message: `source '${direct.base}' is ${source.kind}, expected FREQS source` }]);
+        values = source.values;
+      } else {
+        values = parseList(direct.base, line, 'tune freqs').map((item) => numberValue(item, line, 'tune freq'));
+      }
+      if (values.some((item) => item <= 0)) throw new LanguageError([{ line, message: 'tune frequencies must be greater than 0' }]);
+      const selection = parseSelectionMode(direct.modifiers, line, 'tune freqs');
+      selectionMode = selection.mode;
+      selectionAmount = selection.amount;
+      favor = selection.favor;
+    }
+    if (values.length === 1 && direct.modifiers.length > 0) throw new LanguageError([{ line, message: 'tune pitch selection modifiers require more than one value' }]);
+  }
+
+  if (values.length === 0) throw new LanguageError([{ line, message: 'tune pitch requires at least one pitch value' }]);
+  const timing = split.every ? parseEverySpec(split.every, line, sourceDefinitions) : null;
+  const payload = {
+    mode: 'absolute', values, selectionMode, selectionAmount, favor,
+    timing: timing ? { amount: timing.amount, unit: timing.unit, chance: timing.chance, drift: timing.drift, loose: timing.loose, clockSource: timing.clockSource } : null,
+  };
+  const prefix = timing?.clockPrelude ? `${timing.clockPrelude} ` : '';
+  return `${prefix}__compositetune(${JSON.stringify(ownerName)},${JSON.stringify(node)},${JSON.stringify(JSON.stringify(payload))});`;
+}
+
 function compileCompositeOutputDirective(ownerName: string, value: string, line: number): string {
   const items = value.split(',').map((item) => item.trim()).filter(Boolean);
   if (items.length === 0) throw new LanguageError([{ line, message: 'output expects one or more node names separated by commas' }]);
@@ -1044,32 +1166,27 @@ function compileVoiceProperty(
   } else if (key === 'note' || key === 'freq' || key === 'scale') {
     throw new LanguageError([{ line, message: `\${property.toUpperCase()} is no longer a VOICE property; use PITCH SCALE ..., PITCH NOTES ..., or PITCH FREQS ...` }]);
   }
+  if (key === 'tune') {
+    if (voice.soundId !== 'composite') throw new LanguageError([{ line, message: 'tune is available only for sound composite' }]);
+    return compileCompositeTuneDirective(voice.name, value, line, sourceDefinitions);
+  }
+
   if (key === 'mix') {
     if (voice.soundId !== 'composite') throw new LanguageError([{ line, message: 'mix is available only for sound composite' }]);
     const match = value.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*\[(.*)\]$/);
-    if (!match) throw new LanguageError([{ line, message: 'mix expects <name> [ <source> at <level> [with octave <n>, detune <cents>]; ... ]' }]);
+    if (!match) throw new LanguageError([{ line, message: 'mix expects <name> [ <source> at <level>; ... ]' }]);
     const mixName = match[1];
     const entries = match[2].split(';').map((item) => item.trim()).filter(Boolean);
     if (entries.length === 0) throw new LanguageError([{ line, message: `mix '${mixName}' requires at least one input` }]);
     const inputs = entries.map((entry) => {
-      const input = entry.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\s+at\s+(-?\d+(?:\.\d+)?))?(?:\s+with\s+(.+))?$/i);
-      if (!input) throw new LanguageError([{ line, message: `invalid mix input '${entry}'` }]);
+      const input = entry.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\s+at\s+(-?\d+(?:\.\d+)?))?$/i);
+      if (!input) {
+        if (/\s+with\s+/i.test(entry)) throw new LanguageError([{ line, message: `mix input '${entry}' no longer accepts tuning modifiers; use tune <node> with octave/detune/ratio` }]);
+        throw new LanguageError([{ line, message: `invalid mix input '${entry}'` }]);
+      }
       const level = input[2] === undefined ? 100 : Number(input[2]);
       if (level < 0 || level > 100) throw new LanguageError([{ line, message: `mix '${mixName}' input level expects 0..100` }]);
-      let octave = 0;
-      let detune = 0;
-      for (const modifier of (input[3] ?? '').split(',').map((part) => part.trim()).filter(Boolean)) {
-        const parsed = modifier.match(/^(octave|detune)\s+(-?\d+(?:\.\d+)?)$/i);
-        if (!parsed) throw new LanguageError([{ line, message: `invalid mix modifier '${modifier}'` }]);
-        if (parsed[1].toLowerCase() === 'octave') {
-          octave = Number(parsed[2]);
-          if (!Number.isInteger(octave) || octave < -8 || octave > 8) throw new LanguageError([{ line, message: `mix '${mixName}' octave expects an integer from -8 to 8` }]);
-        } else {
-          detune = Number(parsed[2]);
-          if (detune < -1200 || detune > 1200) throw new LanguageError([{ line, message: `mix '${mixName}' detune expects -1200..1200 cents` }]);
-        }
-      }
-      return { source: input[1], level, octave, detune };
+      return { source: input[1], level, octave: 0, detune: 0 };
     });
     return `__compositemix(${JSON.stringify(voice.name)},${JSON.stringify(mixName)},${JSON.stringify(JSON.stringify(inputs))});`;
   }
@@ -2256,7 +2373,7 @@ function modSourceKey(ownerVoice: string | null, name: string): string {
   return ownerVoice ? `${ownerVoice}:${name}` : name;
 }
 
-function compileModProperty(mod: ModState, property: string, rawValue: string, line: number): string {
+function compileModProperty(mod: ModState, property: string, rawValue: string, line: number, sourceDefinitions: Map<string, SourceDefinition>): string {
   const key = property.toLowerCase();
   const value = rawValue.trim();
 
@@ -2270,6 +2387,7 @@ function compileModProperty(mod: ModState, property: string, rawValue: string, l
   }
 
   if (mod.modelId === 'composite') {
+    if (key === 'tune') return compileCompositeTuneDirective(mod.internalName, value, line, sourceDefinitions);
     if (key === 'mix') throw new LanguageError([{ line, message: 'mix is not available for MOD composite; each output must remain one signal' }]);
     if (key === 'fm' || key === 'pm' || key === 'am' || key === 'ring' || key === 'sync') {
       return compileCompositeEdgeDirective(mod.internalName, key, value, line);
@@ -3180,12 +3298,12 @@ function parseBlockPropertyStatement(
   const live = Boolean(match[1]);
   const property = match[2];
   const value = match[3].trim();
-  if (live && !(label === 'VOICE' && /^pitch$/i.test(property))) {
+  if (live && !(label === 'VOICE' && (/^pitch$/i.test(property) || /^(tune|mix|output)$/i.test(property)))) {
     const literal = value.match(/^(\d+(?:\.\d+)?)(?=\s|$)/);
-    if (!literal) throw new LanguageError([{ line, message: 'LIVE currently requires a literal 0..100 value, except LIVE PITCH' }]);
+    if (!literal) throw new LanguageError([{ line, message: 'LIVE currently requires a literal 0..100 value, except LIVE PITCH and composite TUNE/MIX/OUTPUT' }]);
     const amount = Number(literal[1]);
     if (!Number.isFinite(amount) || amount < 0 || amount > 100) {
-      throw new LanguageError([{ line, message: 'LIVE currently requires a literal 0..100 value, except LIVE PITCH' }]);
+      throw new LanguageError([{ line, message: 'LIVE currently requires a literal 0..100 value, except LIVE PITCH and composite TUNE/MIX/OUTPUT' }]);
     }
   }
   return { property, value, live };
@@ -3195,6 +3313,7 @@ function validateLiveVoiceProperty(voice: VoiceState, property: string, line: nu
   const key = property.toLowerCase();
   const soundParameter = voice.soundId ? SOUND_ENGINE_REGISTRY[voice.soundId]?.parameters[key] : undefined;
   if (soundParameter || key === 'level' || key === 'bow' || key === 'blow' || key === 'strike' || key === 'pitch') return;
+  if (voice.soundId === 'composite' && (key === 'tune' || key === 'mix' || key === 'output')) return;
   throw new LanguageError([{ line, message: `LIVE is available only for 0..100 VOICE parameters or PITCH; '${property}' is not eligible` }]);
 }
 
@@ -3272,11 +3391,11 @@ export function compileLanguageSource(source: string): string {
   }
 
   // Multiline composite MIX buses keep one source per physical line so commas
-  // can remain available for per-source modifiers (for example octave/detune).
+  // remain easy to edit and can host one LIVE level slider per source.
   for (let index = 0; index < lines.length; index += 1) {
     const raw = stripComment(lines[index]);
     const trimmed = raw.trim();
-    const declaration = trimmed.match(/^mix\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*$/i);
+    const declaration = trimmed.match(/^(live\s+)?mix\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*$/i);
     if (!declaration) continue;
     const indentation = raw.length - raw.trimStart().length;
     const entries: string[] = [];
@@ -3296,7 +3415,7 @@ export function compileLanguageSource(source: string): string {
     if (!closed || entries.length === 0) {
       throw new LanguageError([{ line: index + 1, message: 'mix <name> [ ... ] requires one or more inputs and a closing ]' }]);
     }
-    lines[index] = `${' '.repeat(indentation)}mix ${declaration[1]} [${entries.join('; ')}]`;
+    lines[index] = `${' '.repeat(indentation)}${declaration[1] ? 'live ' : ''}mix ${declaration[2]} [${entries.join('; ')}]`;
   }
 
   const output = Array(lines.length).fill('') as string[];
@@ -3526,20 +3645,26 @@ export function compileLanguageSource(source: string): string {
         const value = propertyMatch[3].trim();
         if (live) {
           const key = property.toLowerCase();
-          if (key === 'rate' || key === 'length' || key === 'model') {
-            throw new LanguageError([{ line: lineNumber, message: `LIVE is not available for MOD ${property.toUpperCase()}` }]);
-          }
-          if (!['spread', 'bias', 'steps', 'deja', 'diversity'].includes(key)) {
-            throw new LanguageError([{ line: lineNumber, message: `LIVE is not available for MOD property '${property}'` }]);
-          }
-          const literal = value.match(/^(\d+(?:\.\d+)?)(?=\s|$)/);
-          if (!literal) throw new LanguageError([{ line: lineNumber, message: 'LIVE MOD currently requires a literal 0..100 value' }]);
-          const amount = Number(literal[1]);
-          if (!Number.isFinite(amount) || amount < 0 || amount > 100) {
-            throw new LanguageError([{ line: lineNumber, message: 'LIVE MOD currently requires a literal 0..100 value' }]);
+          if (currentMod.modelId === 'composite' && (key === 'tune' || key === 'output')) {
+            if (key === 'tune' && /\bpitch\b/i.test(value)) {
+              throw new LanguageError([{ line: lineNumber, message: 'LIVE TUNE exposes sliders only for WITH octave/detune/ratio; TUNE PITCH remains a structured pitch expression' }]);
+            }
+          } else {
+            if (key === 'rate' || key === 'length' || key === 'model') {
+              throw new LanguageError([{ line: lineNumber, message: `LIVE is not available for MOD ${property.toUpperCase()}` }]);
+            }
+            if (!['spread', 'bias', 'steps', 'deja', 'diversity'].includes(key)) {
+              throw new LanguageError([{ line: lineNumber, message: `LIVE is not available for MOD property '${property}'` }]);
+            }
+            const literal = value.match(/^(\d+(?:\.\d+)?)(?=\s|$)/);
+            if (!literal) throw new LanguageError([{ line: lineNumber, message: 'LIVE MOD currently requires a literal 0..100 value' }]);
+            const amount = Number(literal[1]);
+            if (!Number.isFinite(amount) || amount < 0 || amount > 100) {
+              throw new LanguageError([{ line: lineNumber, message: 'LIVE MOD currently requires a literal 0..100 value' }]);
+            }
           }
         }
-        output[index] = compileModProperty(currentMod, property, value, lineNumber);
+        output[index] = compileModProperty(currentMod, property, value, lineNumber, currentMod.ownerVoice ? scopedDefinitions(`voice:${currentMod.ownerVoice}`) : sourceDefinitions);
         const scopeKey = modSourceKey(currentMod.ownerVoice, currentMod.name);
         const source = modSources.get(scopeKey);
         if (source) {
@@ -3816,7 +3941,12 @@ export function compileLanguageSource(source: string): string {
 
       if (indentation > 0 && currentVoice) {
         const statement = parseBlockPropertyStatement(trimmed, lineNumber, 'VOICE');
-        if (statement.live) validateLiveVoiceProperty(currentVoice, statement.property, lineNumber);
+        if (statement.live) {
+          validateLiveVoiceProperty(currentVoice, statement.property, lineNumber);
+          if (currentVoice.soundId === 'composite' && statement.property.toLowerCase() === 'tune' && /\bpitch\b/i.test(statement.value)) {
+            throw new LanguageError([{ line: lineNumber, message: 'LIVE TUNE exposes sliders only for WITH octave/detune/ratio; TUNE PITCH remains a structured pitch expression' }]);
+          }
+        }
         output[index] = compileVoiceProperty(currentVoice, statement.property, statement.value, lineNumber, scopedKinds(`voice:${currentVoice.name}`), scopedDefinitions(`voice:${currentVoice.name}`), modSources, statement.live);
         if (statement.property.toLowerCase() === 'sound') {
           currentVoice.hasSound = true;

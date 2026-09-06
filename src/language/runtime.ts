@@ -331,6 +331,20 @@ interface LanguageSequenceDefinition {
   favor: LanguageSequenceFavorEntry[];
 }
 
+interface LanguageCompositeTuneDefinition {
+  owner: string;
+  node: string;
+  mode: 'relative' | 'absolute';
+  octave: number;
+  detune: number;
+  ratio: number;
+  values: number[];
+  selectionMode: 'order' | 'random' | 'walk' | 'shuffle' | 'reverse' | 'pendulum';
+  selectionAmount: number;
+  favor: LanguageSequenceFavorEntry[];
+  timing: LanguageCycleDefinition | null;
+}
+
 interface LanguageTuringDefinition {
   model: 'turing';
   length: number;
@@ -674,6 +688,7 @@ export class SonusRuntime {
   private registerState = new Map<string, number[]>();
   private registerReaderState = new Map<string, { seq: string; cell: number; direction: number }>();
   private voiceSequenceState = new Map<string, { cursor: number; walkCursor: number; direction: number; shuffleCursor: number }>();
+  private compositeTuneSequenceState = new Map<string, { cursor: number; walkCursor: number; direction: number; shuffleCursor: number }>();
   private whenEventState = new Map<string, number>();
   private drumHumanizeState = new Map<string, number>();
   private liveDisabledDrumkits = new Set<string>();
@@ -978,6 +993,7 @@ export class SonusRuntime {
     const languageCompositeMixes = new Map<string, Array<{ name: string; inputs: Array<{ source: string; level: number; octave: number; detune: number }> }>>();
     const languageCompositeOutputs = new Map<string, Array<{ name: string; level: number }>>();
     const languageCompositePitchVoices = new Set<string>();
+    const languageCompositeTunes = new Map<string, LanguageCompositeTuneDefinition>();
     const languageDrumkits = new Map<string, { kit: string; disabled: boolean; viewSteps: number }>();
     const languageDrumSlots: LanguageDrumSlotDefinition[] = [];
     const languageModSets: LanguageModSetDirective[] = [];
@@ -985,6 +1001,14 @@ export class SonusRuntime {
     for (const { source: line, line: lineNumber } of lines) {
       const compositePitch = parseLanguageCompositePitch(line);
       if (compositePitch) { languageCompositePitchVoices.add(compositePitch.name); continue; }
+
+      const compositeTune = parseLanguageCompositeTune(line);
+      if (compositeTune) {
+        const key = `${compositeTune.owner}:${compositeTune.node}`;
+        if (languageCompositeTunes.has(key)) throw new SonusEvaluationError([{ line: lineNumber, message: `composite '${compositeTune.owner}' tunes '${compositeTune.node}' more than once` }]);
+        languageCompositeTunes.set(key, compositeTune);
+        continue;
+      }
 
       const compositeEdge = parseLanguageCompositeEdge(line);
       if (compositeEdge) {
@@ -1693,7 +1717,7 @@ export class SonusRuntime {
     // source order. All module declarations already exist, so references between
     // modules are still independent from declaration order.
     for (const { source: line, line: lineNumber } of lines) {
-      if (parseLanguageCompositePitch(line) || parseLanguageCompositeEdge(line) || parseLanguageCompositeMix(line) || parseLanguageCompositeOutput(line) || parseLanguageDrumkitDirective(line) || parseLanguageDrumkitMetaDirective(line) || parseLanguageDrumSlotDirective(line) || parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageSeqModel(line) || parseLanguageSeqSize(line) || parseLanguageLifeDensity(line) || parseLanguageLifeReader(line) || parseLanguageLifeEvolve(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageEnvelopeDirective(line, lineNumber) || parseLanguageFxMetadata(line) || parseLanguageDelayTime(line) || parseLanguageDelayParam(line, lineNumber) || parseLanguageDelayParamDefault(line, lineNumber) || parseLanguageDelayParamCycle(line, lineNumber) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
+      if (parseLanguageCompositePitch(line) || parseLanguageCompositeTune(line) || parseLanguageCompositeEdge(line) || parseLanguageCompositeMix(line) || parseLanguageCompositeOutput(line) || parseLanguageDrumkitDirective(line) || parseLanguageDrumkitMetaDirective(line) || parseLanguageDrumSlotDirective(line) || parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageSeqModel(line) || parseLanguageSeqSize(line) || parseLanguageLifeDensity(line) || parseLanguageLifeReader(line) || parseLanguageLifeEvolve(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageEnvelopeDirective(line, lineNumber) || parseLanguageFxMetadata(line) || parseLanguageDelayTime(line) || parseLanguageDelayParam(line, lineNumber) || parseLanguageDelayParamDefault(line, lineNumber) || parseLanguageDelayParamCycle(line, lineNumber) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
 
       const gainDeclaration = parseGainDeclaration(line);
       if (gainDeclaration) {
@@ -2974,10 +2998,12 @@ export class SonusRuntime {
       const duplicateMix = mixes.find((mix, index) => mixes.findIndex((candidate) => candidate.name === mix.name) !== index);
       if (duplicateMix) throw new SonusEvaluationError([{ line: 0, message: `composite '${name}' defines mix '${duplicateMix.name}' more than once` }]);
       const mixNames = new Set(mixes.map((mix) => mix.name));
+      const tunedNodes = [...languageCompositeTunes.values()].filter((tune) => tune.owner === name).map((tune) => tune.node);
       const operatorNames = [...new Set([
         ...edges.flatMap((edge) => [edge.source, edge.target]),
         ...mixes.flatMap((mix) => mix.inputs.map((input) => input.source)),
         ...declaredOutputs.filter((output) => !mixNames.has(output.name)).map((output) => output.name),
+        ...tunedNodes,
       ])];
       for (const mix of mixes) {
         if (operatorNames.includes(mix.name)) throw new SonusEvaluationError([{ line: 0, message: `composite '${name}' mix '${mix.name}' collides with an operator name` }]);
@@ -3018,7 +3044,14 @@ export class SonusRuntime {
         }
       }
       if (edges.length === 0 && mixes.length === 0) throw new SonusEvaluationError([{ line: 0, message: `composite '${name}' requires at least one graph relation${domain === 'voice' ? ' or named mix' : ''}` }]);
-      return { name, domain, enabled, level, pitchFrequency, dynamicPitch, operators, edges, mixes, outputs };
+      const tunes: CompositeDefinition['tunes'] = [];
+      for (const operatorName of operatorNames) {
+        const tune = languageCompositeTunes.get(`${name}:${operatorName}`);
+        if (!tune) continue;
+        if (tune.mode === 'absolute') tunes.push({ node: operatorName, mode: 'absolute', frequency: tune.values[0] ?? 440 });
+        else tunes.push({ node: operatorName, mode: 'relative', octave: tune.octave, detune: tune.detune, ratio: tune.ratio });
+      }
+      return { name, domain, enabled, level, pitchFrequency, dynamicPitch, operators, edges, mixes, tunes, outputs };
     };
 
     const program: AudioProgram = {
@@ -4392,6 +4425,72 @@ export class SonusRuntime {
       });
     }
 
+    for (const tune of languageCompositeTunes.values()) {
+      if (tune.mode !== 'absolute' || !tune.timing || tune.values.length <= 1) continue;
+      const key = `${tune.owner}:${tune.node}`;
+      const previous = hotReload ? this.compositeTuneSequenceState.get(key) : undefined;
+      let cursor = previous?.cursor ?? 0;
+      let walkCursor = previous?.walkCursor ?? 0;
+      let direction = previous?.direction ?? 1;
+      let shuffleOrder: number[] = [];
+      let shuffleCursor = previous?.shuffleCursor ?? 0;
+      const values = tune.values;
+
+      const reshuffle = (): void => {
+        shuffleOrder = Array.from({ length: values.length }, (_, index) => index);
+        for (let index = shuffleOrder.length - 1; index > 0; index -= 1) {
+          const swap = Math.floor(random() * (index + 1));
+          [shuffleOrder[index], shuffleOrder[swap]] = [shuffleOrder[swap], shuffleOrder[index]];
+        }
+        shuffleCursor = 0;
+      };
+
+      const nextFrequency = (): number => {
+        let next: number;
+        if (tune.selectionMode === 'random') {
+          next = values[weightedSequenceIndex(values, tune.favor, 'frequency')];
+        } else if (tune.selectionMode === 'walk') {
+          const span = Math.max(1, Math.round(tune.selectionAmount || 1));
+          const stepDirection = random() < 0.5 ? -1 : 1;
+          const step = 1 + Math.floor(random() * span);
+          walkCursor += stepDirection * step;
+          while (walkCursor < 0 || walkCursor >= values.length) {
+            if (walkCursor < 0) walkCursor = -walkCursor;
+            if (walkCursor >= values.length) walkCursor = (values.length - 1) - (walkCursor - (values.length - 1));
+          }
+          next = values[walkCursor];
+        } else if (tune.selectionMode === 'shuffle') {
+          if (shuffleOrder.length !== values.length || shuffleCursor >= shuffleOrder.length) reshuffle();
+          next = values[shuffleOrder[shuffleCursor++]];
+        } else if (tune.selectionMode === 'reverse') {
+          cursor = (cursor - 1 + values.length) % values.length;
+          next = values[cursor];
+        } else if (tune.selectionMode === 'pendulum') {
+          next = values[cursor];
+          cursor += direction;
+          if (cursor >= values.length) { cursor = Math.max(0, values.length - 2); direction = -1; }
+          else if (cursor < 0) { cursor = Math.min(values.length - 1, 1); direction = 1; }
+        } else {
+          next = values[cursor];
+          cursor = (cursor + 1) % values.length;
+        }
+        this.compositeTuneSequenceState.set(key, { cursor, walkCursor, direction, shuffleCursor });
+        return next;
+      };
+
+      const fire = (): void => {
+        const timing = tune.timing!;
+        if (timing.chance < 100 && random() * 100 >= timing.chance) return;
+        this.audio.setCompositeOperatorTune(tune.owner, tune.node, { mode: 'absolute', frequency: nextFrequency() });
+      };
+      const timing = tune.timing;
+      if (timing.unit === 'beat') this.scheduler.addBeatJob(`composite-tune:${key}`, timing.amount, fire, timing.loose, timing.clockSource);
+      else {
+        const baseMs = timing.unit === 'sec' ? timing.amount * 1000 : timing.amount;
+        this.scheduler.addWallJob(`composite-tune:${key}`, baseMs, fire);
+      }
+    }
+
     for (const [name, timing] of languageDriveEvery) {
       const voice = voices.get(name);
       if (!voice || voice.engine !== 'matter') continue;
@@ -4682,6 +4781,31 @@ function parseLanguageRegisterWrite(line: string): { name: string; timing: Langu
 function parseLanguageCompositePitch(line: string): { name: string } | null {
   const match = line.match(/^__compositepitch\("([A-Za-z_]\w*)"\)$/);
   return match ? { name: match[1] } : null;
+}
+
+function parseLanguageCompositeTune(line: string): LanguageCompositeTuneDefinition | null {
+  const match = line.match(/^__compositetune\("([A-Za-z_]\w*)","([A-Za-z_]\w*)","((?:[^"\\]|\\.)*)"\)$/);
+  if (!match) return null;
+  try {
+    const payload = JSON.parse(JSON.parse(`"${match[3]}"`));
+    if (payload?.mode === 'relative') {
+      return {
+        owner: match[1], node: match[2], mode: 'relative', octave: Number(payload.octave ?? 0), detune: Number(payload.detune ?? 0), ratio: Number(payload.ratio ?? 1),
+        values: [], selectionMode: 'order', selectionAmount: 0, favor: [], timing: null,
+      };
+    }
+    if (payload?.mode === 'absolute' && Array.isArray(payload.values) && payload.values.length > 0) {
+      const timing = payload.timing ? {
+        amount: Number(payload.timing.amount), unit: payload.timing.unit as 'ms'|'sec'|'beat', chance: Number(payload.timing.chance ?? 100),
+        drift: Boolean(payload.timing.drift), loose: Boolean(payload.timing.loose), clockSource: String(payload.timing.clockSource ?? 'Clock'),
+      } : null;
+      return {
+        owner: match[1], node: match[2], mode: 'absolute', octave: 0, detune: 0, ratio: 1,
+        values: payload.values.map(Number), selectionMode: payload.selectionMode ?? 'order', selectionAmount: Number(payload.selectionAmount ?? 0), favor: Array.isArray(payload.favor) ? payload.favor : [], timing,
+      };
+    }
+  } catch { return null; }
+  return null;
 }
 
 function parseLanguageCompositeEdge(line: string): { name: string; relation: 'fm'|'pm'|'am'|'ring'|'sync'; source: string; target: string; params: Record<string, number | boolean> } | null {

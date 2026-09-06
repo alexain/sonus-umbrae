@@ -15,7 +15,7 @@ Sonus Umbrae is not built around one synthesizer family or one upstream hardware
 - Stereo-aware declarative audio routing with serial and parallel signal paths, named ports, per-route levels, and automatic routing of unrouted audio sources to the main output.
 - AudioWorklet processing with C/C++ DSP compiled to independent WebAssembly modules.
 - Synthesized `DRUMKIT` instruments with reusable/customizable kits, Euclidean triggering, per-voice controls and performance humanization.
-- DaisySP basic oscillator VOICE backends plus a shared `composite` graph core used by `VOICE ... sound composite` and `MOD ... model composite`. Composite graphs own private node instances, inherit engine/model parameters live, support audio-rate FM/PM/AM/ring/sync, and apply domain-specific output policies; VOICE composites additionally expose named internal mixer buses and a mixed master output.
+- DaisySP basic oscillator VOICE backends plus a shared `composite` graph core used by `VOICE ... sound composite` and `MOD ... model composite`. Composite graphs own private node instances, inherit engine/model parameters live, support audio-rate FM/PM/AM/ring/sync, per-instance `tune` (relative or independent pitch), multi-parameter LIVE controls, and domain-specific output policies; VOICE composites additionally expose named internal mixer buses and a mixed master output.
 - Macro synthesis engines derived from permissively licensed Mutable Instruments Plaits DSP.
 - `matter` physical modelling derived from Mutable Instruments Elements DSP.
 - `resonator.*` models derived from Mutable Instruments Rings DSP, including internal polyphony and stereo MAIN/AUX behaviour.

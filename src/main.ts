@@ -2639,6 +2639,11 @@ type LiveControlSource = {
   targetKind: 'voice' | 'fx' | 'filter' | 'mod';
   targetName: string;
   updatePolicy: ParameterUpdatePolicy;
+  min?: number;
+  max?: number;
+  step?: number;
+  label?: string;
+  lineEndSlot?: number;
 };
 
 type LiveBlockScope = {
@@ -2738,6 +2743,30 @@ function scanLiveControls(source: string): LiveControlSource[] {
   const lines = source.split('\n');
   const scopes: LiveBlockScope[] = [];
   let offset = 0;
+  let activeLiveMix: { name: string; indentation: number; scope: LiveBlockScope } | null = null;
+
+  const activeScope = (): LiveBlockScope | undefined => [...scopes].reverse().find((candidate) =>
+    candidate.kind === 'voice' || candidate.kind === 'fx' || candidate.kind === 'filter' || candidate.kind === 'mod'
+  );
+  const addCompositeControl = (
+    lineIndex: number, code: string, lineOffset: number, localStart: number, literal: string,
+    scope: LiveBlockScope, property: string, label: string, min: number, max: number, step: number, slot = 0,
+  ): void => {
+    const value = Number(literal);
+    if (!Number.isFinite(value)) return;
+    controls.push({
+      line: lineIndex + 1,
+      start: lineOffset + localStart,
+      end: lineOffset + localStart + literal.length,
+      value,
+      property,
+      prefixColumns: code.length,
+      targetKind: scope.kind as 'voice' | 'fx' | 'filter' | 'mod',
+      targetName: scope.targetName,
+      updatePolicy: 'continuous',
+      min, max, step, label, lineEndSlot: slot,
+    });
+  };
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
@@ -2745,6 +2774,19 @@ function scanLiveControls(source: string): LiveControlSource[] {
     const code = commentAt < 0 ? line : line.slice(0, commentAt);
     const trimmed = code.trim();
     const indentation = code.length - code.trimStart().length;
+
+    if (activeLiveMix) {
+      if (trimmed === ']' && indentation <= activeLiveMix.indentation) activeLiveMix = null;
+      else if (trimmed && indentation > activeLiveMix.indentation) {
+        const input = code.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s+at\s+(-?\d+(?:\.\d+)?)/i);
+        if (input) {
+          const literal = input[2];
+          const localStart = input.index! + input[0].lastIndexOf(literal);
+          addCompositeControl(index, code, offset, localStart, literal, activeLiveMix.scope,
+            `mix:${activeLiveMix.name}:${input[1]}`, `${input[1]} at`, 0, 100, 1);
+        }
+      } else if (trimmed && indentation <= activeLiveMix.indentation) activeLiveMix = null;
+    }
 
     if (trimmed) {
       while (scopes.length > 0 && indentation <= scopes[scopes.length - 1].indentation) scopes.pop();
@@ -2759,17 +2801,74 @@ function scanLiveControls(source: string): LiveControlSource[] {
           const ownerVoice = [...scopes].reverse().find((scope) => scope.kind === 'voice')?.name;
           const targetName = ownerVoice ? `__filter_${ownerVoice}_${name}` : name;
           scopes.push({ kind: 'filter', name, targetName, indentation, ownerVoice });
-        } else if (keyword === 'mod') {
-          scopes.push({ kind: 'mod', name, targetName: name, indentation });
-        } else scopes.push({ kind: 'other', name, targetName: name, indentation });
+        } else if (keyword === 'mod') scopes.push({ kind: 'mod', name, targetName: name, indentation });
+        else scopes.push({ kind: 'other', name, targetName: name, indentation });
       }
+    }
+
+    const scope = activeScope();
+    const mixStart = code.match(/^\s*LIVE\s+mix\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*$/i);
+    if (mixStart && scope && (scope.kind === 'voice' || scope.kind === 'mod')) {
+      activeLiveMix = { name: mixStart[1], indentation, scope };
+      offset += line.length + 1;
+      continue;
+    }
+
+    const tune = code.match(/^\s*LIVE\s+tune\s+([A-Za-z_][A-Za-z0-9_]*)\s+with\s+(.+)$/i);
+    if (tune && scope && (scope.kind === 'voice' || scope.kind === 'mod')) {
+      const modifierText = tune[2];
+      const modifierBase = code.indexOf(modifierText, tune.index ?? 0);
+      const regex = /(octave|detune|ratio)\s+(-?\d+(?:\.\d+)?)/gi;
+      let match: RegExpExecArray | null;
+      let slot = 0;
+      while ((match = regex.exec(modifierText))) {
+        const key = match[1].toLowerCase();
+        const literal = match[2];
+        const localStart = modifierBase + match.index + match[0].lastIndexOf(literal);
+        const range = key === 'octave' ? [-8, 8, 1] : key === 'detune' ? [-1200, 1200, 1] : [0.125, 32, 0.01];
+        addCompositeControl(index, code, offset, localStart, literal, scope,
+          `tune:${tune[1]}:${key}`, key, range[0], range[1], range[2], slot++);
+      }
+      offset += line.length + 1;
+      continue;
+    }
+
+    const output = code.match(/^\s*LIVE\s+output\s+(.+)$/i);
+    if (output && scope && (scope.kind === 'voice' || scope.kind === 'mod')) {
+      const body = output[1];
+      const bodyBase = code.indexOf(body, output.index ?? 0);
+      const regex = /([A-Za-z_][A-Za-z0-9_]*)\s+at\s+(-?\d+(?:\.\d+)?)/gi;
+      let match: RegExpExecArray | null;
+      let slot = 0;
+      while ((match = regex.exec(body))) {
+        const literal = match[2];
+        const localStart = bodyBase + match.index + match[0].lastIndexOf(literal);
+        addCompositeControl(index, code, offset, localStart, literal, scope,
+          `output:${match[1]}`, `${match[1]} at`, 0, 100, 1, slot++);
+      }
+      offset += line.length + 1;
+      continue;
+    }
+
+    const inlineMix = code.match(/^\s*LIVE\s+mix\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[(.*)\]\s*$/i);
+    if (inlineMix && scope && scope.kind === 'voice') {
+      const body = inlineMix[2];
+      const bodyBase = code.indexOf(body, inlineMix.index ?? 0);
+      const regex = /([A-Za-z_][A-Za-z0-9_]*)\s+at\s+(-?\d+(?:\.\d+)?)/gi;
+      let match: RegExpExecArray | null;
+      let slot = 0;
+      while ((match = regex.exec(body))) {
+        const literal = match[2];
+        const localStart = bodyBase + match.index + match[0].lastIndexOf(literal);
+        addCompositeControl(index, code, offset, localStart, literal, scope,
+          `mix:${inlineMix[1]}:${match[1]}`, `${match[1]} at`, 0, 100, 1, slot++);
+      }
+      offset += line.length + 1;
+      continue;
     }
 
     const match = code.match(/^(\s*)LIVE\s+([A-Za-z_][A-Za-z0-9_]*)\s+(\d+(?:\.\d+)?)(?=\s|$)/i);
     if (match) {
-      const scope = [...scopes].reverse().find((candidate) =>
-        candidate.kind === 'voice' || candidate.kind === 'fx' || candidate.kind === 'filter' || candidate.kind === 'mod'
-      );
       const literal = match[3];
       const localStart = match.index! + match[0].lastIndexOf(literal);
       const value = Number(literal);
@@ -2783,10 +2882,8 @@ function scanLiveControls(source: string): LiveControlSource[] {
           prefixColumns: localStart + literal.length,
           targetKind: scope.kind as 'voice' | 'fx' | 'filter' | 'mod',
           targetName: scope.targetName,
-          updatePolicy: parameterUpdatePolicy(
-            scope.kind as 'voice' | 'fx' | 'filter' | 'mod',
-            match[2],
-          ),
+          updatePolicy: parameterUpdatePolicy(scope.kind as 'voice' | 'fx' | 'filter' | 'mod', match[2]),
+          min: 0, max: 100, step: 1,
         });
       }
     }
@@ -2799,6 +2896,15 @@ function applyLiveControlRuntime(kind: string, name: string, property: string, v
   if (!codeRunning) return;
   const key = property.toLowerCase();
   try {
+    const tune = property.match(/^tune:([A-Za-z_][A-Za-z0-9_]*):(octave|detune|ratio)$/i);
+    if (tune) {
+      audioEngine.setCompositeOperatorTune(name, tune[1], { mode: 'relative', [tune[2].toLowerCase()]: value });
+      return;
+    }
+    const mix = property.match(/^mix:([A-Za-z_][A-Za-z0-9_]*):([A-Za-z_][A-Za-z0-9_]*)$/i);
+    if (mix) { audioEngine.setCompositeMixLevel(name, mix[1], mix[2], value); return; }
+    const output = property.match(/^output:([A-Za-z_][A-Za-z0-9_]*)$/i);
+    if (output) { audioEngine.setCompositeOutputLevel(name, output[1], value); return; }
     if (kind === 'filter') {
       if (key === 'cutoff') audioEngine.setFilterCutoff(name, 20 * (1000 ** (value / 100)));
       else if (key === 'resonance') audioEngine.setFilterResonance(name, value);
@@ -2873,7 +2979,8 @@ function replaceLiveControlValue(
   const start = Number(control.dataset.sourceStart);
   const end = Number(control.dataset.sourceEnd);
   if (!Number.isFinite(start) || !Number.isFinite(end)) return;
-  const replacement = String(Math.round(value));
+  const step = Number(control.dataset.step ?? '1');
+  const replacement = step < 1 ? Number(value).toFixed(Math.max(0, Math.ceil(-Math.log10(step)))).replace(/0+$/, '').replace(/\.$/, '') : String(Math.round(value));
   const selectionStart = editor.selectionStart;
   const selectionEnd = editor.selectionEnd;
   const selectionDirection = editor.selectionDirection ?? 'none';
@@ -2882,6 +2989,13 @@ function replaceLiveControlValue(
   editor.value = `${before}${replacement}${after}`;
   const delta = replacement.length - (end - start);
   control.dataset.sourceEnd = String(end + delta);
+  for (const other of liveControlLayer.querySelectorAll<HTMLElement>('.live-parameter-control')) {
+    if (other === control) continue;
+    const otherStart = Number(other.dataset.sourceStart);
+    const otherEnd = Number(other.dataset.sourceEnd);
+    if (Number.isFinite(otherStart) && otherStart >= end) other.dataset.sourceStart = String(otherStart + delta);
+    if (Number.isFinite(otherEnd) && otherEnd >= end) other.dataset.sourceEnd = String(otherEnd + delta);
+  }
   const shift = (position: number): number => position <= start ? position : position >= end ? position + delta : start + replacement.length;
   editor.setSelectionRange(shift(selectionStart), shift(selectionEnd), selectionDirection);
   const readout = control.querySelector<HTMLElement>('.live-parameter-value');
@@ -2920,17 +3034,18 @@ function renderLiveControls(): void {
     control.dataset.targetName = entry.targetName;
     control.dataset.property = entry.property;
     control.dataset.updatePolicy = entry.updatePolicy;
-    const preferredLeft = context.measureText(prefix).width + 8;
+    const preferredLeft = context.measureText(prefix).width + 8 + (entry.lineEndSlot ?? 0) * 132;
     control.style.left = `${preferredLeft - editor.scrollLeft}px`;
     control.style.top = `${(entry.line - 1) * lineHeight + inlineSpacerBeforePhysicalLine(entry.line) - editor.scrollTop}px`;
 
     const slider = document.createElement('input');
     slider.type = 'range';
-    slider.min = '0';
-    slider.max = '100';
-    slider.step = '1';
+    slider.min = String(entry.min ?? 0);
+    slider.max = String(entry.max ?? 100);
+    slider.step = String(entry.step ?? 1);
+    control.dataset.step = String(entry.step ?? 1);
     slider.value = String(entry.value);
-    slider.setAttribute('aria-label', `Live ${entry.property}`);
+    slider.setAttribute('aria-label', `Live ${entry.label ?? entry.property}`);
     slider.addEventListener('pointerdown', (event) => event.stopPropagation());
     slider.addEventListener('input', () =>
       replaceLiveControlValue(control, Number(slider.value), entry.updatePolicy)
@@ -2941,11 +3056,19 @@ function renderLiveControls(): void {
       commitLiveControlSource();
       renderSyntaxLayer();
       renderLineGutter();
+      renderLiveControls();
     });
+
+    if (entry.label) {
+      const label = document.createElement('span');
+      label.className = 'live-parameter-value';
+      label.textContent = entry.label;
+      control.append(label);
+    }
 
     const readout = document.createElement('span');
     readout.className = 'live-parameter-value';
-    readout.textContent = String(Math.round(entry.value));
+    readout.textContent = (entry.step ?? 1) < 1 ? String(entry.value) : String(Math.round(entry.value));
     control.append(slider, readout);
     liveControlLayer.append(control);
   }

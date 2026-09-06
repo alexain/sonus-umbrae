@@ -318,19 +318,39 @@ fm op1 to op2 with depth 45
 fm op2 to op1 with depth 20
 ```
 
-`mix` is a real named internal audio bus, not a point-to-point modulation relation. It can combine several operators into one signal, with a level and optional local pitch offset per input:
+`tune` controls the pitch of one private graph instance. It has two mutually exclusive forms. Relative tuning follows the containing composite pitch and applies composite-only offsets:
+
+```text
+tune op1 with ratio 1
+tune op2 with octave 1, detune 5
+tune op3 with ratio 1.5, detune -7
+```
+
+`octave` is an integer from `-8..8`, `detune` is measured in cents (`-1200..1200`), and `ratio` is a positive multiplier. If the containing composite has no `pitch`, relative tuning starts from the source object's own pitch. These values belong only to the private composite instance and never modify the standalone source object.
+
+Absolute tuning instead reuses the normal `PITCH` value grammar and becomes independent from the containing composite pitch:
+
+```text
+tune op1 pitch notes [C3]
+tune op2 pitch freqs [220 330 440] every 1/2 beat
+tune op3 pitch scale C minor with range C3 C5 pattern [1 5 9 13]
+```
+
+The `pitch` form accepts `notes`, `freqs`, `scale`, their normal selection modifiers, and the same `every`, Euclidean, and pattern timing used by ordinary pitch sequencing. `tune ... pitch ...` cannot be combined with the relative `with octave/detune/ratio` form.
+
+`mix` is a real named internal audio bus, not a point-to-point modulation relation. It combines several graph signals into one bus and controls only their levels:
 
 ```text
 mix audio1 [
     op1 at 100,
-    op2 at 70 with octave 1, detune 5,
-    op3 at 80 with octave -1, detune -7
+    op2 at 70,
+    op3 at 80
 ]
 
 output audio1
 ```
 
-`at` is `0..100`, `octave` is an integer from `-8..8`, and `detune` is measured in cents (`-1200..1200`). An octave/detune modifier creates a private shifted oscillator tap inside that mix; it never changes the original operator VOICE or any of its external routing.
+`at` is `0..100`. Pitch offsets no longer belong to `mix`; use `tune` so an operator keeps the same tuning everywhere it is used in the graph.
 
 `output` is both the export list and the final audio mixer. Every listed node becomes an individually routable public port, and the same listed signals are mixed into the composite's main `.out` bus. The optional `at` value controls only that node's contribution to the main bus; the named public tap remains unscaled apart from the composite VOICE level.
 
@@ -368,7 +388,7 @@ VOICE mini:
 
 Here the standalone `op1` keeps its own 110 Hz pitch, while the private `mini::op1` follows `mini`'s pitch. Changing the source VOICE engine or an engine-specific parameter such as `width` updates all composite instances derived from that VOICE. Pitch is per-instance and is not propagated from the standalone VOICE when the composite declares its own pitch. If the composite has no `pitch`, each private operator falls back to its source VOICE pitch.
 
-Future amplitude/envelope state follows the same per-instance rule as pitch, so triggering or shaping the standalone VOICE will not alter its copies inside composite voices. `octave` and `detune` remain composite-only mix-input modifiers; they are not properties of the source VOICE.
+Future amplitude/envelope state follows the same per-instance rule as pitch, so triggering or shaping the standalone VOICE will not alter its copies inside composite voices. `tune` modifiers (`octave`, `detune`, `ratio`) are composite-only instance settings; they are not properties of the source VOICE.
 
 
 ### Composite graph domains
@@ -398,7 +418,7 @@ With one declared output, `motion.out` aliases that single modulation signal and
 
 Composite graphs are intentionally typed by the containing domain rather than by node class. The architecture therefore permits future mixed graphs such as VOICE composites containing MOD nodes or MOD composites containing VOICE nodes. The current DSP adapter can clone the DaisySP basic oscillator VOICE engines as private graph instances; adapters for `swell`, `dices`, and other engine/model families are still pending and produce an explicit diagnostic instead of silently sharing their standalone runtime state.
 
-Private graph instances inherit engine/model parameters live from their source definitions, while per-instance runtime state remains independent. For VOICE-derived oscillator nodes this means engine changes such as `sound`/`width` propagate to every composite copy, while pitch, future amp/envelope state, phase, and composite-only octave/detune offsets remain local to each instance.
+Private graph instances inherit engine/model parameters live from their source definitions, while per-instance runtime state remains independent. For VOICE-derived oscillator nodes this means engine changes such as `sound`/`width` propagate to every composite copy, while pitch, future amp/envelope state, phase, and composite-only `tune` settings remain local to each instance.
 
 
 ### Matter physical-modeling voices
@@ -2011,6 +2031,34 @@ VOICE lead:
 ```
 
 `LIVE PITCH NOTES ...` is the canonical performance spelling. The piano is display-only in this version; direct key editing of the source note/list is reserved for a later iteration. Other typed or derived values such as `PITCH FREQS`, `PITCH SCALE`, named sources and envelopes are not yet `LIVE`-editable. The qualifier is UI metadata; it does not introduce a second scheduler or hidden parameter value.
+
+### LIVE composite controls
+
+`live` can expose several scalar controls from the same composite statement. Relative tuning creates one slider per declared modifier:
+
+```text
+live tune op1 with detune -5, ratio 1.5
+```
+
+This produces independent continuous controls for `detune` and `ratio`. `octave` is discrete. The structured absolute form (`tune op1 pitch ...`) is intentionally not slider-backed.
+
+A VOICE composite mixer can expose one continuous level slider for every input:
+
+```text
+live mix oscillators [
+    op1 at 100,
+    op2 at 70,
+    op3 at 80
+]
+```
+
+The final output bus supports the same idea:
+
+```text
+live output op2 at 70, op3 at 100
+```
+
+Changing a slider updates the active composite DSP immediately and rewrites only the corresponding numeric literal in the source.
 
 ## USE directive
 

@@ -23,6 +23,10 @@ export type CompositeMixDefinition = {
 
 export type CompositeOutputDefinition = { name: string; level: number };
 
+export type CompositeTuneDefinition =
+  | { node: string; mode: 'relative'; octave: number; detune: number; ratio: number }
+  | { node: string; mode: 'absolute'; frequency: number };
+
 export type CompositeDefinition = {
   name: string;
   domain: CompositeDomain;
@@ -33,6 +37,7 @@ export type CompositeDefinition = {
   operators: CompositeOperatorDefinition[];
   edges: CompositeEdgeDefinition[];
   mixes: CompositeMixDefinition[];
+  tunes: CompositeTuneDefinition[];
   outputs: CompositeOutputDefinition[];
 };
 

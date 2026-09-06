@@ -2080,6 +2080,33 @@ export class AudioEngine {
     voice.auxGain.gain.setTargetAtTime(gain, context.currentTime, 0.008);
   }
 
+  setCompositeOperatorTune(
+    name: string,
+    node: string,
+    patch: { mode?: 'relative' | 'absolute'; octave?: number; detune?: number; ratio?: number; frequency?: number },
+  ): void {
+    const composite = this.composites.get(name);
+    if (!composite) throw new Error(`unknown composite object: ${name}`);
+    if (!composite.operatorNames.has(node)) throw new Error(`composite '${name}' has no operator '${node}'`);
+    composite.node.port.postMessage({ type: 'tune', node, patch });
+  }
+
+  setCompositeMixLevel(name: string, mix: string, source: string, level: number): void {
+    if (!Number.isFinite(level) || level < 0 || level > 100) throw new RangeError('composite mix level must be 0..100');
+    const composite = this.composites.get(name);
+    if (!composite) throw new Error(`unknown composite object: ${name}`);
+    composite.node.port.postMessage({ type: 'mix-level', mix, source, level });
+  }
+
+  setCompositeOutputLevel(name: string, output: string, level: number): void {
+    if (!Number.isFinite(level) || level < 0 || level > 100) throw new RangeError('composite output level must be 0..100');
+    const composite = this.composites.get(name);
+    if (!composite) throw new Error(`unknown composite object: ${name}`);
+    const item = composite.outputs.find((candidate) => candidate.name === output);
+    if (item) item.level = level;
+    composite.node.port.postMessage({ type: 'output-level', output, level });
+  }
+
   setVoiceParameter(
     name: string,
     parameter: 'freq' | 'model' | 'harmo' | 'timbre' | 'morph' | 'width' | 'geometry' | 'structure' | 'brightness' | 'damping' | 'position' | 'space' | 'bow' | 'bowTimbre' | 'blow' | 'blowTimbre' | 'strike' | 'strikeTimbre',
