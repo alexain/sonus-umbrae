@@ -231,6 +231,19 @@ object is needed:
 MORPH 50 EVERY 2 beats on CLOCK /4
 ```
 
+Anonymous `ON CLOCK /n` or `ON CLOCK *n` clocks can carry local clock feel
+without needing a named declaration:
+
+```text
+PITCH melody EVERY 1 beat ON CLOCK /4, JITTER 40
+PITCH melody EVERY 1 beat ON CLOCK /4, JITTER 25, DRIFTER 10
+```
+
+`JITTER` and `DRIFTER` in this form belong to that anonymous clock only. They
+do not alter the master clock or any named clock. A named `CLOCK` keeps its own
+feel configuration, so inline `JITTER`/`DRIFTER` are accepted only with an
+inline `/n` or `*n` clock rate.
+
 The `EVERY` count is measured in ticks of the selected clock.
 
 The public `beat` unit therefore means one tick of the selected musical clock.
@@ -669,9 +682,21 @@ property value [WITH value modifiers] EVERY timing [ON timing modifiers]
 ```
 
 `WITH` modifies the value or behavior being produced. `EVERY` creates the
-periodic event, and `ON` modifies only its scheduling (`CLOCK`, `CHANCE`,
-`COIN`, `LOOSE`, and Euclidean `ROTATE`). Timing modifiers are not accepted
-after `WITH`.
+periodic event, and `ON` modifies only its scheduling. `CLOCK` selects the
+clock; when the clock is an anonymous `/n` or `*n` rate, `JITTER` and `DRIFTER`
+configure that clock. `CHANCE`, `COIN` and `LOOSE` belong to the event itself,
+while Euclidean `ROTATE` belongs to the Euclidean scheduler. Timing modifiers
+are not accepted after `WITH`.
+
+These can coexist in the same comma-separated `ON` clause even though they
+have different semantics:
+
+```text
+PITCH melody EVERY 1 beat ON CLOCK /4, JITTER 40, DRIFTER 8, CHANCE 70, LOOSE
+```
+
+Here the anonymous `/4` clock owns `JITTER` and `DRIFTER`; the pitch update owns
+`CHANCE` and `LOOSE`.
 
 `EVERY` stays at the end of the property expression.
 
@@ -1734,6 +1759,39 @@ PITCH melody every 1 beat
 ```
 
 rather than `note melody with random ...`.
+
+### Constellation melodic sequencer
+
+`model constellation` is a single-note generative SEQ. It does not own timing: each consumer decides when to request the next note with its normal `every`, `pattern`, or Euclidean timing.
+
+```text
+SEQ melody with view:
+    model constellation
+    pitch notes [C3!80 D3!35 E3!70 G3!100 A3!45]
+    stepwise 70
+    leap 20
+    repeat 10
+    memory 35
+    octave [-1!10 0!100 1!25]
+    phrase 8
+    mutation 15
+
+VOICE lead:
+    sound resonator.string
+    pitch melody every euclidean 5/16
+```
+
+Weights written directly in `pitch notes` are the base probabilities. Unweighted notes default to weight 100. `pitch scale ...` and `pitch freqs [...]` are also accepted and start with equal weights.
+
+`stepwise`, `leap`, and `repeat` bias the next selection relative to the previous note. `memory` favors material that has appeared recently. These values are 0..100 and are biases rather than percentages that must sum to 100.
+
+`octave` is a weighted register distribution. Entries are integer octave offsets with optional `!` weights, for example `[-1!10 0!100 1!30]`. The octave choice is applied after the melodic pitch is selected.
+
+`phrase N` stores an N-event phrase. Once filled, the phrase repeats; `mutation 0..100` controls the chance that each phrase position is regenerated on later passes. `mutation` requires `phrase` to be enabled.
+
+Every consumer has independent constellation memory and phrase state, so two voices can read the same SEQ at different rates without changing each other's melodic trajectory.
+
+The `with view` monitor is intentionally non-numeric. It draws the available pitch/register space as a constellation, highlights the current note, and leaves a fading trail of recent motion. Short local paths make stepwise motion visually obvious; long segments reveal leaps; repeated notes pulse on the same point; stable phrases retrace similar paths while mutation creates deviations.
 
 ### Life note-pool sequencer
 

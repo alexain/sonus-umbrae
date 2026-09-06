@@ -1,6 +1,6 @@
 import './style.css';
 import { AudioEngine, type AudioLatencyMode } from './audio/engine';
-import { SonusEvaluationError, SonusRuntime, type DrumkitViewState, type InlineViewState, type LifeViewState, type ParameterViewState, type TuringViewState, type SchemeConnection, type SchemeModel, type SchemeNode } from './language/runtime';
+import { SonusEvaluationError, SonusRuntime, type DrumkitViewState, type InlineViewState, type LifeViewState, type ConstellationViewState, type ParameterViewState, type TuringViewState, type SchemeConnection, type SchemeModel, type SchemeNode } from './language/runtime';
 import { compileLanguageSource, LanguageError, parseProgramCapabilities, type ProgramCapability } from './language/language';
 import { parameterUpdatePolicy, type ParameterUpdatePolicy } from './language/parameter-policy';
 
@@ -1400,6 +1400,7 @@ function syncViews(): void {
   const variables = runtime.getVariableViews();
   const turingViews = runtime.getTuringViews();
   const lifeViews = runtime.getLifeViews();
+  const constellationViews = runtime.getConstellationViews();
   const drumkitViews = runtime.getDrumkitViews();
   const scheme = runtime.getSchemeModel();
   const nodes = new Map(scheme.nodes.map((node) => [node.id, node]));
@@ -1410,6 +1411,7 @@ function syncViews(): void {
   if (appConfig.showMetrics) panels.push(buildMetricsPanel(scheme, variables.length));
   for (const view of turingViews) panels.push(buildTuringPanel(view));
   for (const view of lifeViews) panels.push(buildLifePanel(view));
+  for (const view of constellationViews) panels.push(buildConstellationPanel(view));
   for (const view of drumkitViews) panels.push(buildDrumkitPanel(view));
 
   const audio = nodes.get('Audio');
@@ -1608,6 +1610,226 @@ function buildLifePanel(view: LifeViewState): HTMLElement {
   }
 
   body.append(grid);
+  return card;
+}
+
+function constellationMidi(frequency: number): number {
+  return 69 + 12 * Math.log2(Math.max(0.0001, frequency) / 440);
+}
+
+function constellationNoteLabel(frequency: number): string {
+  const midi = constellationMidi(frequency);
+  const nearest = Math.round(midi);
+  const pitchClasses = ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
+  const pitchClass = ((nearest % 12) + 12) % 12;
+  const octave = Math.floor(nearest / 12) - 1;
+  const cents = Math.round((midi - nearest) * 100);
+  return `${pitchClasses[pitchClass]}${octave}${Math.abs(cents) >= 8 ? `${cents > 0 ? '+' : ''}${cents}c` : ''}`;
+}
+
+function constellationHash(value: string): number {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) / 4294967295;
+}
+
+function constellationLayout(view: ConstellationViewState): Map<number, { x: number; y: number }> {
+  const unique = [...new Set(view.frequencies.map((item) => Number(item.toFixed(6))))].sort((a, b) => a - b);
+  const count = Math.max(1, unique.length);
+  const stepwise = Math.max(0, Math.min(100, view.stepwise));
+  const leap = Math.max(0, Math.min(100, view.leap));
+  const totalMotion = Math.max(1, stepwise + leap);
+  const locality = stepwise / totalMotion;
+  const dispersion = leap / totalMotion;
+
+  // High memory keeps a constellation generation alive longer. When a new
+  // generation appears the stars drift toward another deterministic layout.
+  const generationSpan = 3 + Math.round((Math.max(0, Math.min(100, view.memory)) / 100) * 13);
+  const generation = Math.floor(Math.max(0, view.revision - 1) / generationSpan);
+
+  const points = unique.map((key, index) => {
+    const normalizedIndex = count <= 1 ? 0.5 : index / (count - 1);
+    const seed = `${view.name}:${key}:${generation}`;
+    const randomX = constellationHash(`${seed}:x`);
+    const randomY = constellationHash(`${seed}:y`);
+
+    // Stepwise keeps a loose melodic neighbourhood; leap releases the stars
+    // further into the field. The random component keeps the result celestial
+    // instead of turning it into a hidden grid.
+    const angle = normalizedIndex * Math.PI * 1.65 - Math.PI * 0.82;
+    const radius = 34 + normalizedIndex * 34;
+    const spineX = 160 + Math.cos(angle) * radius;
+    const spineY = 72 + Math.sin(angle) * radius * 0.62;
+    const randomXPos = 18 + randomX * 284;
+    const randomYPos = 14 + randomY * 117;
+    const randomBlend = 0.38 + dispersion * 0.62;
+    const orderedBlend = locality * 0.52;
+    const normalizer = Math.max(0.001, randomBlend + orderedBlend);
+
+    return {
+      key,
+      x: (randomXPos * randomBlend + spineX * orderedBlend) / normalizer,
+      y: (randomYPos * randomBlend + spineY * orderedBlend) / normalizer,
+    };
+  });
+
+  const fieldLeft = 18;
+  const fieldRight = 302;
+  const fieldTop = 16;
+  const fieldBottom = 129;
+
+  if (points.length <= 1) {
+    return new Map(points.map((point) => [point.key, { x: 160, y: 72 }]));
+  }
+
+  // First stretch the cloud to the useful field so the constellation always
+  // occupies the drawing instead of collapsing around its centre.
+  const rawMinX = Math.min(...points.map((point) => point.x));
+  const rawMaxX = Math.max(...points.map((point) => point.x));
+  const rawMinY = Math.min(...points.map((point) => point.y));
+  const rawMaxY = Math.max(...points.map((point) => point.y));
+  const rawSpanX = Math.max(1, rawMaxX - rawMinX);
+  const rawSpanY = Math.max(1, rawMaxY - rawMinY);
+  for (const point of points) {
+    point.x = fieldLeft + ((point.x - rawMinX) / rawSpanX) * (fieldRight - fieldLeft);
+    point.y = fieldTop + ((point.y - rawMinY) / rawSpanY) * (fieldBottom - fieldTop);
+  }
+
+  // Keep the four extreme stars anchored near the useful borders while the
+  // remaining points repel each other. This gives labels breathing room but
+  // preserves the full-field silhouette of the constellation.
+  const leftAnchor = points.reduce((best, point) => point.x < best.x ? point : best);
+  const rightAnchor = points.reduce((best, point) => point.x > best.x ? point : best);
+  const topAnchor = points.reduce((best, point) => point.y < best.y ? point : best);
+  const bottomAnchor = points.reduce((best, point) => point.y > best.y ? point : best);
+  const minDistance = 30 + dispersion * 7;
+
+  for (let iteration = 0; iteration < 18; iteration += 1) {
+    for (let a = 0; a < points.length; a += 1) {
+      for (let b = a + 1; b < points.length; b += 1) {
+        const first = points[a];
+        const second = points[b];
+        let dx = second.x - first.x;
+        let dy = second.y - first.y;
+        let distance = Math.hypot(dx, dy);
+        if (distance >= minDistance) continue;
+        if (distance < 0.001) {
+          const angle = constellationHash(`${view.name}:${first.key}:${second.key}:separate`) * Math.PI * 2;
+          dx = Math.cos(angle);
+          dy = Math.sin(angle);
+          distance = 1;
+        }
+        const push = (minDistance - distance) * 0.48;
+        const nx = dx / distance;
+        const ny = dy / distance;
+        if (first !== leftAnchor && first !== rightAnchor) first.x -= nx * push;
+        if (first !== topAnchor && first !== bottomAnchor) first.y -= ny * push;
+        if (second !== leftAnchor && second !== rightAnchor) second.x += nx * push;
+        if (second !== topAnchor && second !== bottomAnchor) second.y += ny * push;
+      }
+    }
+
+    for (const point of points) {
+      point.x = Math.max(fieldLeft, Math.min(fieldRight, point.x));
+      point.y = Math.max(fieldTop, Math.min(fieldBottom, point.y));
+    }
+    leftAnchor.x = fieldLeft;
+    rightAnchor.x = fieldRight;
+    topAnchor.y = fieldTop;
+    bottomAnchor.y = fieldBottom;
+  }
+
+  return new Map(points.map((point) => [point.key, { x: point.x, y: point.y }]));
+}
+
+function constellationPointPosition(
+  frequency: number,
+  layout: ReadonlyMap<number, { x: number; y: number }>,
+): { x: number; y: number } {
+  return layout.get(Number(frequency.toFixed(6))) ?? { x: 160, y: 72 };
+}
+
+function renderConstellationField(svg: SVGSVGElement, view: ConstellationViewState): void {
+  const ns = 'http://www.w3.org/2000/svg';
+  svg.replaceChildren();
+
+  const unique = [...new Set(view.frequencies.map((frequency) => Number(frequency.toFixed(6))))];
+  const layout = constellationLayout(view);
+
+  // One quiet line only: the most recent motion. Older motion survives as a
+  // fading trail of filled stars instead of accumulating geometry.
+  const path = view.history.slice(-2);
+  if (path.length === 2 && Math.abs(path[0] - path[1]) > 0.000001) {
+    const from = constellationPointPosition(path[0], layout);
+    const to = constellationPointPosition(path[1], layout);
+    const segment = document.createElementNS(ns, 'line');
+    segment.setAttribute('x1', String(from.x)); segment.setAttribute('y1', String(from.y));
+    segment.setAttribute('x2', String(to.x)); segment.setAttribute('y2', String(to.y));
+    segment.setAttribute('class', 'constellation-trail');
+    svg.append(segment);
+  }
+
+  // Keep a short luminous memory of visited nodes. Repeated visits naturally
+  // reinforce the same star instead of drawing zero-length lines.
+  const recent = view.history.slice(-7, -1);
+  recent.forEach((frequency, index) => {
+    const point = constellationPointPosition(frequency, layout);
+    const age = recent.length - 1 - index;
+    const ghost = document.createElementNS(ns, 'circle');
+    ghost.setAttribute('cx', String(point.x)); ghost.setAttribute('cy', String(point.y));
+    ghost.setAttribute('r', String(Math.max(1.7, 3.8 - age * 0.36)));
+    ghost.setAttribute('class', 'constellation-ghost');
+    ghost.setAttribute('opacity', String(Math.max(0.05, 0.42 - age * 0.065)));
+    svg.append(ghost);
+  });
+
+  for (const frequency of unique) {
+    const point = constellationPointPosition(frequency, layout);
+    const node = document.createElementNS(ns, 'circle');
+    node.setAttribute('cx', String(point.x)); node.setAttribute('cy', String(point.y));
+    node.setAttribute('r', '3.1');
+    node.setAttribute('class', 'constellation-node');
+    svg.append(node);
+
+    const label = document.createElementNS(ns, 'text');
+    const labelRight = point.x < 248;
+    label.setAttribute('x', String(point.x + (labelRight ? 6 : -6)));
+    label.setAttribute('y', String(point.y - 5));
+    label.setAttribute('text-anchor', labelRight ? 'start' : 'end');
+    label.setAttribute('class', 'constellation-note-label');
+    label.textContent = constellationNoteLabel(frequency);
+    svg.append(label);
+  }
+
+  if (view.currentFrequency !== null) {
+    const point = constellationPointPosition(view.currentFrequency, layout);
+    const halo = document.createElementNS(ns, 'circle');
+    halo.setAttribute('cx', String(point.x)); halo.setAttribute('cy', String(point.y));
+    halo.setAttribute('r', '8'); halo.setAttribute('class', 'constellation-current-halo');
+    const current = document.createElementNS(ns, 'circle');
+    current.setAttribute('cx', String(point.x)); current.setAttribute('cy', String(point.y));
+    current.setAttribute('r', '5'); current.setAttribute('class', 'constellation-current');
+    svg.append(halo, current);
+  }
+}
+
+function buildConstellationPanel(view: ConstellationViewState): HTMLElement {
+  const card = createMonitorCard(`SEQ:${view.name}`, `${view.name.toUpperCase()} : SEQ / CONSTELLATION`, false);
+  card.classList.add('constellation-monitor-card');
+  const body = card.querySelector<HTMLElement>('.monitor-body');
+  if (!body) return card;
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.classList.add('constellation-field');
+  svg.dataset.constellationName = view.name;
+  svg.dataset.revision = String(view.revision);
+  svg.setAttribute('viewBox', '0 0 320 145');
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', `${view.name} constellation melody field`);
+  renderConstellationField(svg, view);
+  body.append(svg);
   return card;
 }
 
@@ -1951,6 +2173,20 @@ function updateLifeViews(): void {
   }
 }
 
+function updateConstellationViews(): void {
+  const states = new Map(runtime.getConstellationViews().map((view) => [view.name, view]));
+  for (const svg of document.querySelectorAll<SVGSVGElement>('.constellation-field[data-constellation-name]')) {
+    const name = svg.dataset.constellationName;
+    if (!name) continue;
+    const state = states.get(name);
+    if (!state) continue;
+    const revision = Number(svg.dataset.revision ?? '-1');
+    if (revision === state.revision) continue;
+    svg.dataset.revision = String(state.revision);
+    renderConstellationField(svg, state);
+  }
+}
+
 function updateDrumkitViews(): void {
   const states = new Map(runtime.getDrumkitViews().map((view) => [view.name, view]));
   const now = performance.now();
@@ -1995,14 +2231,16 @@ function drawScopes(): void {
   updateVariableValues();
   updateTuringViews();
   updateLifeViews();
+  updateConstellationViews();
   updateDrumkitViews();
   updateSchemeLiveValues();
   const canvases = [...document.querySelectorAll<HTMLCanvasElement>('canvas.scope-canvas')];
   const liveValues = document.querySelectorAll<HTMLElement>('.scheme-live-value');
   const turingRegisters = document.querySelectorAll<HTMLElement>('.turing-register');
   const lifeGrids = document.querySelectorAll<HTMLElement>('.life-grid');
+  const constellationFields = document.querySelectorAll<SVGSVGElement>('.constellation-field');
   const drumkitPatterns = document.querySelectorAll<HTMLElement>('.drumkit-pattern');
-  if (canvases.length === 0 && liveValues.length === 0 && turingRegisters.length === 0 && lifeGrids.length === 0 && drumkitPatterns.length === 0) return;
+  if (canvases.length === 0 && liveValues.length === 0 && turingRegisters.length === 0 && lifeGrids.length === 0 && constellationFields.length === 0 && drumkitPatterns.length === 0) return;
 
   const phosphor = getComputedStyle(document.documentElement).getPropertyValue('--phosphor-hot').trim() || '#ffe783';
 

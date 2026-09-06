@@ -1174,3 +1174,69 @@ button, input, textarea { font: inherit; }
   font-size: 15px;
   filter: brightness(1.35);
 }
+
+.constellation-monitor-card .monitor-body {
+  padding: 8px 10px 10px;
+}
+
+.constellation-field {
+  display: block;
+  width: 100%;
+  min-height: 126px;
+  border: 1px solid var(--panel-border, rgba(255,255,255,.12));
+  border-radius: 8px;
+  background: rgba(0,0,0,.18);
+  overflow: hidden;
+}
+
+.constellation-node {
+  fill: none;
+  stroke: var(--phosphor-hot, #ffe783);
+  stroke-opacity: .42;
+  stroke-width: 1.15;
+  transition: cx 900ms ease, cy 900ms ease;
+}
+
+.constellation-trail {
+  stroke: var(--phosphor-hot, #ffe783);
+  stroke-width: 1.15;
+  stroke-linecap: round;
+  stroke-opacity: .30;
+}
+
+.constellation-note-label {
+  fill: currentColor;
+  fill-opacity: .60;
+  font-size: 8.2px;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  letter-spacing: .02em;
+  pointer-events: none;
+  paint-order: stroke;
+  stroke: rgba(0, 0, 0, .68);
+  stroke-width: 2.3px;
+  stroke-linejoin: round;
+}
+
+.constellation-ghost {
+  fill: var(--phosphor-hot, #ffe783);
+}
+
+.constellation-current {
+  fill: var(--phosphor-hot, #ffe783);
+  filter: drop-shadow(0 0 4px currentColor);
+}
+
+.constellation-current-halo {
+  fill: none;
+  stroke: var(--phosphor-hot, #ffe783);
+  stroke-width: 1.4;
+  opacity: .38;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: constellation-pulse 900ms ease-out infinite;
+}
+
+@keyframes constellation-pulse {
+  0% { transform: scale(.7); opacity: .55; }
+  100% { transform: scale(1.55); opacity: 0; }
+}

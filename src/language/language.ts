@@ -83,7 +83,7 @@ type SourceDefinition =
   | { kind: 'freq'; values: number[]; display: string; internalName?: string }
   | { kind: 'note'; values: number[]; display: string; favor: SequenceFavorEntry[]; internalName?: string }
   | { kind: 'scale'; values: number[]; display: string; internalName?: string }
-  | { kind: 'seq'; model: 'turing' | 'life' | null; values: number[]; display: string; internalName?: string }
+  | { kind: 'seq'; model: 'turing' | 'life' | 'constellation' | null; values: number[]; display: string; internalName?: string }
   | { kind: 'register'; size: number; display: string; internalName?: string }
   | { kind: 'envelope'; spec: EnvelopeSpec; display: string; internalName?: string }
   | { kind: 'kit'; kit: DrumKitDefinition; display: string; internalName?: string };
@@ -228,7 +228,7 @@ type SeqState = {
   name: string;
   line: number;
   indentation: number;
-  modelId: 'turing' | 'life' | null;
+  modelId: 'turing' | 'life' | 'constellation' | null;
   lifeVariant: 'conway' | 'highlife' | 'seeds' | 'day-night' | 'morley';
   length: number;
   change: number;
@@ -236,7 +236,15 @@ type SeqState = {
   density: number;
   maxDensity: number | null;
   values: number[];
+  weights: number[];
   material: 'notes' | 'scale' | 'freqs' | null;
+  stepwise: number;
+  leap: number;
+  repeat: number;
+  memory: number;
+  octaves: Array<{ octave: number; weight: number }>;
+  phrase: number;
+  mutation: number;
 };
 
 type RegisterState = {
@@ -1264,6 +1272,11 @@ function compileVoiceProperty(
           const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
           return `${compositePitchMarker}${voice.name}.freq(${initial}); __lifereader(${JSON.stringify(voice.name)},${JSON.stringify(sourceName)},${JSON.stringify(mode)},${amount},${view ? 'true' : 'false'});${every}`;
         }
+        if (definition.model === 'constellation') {
+          if (direct.modifiers.length > 0) throw new LanguageError([{ line, message: 'SEQ constellation controls its own pitch selection and does not accept reader modifiers' }]);
+          const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
+          return `${compositePitchMarker}${voice.name}.freq(${initial}); __constellationreader(${JSON.stringify(voice.name)},${JSON.stringify(sourceName)});${every}`;
+        }
         if (direct.modifiers.length > 0) {
           throw new LanguageError([{ line, message: 'SEQ turing controls its own generation; PITCH using a Turing SEQ does not accept selection modifiers' }]);
         }
@@ -1608,7 +1621,12 @@ function parsePatternTimingSpec(raw: string, line: number, sourceDefinitions: Ma
 
   let clockSource: string;
   let clockPrelude = '';
-  const clockValue = (match[4] ?? '*4').trim();
+  const clockParts = (match[4] ?? '*4').split(',').map((item) => item.trim()).filter(Boolean);
+  const clockValue = clockParts.shift() ?? '*4';
+  const { feel: inlineClockFeel, remaining: unknownClockModifiers } = parseInlineClockFeel(clockParts, line);
+  if (unknownClockModifiers.length > 0) {
+    throw new LanguageError([{ line, message: `PATTERN ON CLOCK does not support modifier '${unknownClockModifiers[0]}'` }]);
+  }
   const rate = clockValue.match(/^([/*])\s*(\d+(?:\.\d+)?)$/);
   if (rate) {
     const n = Number(rate[2]);
@@ -1616,8 +1634,12 @@ function parsePatternTimingSpec(raw: string, line: number, sourceDefinitions: Ma
     const label = `${rate[1]}${formatSourceNumber(n)}`;
     const safe = label.replace('/', 'div_').replace('*', 'mul_').replace('.', '_');
     clockSource = `__clock_pattern_${line}_${safe}`;
-    clockPrelude = `${clockSource} = Clock.rate(${JSON.stringify(label)});`;
+    const feelPrelude = inlineClockFeelPrelude(clockSource, inlineClockFeel);
+    clockPrelude = `${clockSource} = Clock.rate(${JSON.stringify(label)});${feelPrelude ? ` ${feelPrelude}` : ''}`;
   } else {
+    if (inlineClockFeel.jitter !== null || inlineClockFeel.drifter !== null) {
+      throw new LanguageError([{ line, message: 'jitter/drifter after PATTERN ON CLOCK require an inline clock rate such as /4 or *2; named CLOCK objects define their own feel' }]);
+    }
     if (!IDENTIFIER.test(clockValue)) throw new LanguageError([{ line, message: `invalid PATTERN clock source '${clockValue}'` }]);
     const definition = sourceDefinitions.get(clockValue);
     if (!definition) throw new LanguageError([{ line, message: `unknown clock source '${clockValue}'` }]);
@@ -1654,6 +1676,48 @@ function parsePositiveAmount(raw: string, line: number, label: string): number {
   return value;
 }
 
+type InlineClockFeel = { jitter: number | null; drifter: number | null };
+
+function parseInlineClockFeel(
+  modifiers: string[],
+  line: number,
+): { feel: InlineClockFeel; remaining: string[] } {
+  const feel: InlineClockFeel = { jitter: null, drifter: null };
+  let sawJitter = false;
+  let sawDrifter = false;
+  const remaining: string[] = [];
+
+  for (const modifier of modifiers) {
+    const jitter = modifier.match(/^jitter\s+(.+)$/i);
+    if (jitter) {
+      if (sawJitter) throw new LanguageError([{ line, message: 'ON CLOCK accepts only one jitter modifier' }]);
+      const value = numberValue(jitter[1], line, 'ON CLOCK jitter');
+      if (value < 0 || value > 100) throw new LanguageError([{ line, message: 'ON CLOCK jitter expects 0..100' }]);
+      feel.jitter = value;
+      sawJitter = true;
+      continue;
+    }
+    const drifter = modifier.match(/^drifter\s+(.+)$/i);
+    if (drifter) {
+      if (sawDrifter) throw new LanguageError([{ line, message: 'ON CLOCK accepts only one drifter modifier' }]);
+      const value = numberValue(drifter[1], line, 'ON CLOCK drifter');
+      if (value < 0 || value > 100) throw new LanguageError([{ line, message: 'ON CLOCK drifter expects 0..100' }]);
+      feel.drifter = value;
+      sawDrifter = true;
+      continue;
+    }
+    remaining.push(modifier);
+  }
+  return { feel, remaining };
+}
+
+function inlineClockFeelPrelude(clockSource: string, feel: InlineClockFeel): string {
+  const directives: string[] = [];
+  if (feel.jitter !== null) directives.push(`__clockfeel(${JSON.stringify(clockSource)},"jitter",${feel.jitter});`);
+  if (feel.drifter !== null) directives.push(`__clockfeel(${JSON.stringify(clockSource)},"drift",${feel.drifter});`);
+  return directives.join(' ');
+}
+
 function parseEverySpec(
   raw: string,
   line: number,
@@ -1662,6 +1726,7 @@ function parseEverySpec(
   const pattern = parsePatternTimingSpec(raw, line, sourceDefinitions);
   if (pattern) return pattern;
   const { base, modifiers } = splitEveryModifiers(raw.trim());
+  const { feel: inlineClockFeel, remaining: modifiersWithoutClockFeel } = parseInlineClockFeel(modifiers, line);
 
   let amount: number;
   let unit: 'ms' | 'sec' | 'beat';
@@ -1707,7 +1772,9 @@ function parseEverySpec(
   let readerModeExplicit = false;
   const timingModifiers: string[] = [];
 
-  for (const modifier of modifiers) {
+  let inlineClockCreated = false;
+
+  for (const modifier of modifiersWithoutClockFeel) {
     const mode = modifier.match(/^mode\s+(forward|reverse|pendulum|walk|random)$/i);
     if (mode) {
       if (!euclidean) {
@@ -1749,7 +1816,9 @@ function parseEverySpec(
       const label = `${rate[1]}${formatSourceNumber(n)}`;
       const safe = label.replace('/', 'div_').replace('*', 'mul_').replace('.', '_');
       clockSource = `__clock_${line}_${safe}`;
-      clockPrelude = `${clockSource} = Clock.rate(${JSON.stringify(label)});`;
+      const feelPrelude = inlineClockFeelPrelude(clockSource, inlineClockFeel);
+      clockPrelude = `${clockSource} = Clock.rate(${JSON.stringify(label)});${feelPrelude ? ` ${feelPrelude}` : ''}`;
+      inlineClockCreated = true;
       continue;
     }
     if (!IDENTIFIER.test(clockValue)) {
@@ -1761,6 +1830,11 @@ function parseEverySpec(
       throw new LanguageError([{ line, message: `source '${clockValue}' is ${definition.kind}, expected clock source` }]);
     }
     clockSource = definition.internalName;
+  }
+
+
+  if ((inlineClockFeel.jitter !== null || inlineClockFeel.drifter !== null) && !inlineClockCreated) {
+    throw new LanguageError([{ line, message: 'jitter/drifter after ON CLOCK require an inline clock rate such as /4 or *2; named CLOCK objects define their own feel' }]);
   }
 
   const timing = parseTimingModifiers(timingModifiers, line, unit);
@@ -1877,6 +1951,8 @@ function requireSeqReady(seq: SeqState | null, diagnostics: LanguageDiagnostic[]
   if (!seq) return;
   if (!seq.modelId) diagnostics.push({ line: seq.line, message: `SEQ '${seq.name}' requires a model` });
   if (seq.values.length === 0) diagnostics.push({ line: seq.line, message: `SEQ '${seq.name}' requires PITCH SCALE, PITCH NOTES, or PITCH FREQS material` });
+  if (seq.modelId !== 'constellation' && seq.weights.some((weight) => weight !== 100)) diagnostics.push({ line: seq.line, message: 'weighted SEQ notes are available only for MODEL constellation' });
+  if (seq.modelId === 'constellation' && seq.mutation > 0 && seq.phrase <= 0) diagnostics.push({ line: seq.line, message: 'SEQ constellation MUTATION requires PHRASE > 0' });
 }
 
 function compileSeqProperty(
@@ -1901,9 +1977,9 @@ function compileSeqProperty(
   if (effectiveKey === 'model') {
     const model = value.toLowerCase();
     const lifeModel = model.match(/^life(?:\.(highlife|seeds|day-night|morley))?$/);
-    if (model !== 'turing' && !lifeModel) throw new LanguageError([{ line, message: `unknown SEQ model '${value}'` }]);
-    seq.modelId = model === 'turing' ? 'turing' : 'life';
-    seq.lifeVariant = model === 'turing' ? 'conway' : ((lifeModel?.[1] ?? 'conway') as SeqState['lifeVariant']);
+    if (model !== 'turing' && model !== 'constellation' && !lifeModel) throw new LanguageError([{ line, message: `unknown SEQ model '${value}'` }]);
+    seq.modelId = model === 'turing' ? 'turing' : model === 'constellation' ? 'constellation' : 'life';
+    seq.lifeVariant = lifeModel ? ((lifeModel?.[1] ?? 'conway') as SeqState['lifeVariant']) : 'conway';
     const definition = sourceDefinitions.get(seq.name);
     if (definition?.kind === 'seq') definition.model = seq.modelId;
     return `__seqmodel(${JSON.stringify(seq.name)},${JSON.stringify(seq.modelId)},${JSON.stringify(seq.lifeVariant)});`;
@@ -1930,14 +2006,14 @@ function compileSeqProperty(
     return `__lifedensity(${JSON.stringify(seq.name)},${density},${maxDensity ?? -1},${respawn ? 'true' : 'false'});`;
   }
   if (effectiveKey === 'length') {
-    if (seq.modelId === 'life') throw new LanguageError([{ line, message: 'SEQ life does not use LENGTH; use SIZE 8 or SIZE 16' }]);
+    if (seq.modelId !== 'turing') throw new LanguageError([{ line, message: `SEQ ${seq.modelId ?? ''} does not use LENGTH` }]);
     const length = numberValue(value, line, 'SEQ length');
     if (!Number.isInteger(length) || length < 2 || length > 32) throw new LanguageError([{ line, message: 'SEQ turing length expects an integer from 2 to 32' }]);
     seq.length = length;
     return `__seqlength(${JSON.stringify(seq.name)},${length});`;
   }
   if (effectiveKey === 'change') {
-    if (seq.modelId === 'life') throw new LanguageError([{ line, message: 'SEQ life does not use CHANGE' }]);
+    if (seq.modelId !== 'turing') throw new LanguageError([{ line, message: `SEQ ${seq.modelId ?? ''} does not use CHANGE` }]);
     const change = numberValue(value, line, 'SEQ change');
     if (change < 0 || change > 100) throw new LanguageError([{ line, message: 'SEQ turing change expects 0..100' }]);
     seq.change = change;
@@ -1949,14 +2025,19 @@ function compileSeqProperty(
     const items = list[1].trim().split(/\s+/).filter(Boolean);
     const parsed = items.map((item) => parseNoteSequenceToken(item, line));
     if (parsed.length === 0 || parsed.some((item) => midiFromNote(item.note) === null)) throw new LanguageError([{ line, message: 'SEQ notes contains an invalid note' }]);
-    if (parsed.some((item) => item.favor !== null)) {
-      throw new LanguageError([{ line, message: 'SEQ turing notes do not support weights, repeats, or retrigs' }]);
+    const favors = parsed.flatMap((item) => item.favor ? [item.favor] : []);
+    if (favors.some((entry) => entry.operator !== 'weight')) {
+      throw new LanguageError([{ line, message: 'SEQ notes support only ! weights' }]);
+    }
+    if (seq.modelId !== 'constellation' && favors.length > 0) {
+      throw new LanguageError([{ line, message: 'weighted SEQ notes are available only for MODEL constellation' }]);
     }
     seq.values = parsed.map((item) => midiToFrequency(midiFromNote(item.note)!));
+    seq.weights = parsed.map((item) => item.favor?.operator === 'weight' ? item.favor.amount : 100);
     seq.material = 'notes';
     const definition = sourceDefinitions.get(seq.name);
     if (definition?.kind === 'seq') definition.values = [...seq.values];
-    return `__seqvalues(${JSON.stringify(seq.name)},${JSON.stringify(seq.values.join('|'))});`;
+    return `__seqvalues(${JSON.stringify(seq.name)},${JSON.stringify(seq.values.join('|'))}); __seqweights(${JSON.stringify(seq.name)},${JSON.stringify(seq.weights.join('|'))});`;
   }
   if (effectiveKey === 'freqs') {
     const parsed = splitWith(value);
@@ -1966,19 +2047,51 @@ function compileSeqProperty(
     }
     if (parsed.modifiers.length > 0) throw new LanguageError([{ line, message: 'SEQ PITCH FREQS material does not accept selection modifiers; readers choose the material' }]);
     seq.values = values;
+    seq.weights = values.map(() => 100);
     seq.material = 'freqs';
     const definition = sourceDefinitions.get(seq.name);
     if (definition?.kind === 'seq') definition.values = [...seq.values];
-    return `__seqvalues(${JSON.stringify(seq.name)},${JSON.stringify(seq.values.join('|'))});`;
+    return `__seqvalues(${JSON.stringify(seq.name)},${JSON.stringify(seq.values.join('|'))}); __seqweights(${JSON.stringify(seq.name)},${JSON.stringify(seq.weights.join('|'))});`;
   }
   if (effectiveKey === 'scale') {
     const scale = parseScaleSource(value, line);
     if (!scale) throw new LanguageError([{ line, message: 'SEQ scale expects a scale and range, for example C minor with range C2 C4' }]);
     seq.values = scale.values;
+    seq.weights = scale.values.map(() => 100);
     seq.material = 'scale';
     const definition = sourceDefinitions.get(seq.name);
     if (definition?.kind === 'seq') definition.values = [...seq.values];
-    return `__seqvalues(${JSON.stringify(seq.name)},${JSON.stringify(seq.values.join('|'))});`;
+    return `__seqvalues(${JSON.stringify(seq.name)},${JSON.stringify(seq.values.join('|'))}); __seqweights(${JSON.stringify(seq.name)},${JSON.stringify(seq.weights.join('|'))});`;
+  }
+  if (['stepwise', 'leap', 'repeat', 'memory', 'mutation'].includes(effectiveKey)) {
+    if (seq.modelId !== 'constellation') throw new LanguageError([{ line, message: `SEQ ${effectiveKey.toUpperCase()} is available only for MODEL constellation` }]);
+    const amount = numberValue(value, line, `SEQ constellation ${effectiveKey}`);
+    if (amount < 0 || amount > 100) throw new LanguageError([{ line, message: `SEQ constellation ${effectiveKey.toUpperCase()} expects 0..100` }]);
+    (seq as unknown as Record<string, unknown>)[effectiveKey] = amount;
+    return `__constellationparam(${JSON.stringify(seq.name)},${JSON.stringify(effectiveKey)},${amount});`;
+  }
+  if (effectiveKey === 'phrase') {
+    if (seq.modelId !== 'constellation') throw new LanguageError([{ line, message: 'SEQ PHRASE is available only for MODEL constellation' }]);
+    const amount = numberValue(value, line, 'SEQ constellation phrase');
+    if (!Number.isInteger(amount) || amount < 0 || amount > 64) throw new LanguageError([{ line, message: 'SEQ constellation PHRASE expects an integer from 0 to 64' }]);
+    seq.phrase = amount;
+    return `__constellationparam(${JSON.stringify(seq.name)},"phrase",${amount});`;
+  }
+  if (effectiveKey === 'octave') {
+    if (seq.modelId !== 'constellation') throw new LanguageError([{ line, message: 'SEQ OCTAVE is available only for MODEL constellation' }]);
+    const match = value.match(/^\[([^\]]+)\]$/);
+    if (!match) throw new LanguageError([{ line, message: 'SEQ constellation OCTAVE expects a weighted list such as [-1!10 0!100 1!30]' }]);
+    const entries = match[1].trim().split(/\s+/).filter(Boolean).map((token) => {
+      const parsed = token.match(/^(-?\d+)(?:!(\d+(?:\.\d+)?))?$/);
+      if (!parsed) throw new LanguageError([{ line, message: `invalid constellation octave entry '${token}'` }]);
+      const octave = Number(parsed[1]);
+      const weight = parsed[2] === undefined ? 100 : Number(parsed[2]);
+      if (octave < -6 || octave > 6) throw new LanguageError([{ line, message: 'constellation octave offsets expect -6..6' }]);
+      if (weight < 0 || weight > 100) throw new LanguageError([{ line, message: 'constellation octave weights expect 0..100' }]);
+      return { octave, weight };
+    });
+    seq.octaves = entries;
+    return `__constellationoctaves(${JSON.stringify(seq.name)},${JSON.stringify(JSON.stringify(entries))});`;
   }
   if (effectiveKey === 'evolve') {
     if (seq.modelId !== 'life') throw new LanguageError([{ line, message: 'EVOLVE is available only for MODEL life' }]);
@@ -1989,13 +2102,13 @@ function compileSeqProperty(
     return `${prefix}__lifeevolve(${JSON.stringify(seq.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
   }
   if (effectiveKey === 'every') {
-    if (seq.modelId === 'life') throw new LanguageError([{ line, message: 'SEQ life has no playhead EVERY; use EVOLVE EVERY ... and schedule each consumer PITCH separately' }]);
+    if (seq.modelId === 'life' || seq.modelId === 'constellation') throw new LanguageError([{ line, message: `SEQ ${seq.modelId} has no playhead EVERY; schedule each consumer PITCH separately` }]);
     const timing = parseEverySpec(value, line, sourceDefinitions);
     const prefix = timing.clockPrelude ? `${timing.clockPrelude}\n` : '';
     return `${prefix}__objectevery(${JSON.stringify(seq.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
   }
   if (effectiveKey === 'pattern') {
-    if (seq.modelId === 'life') throw new LanguageError([{ line, message: 'SEQ life uses EVOLVE PATTERN ..., not a playhead PATTERN' }]);
+    if (seq.modelId === 'life' || seq.modelId === 'constellation') throw new LanguageError([{ line, message: `SEQ ${seq.modelId} has no playhead PATTERN; schedule each consumer PITCH separately` }]);
     return objectPatternDirective(seq.name, value, line, sourceDefinitions);
   }
   throw new LanguageError([{ line, message: `unknown SEQ property '${property}'` }]);
@@ -3576,7 +3689,7 @@ export function compileLanguageSource(source: string): string {
         seqs.add(name);
         sourceKinds.set(name, 'seq');
         sourceDefinitions.set(name, { kind: 'seq', model: null, values: [], display: `SEQ ${name}` });
-        currentSeq = { name, line: lineNumber, indentation, modelId: null, lifeVariant: 'conway', length: 8, change: 10, size: 8, density: 34, maxDensity: null, values: [], material: null };
+        currentSeq = { name, line: lineNumber, indentation, modelId: null, lifeVariant: 'conway', length: 8, change: 10, size: 8, density: 34, maxDensity: null, values: [], weights: [], material: null, stepwise: 60, leap: 20, repeat: 10, memory: 25, octaves: [{ octave: 0, weight: 100 }], phrase: 0, mutation: 0 };
         const viewDirective = seqMatch[2] ? `\n__seqview(${JSON.stringify(name)});` : '';
         output[index] = `__seq(${JSON.stringify(name)});${viewDirective}`;
         continue;

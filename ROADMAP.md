@@ -431,3 +431,6 @@ Post-0.3.0 candidates remain separate milestones: a polyphonic chord-oriented so
 
 - [x] Extract a domain-neutral composite graph model and use it for both `VOICE ... sound composite` and `MOD ... model composite`. VOICE composites provide named internal mixer buses plus a mixed master output; MOD composites prohibit `mix` and expose one or more independent modulation signals. The first DSP adapter clones DaisySP basic oscillator VOICE nodes; adapters for MOD nodes and additional VOICE backends remain follow-up work.
 - [x] Add per-instance composite `tune` with relative ratio/octave/detune or independent PITCH expressions, plus LIVE sliders for tune, mix levels, and output levels.
+
+
+- [x] Constellation melodic SEQ with weighted note material, movement/memory bias, octave distribution, phrase mutation, per-consumer state, and constellation view.

@@ -66,3 +66,8 @@ Sonus Umbrae runs directly in a modern web browser and can be tried through the 
 **https://alexain.github.io/sonus-umbrae/**
 
 The online build tracks the current public release from the `main` branch. Web Audio capabilities such as explicit output-device selection remain browser-dependent.
+
+
+### Constellation SEQ
+
+Sonus Umbrae also includes `SEQ ... model constellation`: a weighted melodic generator with stepwise/leap/repeat bias, recent-memory bias, weighted octave register, phrase memory/mutation, and a constellation-style `with view` monitor. Consumer timing remains external (`every`, `pattern`, Euclidean), consistent with the rest of the SEQ architecture.

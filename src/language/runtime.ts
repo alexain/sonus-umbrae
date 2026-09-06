@@ -22,6 +22,12 @@ import {
   turingFrequency,
   turingMask,
 } from './runtime/seq/turing';
+import {
+  nextConstellationStep,
+  constellationPossibleFrequencies,
+  type ConstellationDefinition,
+  type ConstellationReaderState,
+} from './runtime/seq/constellation';
 
 
 
@@ -122,6 +128,17 @@ export interface LifeViewState {
   name: string;
   size: number;
   cells: boolean[];
+  revision: number;
+}
+
+export interface ConstellationViewState {
+  name: string;
+  frequencies: number[];
+  history: number[];
+  currentFrequency: number | null;
+  stepwise: number;
+  leap: number;
+  memory: number;
   revision: number;
 }
 
@@ -352,6 +369,15 @@ interface LanguageTuringDefinition {
   values: number[];
   register: number;
   current: number;
+}
+
+interface LanguageConstellationDefinition extends ConstellationDefinition {
+  model: 'constellation';
+}
+
+interface LanguageConstellationReaderDefinition {
+  voice: string;
+  seq: string;
 }
 
 interface LanguageLifeDefinition {
@@ -670,6 +696,7 @@ export class SonusRuntime {
   private inlineViews = new Map<string, InlineViewState>();
   private turingViews = new Map<string, TuringViewState>();
   private lifeViews = new Map<string, LifeViewState>();
+  private constellationViews = new Map<string, ConstellationViewState>();
   private drumkitViews = new Map<string, DrumkitViewState>();
   private drumViewMasterBeat = 0;
   private drumViewMasterBeatAt = performance.now();
@@ -685,6 +712,7 @@ export class SonusRuntime {
   private lifeState = new Map<string, { size: number; cells: boolean[] }>();
   private lifeDefinitions = new Map<string, LanguageLifeDefinition>();
   private lifeReaderState = new Map<string, { seq: string; cell: number; direction: number }>();
+  private constellationReaderState = new Map<string, ConstellationReaderState>();
   private registerState = new Map<string, number[]>();
   private registerReaderState = new Map<string, { seq: string; cell: number; direction: number }>();
   private voiceSequenceState = new Map<string, { cursor: number; walkCursor: number; direction: number; shuffleCursor: number }>();
@@ -733,6 +761,7 @@ export class SonusRuntime {
       inlineViews: this.inlineViews,
       turingViews: this.turingViews,
       lifeViews: this.lifeViews,
+      constellationViews: this.constellationViews,
       drumkitViews: this.drumkitViews,
       randomState: this.randomState,
     };
@@ -746,6 +775,7 @@ export class SonusRuntime {
       this.inlineViews = saved.inlineViews;
       this.turingViews = saved.turingViews;
       this.lifeViews = saved.lifeViews;
+      this.constellationViews = saved.constellationViews;
       this.drumkitViews = saved.drumkitViews;
       this.randomState = saved.randomState;
     }
@@ -779,6 +809,10 @@ export class SonusRuntime {
 
   getLifeViews(): LifeViewState[] {
     return [...this.lifeViews.values()].map((view) => ({ ...view, cells: [...view.cells] }));
+  }
+
+  getConstellationViews(): ConstellationViewState[] {
+    return [...this.constellationViews.values()].map((view) => ({ ...view, frequencies: [...view.frequencies], history: [...view.history] }));
   }
 
   getDrumkitViews(): DrumkitViewState[] {
@@ -884,6 +918,7 @@ export class SonusRuntime {
       inlineViews: this.inlineViews,
       turingViews: this.turingViews,
       lifeViews: this.lifeViews,
+      constellationViews: this.constellationViews,
       drumkitViews: this.drumkitViews,
       scheme: this.scheme,
       randomState: this.randomState,
@@ -899,6 +934,7 @@ export class SonusRuntime {
       this.inlineViews = saved.inlineViews;
       this.turingViews = saved.turingViews;
       this.lifeViews = saved.lifeViews;
+      this.constellationViews = saved.constellationViews;
       this.drumkitViews = saved.drumkitViews;
       this.scheme = saved.scheme;
       this.randomState = saved.randomState;
@@ -924,6 +960,7 @@ export class SonusRuntime {
       this.lifeState.clear();
       this.lifeDefinitions.clear();
       this.lifeReaderState.clear();
+      this.constellationReaderState.clear();
       this.registerState.clear();
       this.registerReaderState.clear();
       this.voiceSequenceState.clear();
@@ -960,6 +997,8 @@ export class SonusRuntime {
     const languageSequences = new Map<string, LanguageSequenceDefinition>();
     const languageTurings = new Map<string, LanguageTuringDefinition>();
     const languageLives = new Map<string, LanguageLifeDefinition>();
+    const languageConstellations = new Map<string, LanguageConstellationDefinition>();
+    const languageConstellationReaders = new Map<string, LanguageConstellationReaderDefinition>();
     const languageLifeReaders = new Map<string, LanguageLifeReaderDefinition>();
     const languageLifeEvolve = new Map<string, LanguageCycleDefinition>();
     const languageRegisters = new Map<string, LanguageRegisterDefinition>();
@@ -1086,7 +1125,12 @@ export class SonusRuntime {
       if (seqModel) {
         if (seqModel.model === 'life') {
           languageTurings.delete(seqModel.name);
+          languageConstellations.delete(seqModel.name);
           languageLives.set(seqModel.name, { model: 'life', variant: seqModel.variant, size: 8, density: 34, maxDensity: null, respawn: false, values: [], cells: [] });
+        } else if (seqModel.model === 'constellation') {
+          languageTurings.delete(seqModel.name);
+          languageLives.delete(seqModel.name);
+          languageConstellations.set(seqModel.name, { model: 'constellation', values: [], weights: [], stepwise: 60, leap: 20, repeat: 10, memory: 25, octaves: [{ octave: 0, weight: 100 }], phrase: 0, mutation: 0 });
         }
         continue;
       }
@@ -1108,8 +1152,18 @@ export class SonusRuntime {
         if (turing) { turing.values = seqValues.values; turing.current = seqValues.values[0] ?? 440; }
         const life = languageLives.get(seqValues.name);
         if (life) life.values = seqValues.values;
+        const constellation = languageConstellations.get(seqValues.name);
+        if (constellation) constellation.values = seqValues.values;
         continue;
       }
+      const seqWeights = parseLanguageSeqWeights(line);
+      if (seqWeights) { const seq = languageConstellations.get(seqWeights.name); if (seq) seq.weights = seqWeights.weights; continue; }
+      const constellationParam = parseLanguageConstellationParam(line);
+      if (constellationParam) { const seq = languageConstellations.get(constellationParam.name); if (seq) (seq as unknown as Record<string, unknown>)[constellationParam.param] = constellationParam.value; continue; }
+      const constellationOctaves = parseLanguageConstellationOctaves(line);
+      if (constellationOctaves) { const seq = languageConstellations.get(constellationOctaves.name); if (seq) seq.octaves = constellationOctaves.octaves; continue; }
+      const constellationReader = parseLanguageConstellationReader(line);
+      if (constellationReader) { languageConstellationReaders.set(constellationReader.voice, constellationReader); continue; }
       const seqVoice = parseLanguageTuringVoice(line);
       if (seqVoice) { languageTuringVoiceSources.set(seqVoice.voice, seqVoice.seq); continue; }
       const lifeReader = parseLanguageLifeReader(line);
@@ -1717,7 +1771,7 @@ export class SonusRuntime {
     // source order. All module declarations already exist, so references between
     // modules are still independent from declaration order.
     for (const { source: line, line: lineNumber } of lines) {
-      if (parseLanguageCompositePitch(line) || parseLanguageCompositeTune(line) || parseLanguageCompositeEdge(line) || parseLanguageCompositeMix(line) || parseLanguageCompositeOutput(line) || parseLanguageDrumkitDirective(line) || parseLanguageDrumkitMetaDirective(line) || parseLanguageDrumSlotDirective(line) || parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageSeqModel(line) || parseLanguageSeqSize(line) || parseLanguageLifeDensity(line) || parseLanguageLifeReader(line) || parseLanguageLifeEvolve(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageEnvelopeDirective(line, lineNumber) || parseLanguageFxMetadata(line) || parseLanguageDelayTime(line) || parseLanguageDelayParam(line, lineNumber) || parseLanguageDelayParamDefault(line, lineNumber) || parseLanguageDelayParamCycle(line, lineNumber) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
+      if (parseLanguageCompositePitch(line) || parseLanguageCompositeTune(line) || parseLanguageCompositeEdge(line) || parseLanguageCompositeMix(line) || parseLanguageCompositeOutput(line) || parseLanguageDrumkitDirective(line) || parseLanguageDrumkitMetaDirective(line) || parseLanguageDrumSlotDirective(line) || parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageSeqModel(line) || parseLanguageSeqWeights(line) || parseLanguageConstellationParam(line) || parseLanguageConstellationOctaves(line) || parseLanguageConstellationReader(line) || parseLanguageSeqSize(line) || parseLanguageLifeDensity(line) || parseLanguageLifeReader(line) || parseLanguageLifeEvolve(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageEnvelopeDirective(line, lineNumber) || parseLanguageFxMetadata(line) || parseLanguageDelayTime(line) || parseLanguageDelayParam(line, lineNumber) || parseLanguageDelayParamDefault(line, lineNumber) || parseLanguageDelayParamCycle(line, lineNumber) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
 
       const gainDeclaration = parseGainDeclaration(line);
       if (gainDeclaration) {
@@ -3068,7 +3122,7 @@ export class SonusRuntime {
           name,
           enabled: !definition.disabled,
           note: 69 + 12 * Math.log2(definition.frequency / 440),
-          dynamicPitch: languageSequences.has(name) || languageTuringVoiceSources.has(name),
+          dynamicPitch: languageSequences.has(name) || languageTuringVoiceSources.has(name) || languageConstellationReaders.has(name),
           level: definition.level,
           drive: definition.drive,
           bowLevel: definition.bow,
@@ -3094,7 +3148,7 @@ export class SonusRuntime {
           model: definition.model,
           polyphony: definition.polyphony,
           note: 69 + 12 * Math.log2(definition.frequency / 440),
-          dynamicPitch: languageSequences.has(name) || languageTuringVoiceSources.has(name),
+          dynamicPitch: languageSequences.has(name) || languageTuringVoiceSources.has(name) || languageConstellationReaders.has(name),
           level: definition.level,
           structure: definition.structure,
           brightness: definition.brightness,
@@ -3112,7 +3166,7 @@ export class SonusRuntime {
               !definition.disabled,
               definition.level,
               pitchFrequency,
-              pitchFrequency !== null && (languageSequences.has(name) || languageTuringVoiceSources.has(name)),
+              pitchFrequency !== null && (languageSequences.has(name) || languageTuringVoiceSources.has(name) || languageConstellationReaders.has(name)),
             );
           }),
         ...[...swells.entries()]
@@ -3127,7 +3181,7 @@ export class SonusRuntime {
           waveform: definition.soundId as 'sine' | 'triangle' | 'sawtooth' | 'ramp' | 'square',
           level: definition.level,
           frequency: definition.frequency,
-          dynamicPitch: languageSequences.has(name) || languageTuringVoiceSources.has(name),
+          dynamicPitch: languageSequences.has(name) || languageTuringVoiceSources.has(name) || languageConstellationReaders.has(name),
           width: definition.width,
         })),
       macros: [...voices.entries()]
@@ -3139,7 +3193,7 @@ export class SonusRuntime {
           lpg: definition.lpg,
           level: definition.level,
           frequency: definition.frequency,
-          dynamicPitch: languageSequences.has(name) || languageTuringVoiceSources.has(name),
+          dynamicPitch: languageSequences.has(name) || languageTuringVoiceSources.has(name) || languageConstellationReaders.has(name),
           harmo: definition.harmo,
           timbre: definition.timbre,
           morph: definition.morph,
@@ -3386,6 +3440,23 @@ export class SonusRuntime {
       });
     }
 
+    const constellationViews = new Map<string, ConstellationViewState>();
+    for (const name of languageTuringViews) {
+      const seq = languageConstellations.get(name);
+      if (!seq) continue;
+      const previous = hotReload ? this.constellationViews.get(name) : undefined;
+      constellationViews.set(name, {
+        name,
+        frequencies: constellationPossibleFrequencies(seq),
+        history: previous ? [...previous.history] : [],
+        currentFrequency: previous?.currentFrequency ?? null,
+        stepwise: seq.stepwise,
+        leap: seq.leap,
+        memory: seq.memory,
+        revision: (previous?.revision ?? 0) + 1,
+      });
+    }
+
     const drumkitViews = new Map<string, DrumkitViewState>();
     const masterBeatMs = clockBpm > 0 ? 60000 / clockBpm : Infinity;
     for (const [name, definition] of languageDrumkits) {
@@ -3421,6 +3492,7 @@ export class SonusRuntime {
 
     this.turingViews = turingViews;
     this.lifeViews = lifeViews;
+    this.constellationViews = constellationViews;
     this.drumkitViews = drumkitViews;
     this.inlineViews = inlineViews;
     this.parameterViews = [...parameterViews.values()];
@@ -3588,10 +3660,25 @@ export class SonusRuntime {
         if (turing) {
           next = turing.current;
         } else {
-          const life = languageLives.get(definition.source);
-          if (life) {
-            const mode = definition.mode === 'direct' ? 'order' : definition.mode;
-            next = nextRegisterLifeFrequency(name, definition.source, mode, definition.amount, fallback);
+          const constellation = languageConstellations.get(definition.source);
+          if (constellation && constellation.values.length > 0) {
+            const stateKey = `register:${name}`;
+            const result = nextConstellationStep(constellation, this.constellationReaderState.get(stateKey), random);
+            this.constellationReaderState.set(stateKey, result.state);
+            next = result.frequency;
+            const view = constellationViews.get(definition.source);
+            if (view) {
+              view.currentFrequency = result.frequency;
+              view.history.push(result.frequency);
+              if (view.history.length > 28) view.history.splice(0, view.history.length - 28);
+              view.revision += 1;
+            }
+          } else {
+            const life = languageLives.get(definition.source);
+            if (life) {
+              const mode = definition.mode === 'direct' ? 'order' : definition.mode;
+              next = nextRegisterLifeFrequency(name, definition.source, mode, definition.amount, fallback);
+            }
           }
         }
 
@@ -4327,6 +4414,21 @@ export class SonusRuntime {
       const nextFrequency = (): number => {
         const lifeReader = languageLifeReaders.get(name);
         if (lifeReader) return nextLifeFrequency(lifeReader);
+        const constellationReader = languageConstellationReaders.get(name);
+        if (constellationReader) {
+          const definition = languageConstellations.get(constellationReader.seq);
+          if (!definition || definition.values.length === 0) return voice.frequency;
+          const result = nextConstellationStep(definition, this.constellationReaderState.get(name), random);
+          this.constellationReaderState.set(name, result.state);
+          const view = constellationViews.get(constellationReader.seq);
+          if (view) {
+            view.currentFrequency = result.frequency;
+            view.history.push(result.frequency);
+            if (view.history.length > 28) view.history.splice(0, view.history.length - 28);
+            view.revision += 1;
+          }
+          return result.frequency;
+        }
         const turingSource = languageTuringVoiceSources.get(name);
         if (turingSource) return languageTurings.get(turingSource)?.current ?? voice.frequency;
         if (!sequence || sequence.values.length === 0) return voice.frequency;
@@ -4848,9 +4950,9 @@ function parseLanguageTuringView(line: string): string | null {
   return line.match(/^__seqview\("([A-Za-z_]\w*)"\)$/)?.[1] ?? null;
 }
 
-function parseLanguageSeqModel(line: string): { name: string; model: 'turing' | 'life'; variant: LifeVariant } | null {
-  const match = line.match(/^__seqmodel\("([A-Za-z_]\w*)","(turing|life)","(conway|highlife|seeds|day-night|morley)"\)$/);
-  return match ? { name: match[1], model: match[2] as 'turing' | 'life', variant: match[3] as LifeVariant } : null;
+function parseLanguageSeqModel(line: string): { name: string; model: 'turing' | 'life' | 'constellation'; variant: LifeVariant } | null {
+  const match = line.match(/^__seqmodel\("([A-Za-z_]\w*)","(turing|life|constellation)","(conway|highlife|seeds|day-night|morley)"\)$/);
+  return match ? { name: match[1], model: match[2] as 'turing' | 'life' | 'constellation', variant: match[3] as LifeVariant } : null;
 }
 function parseLanguageSeqSize(line: string): { name: string; size: 8 | 16 } | null {
   const match = line.match(/^__seqsize\("([A-Za-z_]\w*)",(8|16)\)$/);
@@ -4873,6 +4975,25 @@ function parseLanguageTuringChange(line: string): { name: string; change: number
 function parseLanguageTuringValues(line: string): { name: string; values: number[] } | null {
   const match = line.match(/^__seqvalues\("([A-Za-z_]\w*)","([^"]*)"\)$/);
   return match ? { name: match[1], values: match[2].split('|').filter(Boolean).map(Number) } : null;
+}
+function parseLanguageSeqWeights(line: string): { name: string; weights: number[] } | null {
+  const match = line.match(/^__seqweights\("([A-Za-z_]\w*)","([^"]*)"\)$/);
+  return match ? { name: match[1], weights: match[2].split('|').filter(Boolean).map(Number) } : null;
+}
+function parseLanguageConstellationParam(line: string): { name: string; param: 'stepwise' | 'leap' | 'repeat' | 'memory' | 'phrase' | 'mutation'; value: number } | null {
+  const match = line.match(/^__constellationparam\("([A-Za-z_]\w*)","(stepwise|leap|repeat|memory|phrase|mutation)",(-?\d+(?:\.\d+)?)\)$/);
+  return match ? { name: match[1], param: match[2] as 'stepwise' | 'leap' | 'repeat' | 'memory' | 'phrase' | 'mutation', value: Number(match[3]) } : null;
+}
+function parseLanguageConstellationOctaves(line: string): { name: string; octaves: Array<{ octave: number; weight: number }> } | null {
+  const match = line.match(/^__constellationoctaves\("([A-Za-z_]\w*)","((?:[^"\\]|\\.)*)"\)$/);
+  if (!match) return null;
+  try {
+    return { name: match[1], octaves: JSON.parse(JSON.parse(`"${match[2]}"`) as string) as Array<{ octave: number; weight: number }> };
+  } catch { return null; }
+}
+function parseLanguageConstellationReader(line: string): LanguageConstellationReaderDefinition | null {
+  const match = line.match(/^__constellationreader\("([A-Za-z_]\w*)","([A-Za-z_]\w*)"\)$/);
+  return match ? { voice: match[1], seq: match[2] } : null;
 }
 function parseLanguageTuringVoice(line: string): { voice: string; seq: string } | null {
   const match = line.match(/^__seqvoice\("([A-Za-z_]\w*)","([A-Za-z_]\w*)"\)$/);
