@@ -109,6 +109,36 @@ Scale:
 SET harmony: C minor
 ```
 
+Reusable rhythm/timing expression:
+
+```text
+SET groove: RHYTHM pattern [1 5 9 13] steps 16
+SET pulse: RHYTHM every euclidean 5/16 on rotate 2
+SET fast: RHYTHM every 1 beat on clock *4, jitter 15
+```
+
+`RHYTHM` is a typed `SET` value, not a standalone object. It stores the shared
+timing structure and clock feel. Consumers attach it with `rhythm <name>`:
+
+```text
+VOICE lead:
+    sound resonator.string
+    pitch melody rhythm groove
+    damping rnd(40,80) rhythm pulse chance 35
+```
+
+`chance`, `coin`, and `loose` belong to the consuming event and are therefore
+not stored inside a `RHYTHM` SET. This allows the same rhythm to be reused with
+different local behavior:
+
+```text
+VOICE bass:
+    pitch bassline rhythm groove chance 90
+
+VOICE lead:
+    pitch melody rhythm groove chance 55, loose
+```
+
 `SET` declarations can be local to `VOICE`, `FX`, `FILTER`, or `DRUMKIT` scopes. A local
 name shadows a global name only inside its owning object. This is useful for
 notes, scalar values, timing values, and structured envelopes.
@@ -787,6 +817,22 @@ VOICE lead:
     sound macro.fm
     morph rnd(20,80)
 ```
+
+For reusable complete timing expressions, use a typed `RHYTHM` SET:
+
+```text
+SET groove: RHYTHM pattern [1 5 9 13] steps 16
+SET euclid: RHYTHM every euclidean 5/16 on rotate 2
+SET human: RHYTHM every 1 beat on clock /2, jitter 30, drifter 8
+
+VOICE lead:
+    pitch melody rhythm groove
+    timbre rnd(20,80) rhythm euclid chance 40
+```
+
+A `RHYTHM` SET may contain `every`, `every euclidean`, `pattern`, `steps`,
+`mode`, `rotate`, `on clock`, and inline clock `jitter`/`drifter`. Event-local
+`chance`, `coin`, and `loose` are appended at the use site instead.
 
 All jobs remain synchronized to the shared runtime scheduler.
 

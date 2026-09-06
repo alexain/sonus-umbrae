@@ -74,7 +74,7 @@ export function parseProgramCapabilities(source: string): ProgramCapabilitySet {
   return { capabilities, directiveLine, directiveText };
 }
 
-type SourceKind = 'voice' | 'note' | 'freq' | 'time' | 'clock' | 'trigger' | 'scalar' | 'scale' | 'seq' | 'register' | 'envelope' | 'kit';
+type SourceKind = 'voice' | 'note' | 'freq' | 'time' | 'clock' | 'trigger' | 'scalar' | 'scale' | 'seq' | 'register' | 'envelope' | 'kit' | 'rhythm';
 
 type SourceDefinition =
   | { kind: 'scalar'; internalName?: string }
@@ -86,7 +86,8 @@ type SourceDefinition =
   | { kind: 'seq'; model: 'turing' | 'life' | 'constellation' | 'snake' | null; values: number[]; display: string; internalName?: string }
   | { kind: 'register'; size: number; display: string; internalName?: string }
   | { kind: 'envelope'; spec: EnvelopeSpec; display: string; internalName?: string }
-  | { kind: 'kit'; kit: DrumKitDefinition; display: string; internalName?: string };
+  | { kind: 'kit'; kit: DrumKitDefinition; display: string; internalName?: string }
+  | { kind: 'rhythm'; spec: EverySpec; display: string; internalName?: string };
 
 
 type EnvelopeCurve = 'lin' | 'log';
@@ -1563,6 +1564,21 @@ type EverySpec = {
 };
 
 function splitEveryClause(value: string): { base: string; every: string | null } {
+  const rhythm = value.match(/^(.*?)\s+rhythm\s+([A-Za-z_][A-Za-z0-9_]*)(.*)$/i);
+  if (rhythm) {
+    const tail = rhythm[3].trim();
+    let modifiers = '';
+    if (tail) {
+      const normalized = tail.replace(/^,\s*/, '').trim();
+      if (!normalized) throw new LanguageError([{ line: 1, message: 'RHYTHM has an empty modifier list' }]);
+      const parts = normalized.split(',').map((item) => item.trim()).filter(Boolean);
+      // For the common single-modifier form, allow `RHYTHM groove CHANCE 80`
+      // without requiring a comma. Multiple modifiers remain comma-separated.
+      modifiers = ` ON ${parts.join(', ')}`;
+    }
+    return { base: rhythm[1].trim(), every: `RHYTHM ${rhythm[2]}${modifiers}` };
+  }
+
   const every = value.match(/^(.*?)(?:\s+mode\s+(forward|reverse|pendulum|walk|random))?\s+every\s+(.+)$/i);
   if (every) {
     const mode = every[2]?.toLowerCase();
@@ -1644,7 +1660,7 @@ function parsePatternTimingSpec(raw: string, line: number, sourceDefinitions: Ma
     const safe = label.replace('/', 'div_').replace('*', 'mul_').replace('.', '_');
     clockSource = `__clock_pattern_${line}_${safe}`;
     const feelPrelude = inlineClockFeelPrelude(clockSource, inlineClockFeel);
-    clockPrelude = `${clockSource} = Clock.rate(${JSON.stringify(label)});${feelPrelude ? ` ${feelPrelude}` : ''}`;
+    clockPrelude = `${clockSource} = Clock.rate(${JSON.stringify(label)}); __clockparent(${JSON.stringify(clockSource)},"Clock",${JSON.stringify(label)});${feelPrelude ? ` ${feelPrelude}` : ''}`;
   } else {
     if (inlineClockFeel.jitter !== null || inlineClockFeel.drifter !== null) {
       throw new LanguageError([{ line, message: 'jitter/drifter after PATTERN ON CLOCK require an inline clock rate such as /4 or *2; named CLOCK objects define their own feel' }]);
@@ -1732,6 +1748,25 @@ function parseEverySpec(
   line: number,
   sourceDefinitions: Map<string, SourceDefinition>,
 ): EverySpec {
+  const rhythm = raw.trim().match(/^RHYTHM\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+ON\s+(.+))?$/i);
+  if (rhythm) {
+    const definition = sourceDefinitions.get(rhythm[1]);
+    if (!definition) throw new LanguageError([{ line, message: `unknown RHYTHM source '${rhythm[1]}'` }]);
+    if (definition.kind !== 'rhythm') {
+      throw new LanguageError([{ line, message: `source '${rhythm[1]}' is ${definition.kind}, expected RHYTHM SET value` }]);
+    }
+    const localModifiers = rhythm[2]
+      ? rhythm[2].split(',').map((item) => item.trim()).filter(Boolean)
+      : [];
+    const local = parseTimingModifiers(localModifiers, line, definition.spec.unit);
+    return {
+      ...definition.spec,
+      chance: local.chance,
+      drift: local.drift,
+      loose: local.loose,
+    };
+  }
+
   const pattern = parsePatternTimingSpec(raw, line, sourceDefinitions);
   if (pattern) return pattern;
   const { base, modifiers } = splitEveryModifiers(raw.trim());
@@ -1826,7 +1861,7 @@ function parseEverySpec(
       const safe = label.replace('/', 'div_').replace('*', 'mul_').replace('.', '_');
       clockSource = `__clock_${line}_${safe}`;
       const feelPrelude = inlineClockFeelPrelude(clockSource, inlineClockFeel);
-      clockPrelude = `${clockSource} = Clock.rate(${JSON.stringify(label)});${feelPrelude ? ` ${feelPrelude}` : ''}`;
+      clockPrelude = `${clockSource} = Clock.rate(${JSON.stringify(label)}); __clockparent(${JSON.stringify(clockSource)},"Clock",${JSON.stringify(label)});${feelPrelude ? ` ${feelPrelude}` : ''}`;
       inlineClockCreated = true;
       continue;
     }
@@ -2327,6 +2362,26 @@ function compileSet(
   }
 
   const body = match[2].trim();
+
+  const rhythm = body.match(/^RHYTHM\s+(.+)$/i);
+  if (rhythm) {
+    let timingText = rhythm[1].trim();
+    if (/^every\b/i.test(timingText)) timingText = timingText.replace(/^every\s+/i, '');
+    if (!timingText) throw new LanguageError([{ line, message: 'RHYTHM expects EVERY ..., EVERY EUCLIDEAN ..., or PATTERN ...' }]);
+
+    // Probability/humanization belongs to each consumer. A reusable RHYTHM SET
+    // stores only the shared pulse structure and clock feel.
+    const eventModifier = timingText.match(/(?:^|[,\s])(?:chance\s+[^,]+|coin|loose)(?=,|$)/i);
+    if (eventModifier) {
+      throw new LanguageError([{ line, message: 'RHYTHM SET values cannot contain chance, coin, or loose; apply them where the RHYTHM is consumed' }]);
+    }
+
+    const spec = parseEverySpec(timingText, line, sourceDefinitions);
+    scalarNames.add(name);
+    sourceKinds.set(name, 'rhythm');
+    sourceDefinitions.set(name, { kind: 'rhythm', spec, display: `RHYTHM ${rhythm[1].trim()}`, internalName: runtimeName });
+    return `${runtimeName} = ${JSON.stringify(`RHYTHM ${rhythm[1].trim()}`)};`;
+  }
 
   const envelope = parseEnvelopeSpec(body, line);
   if (envelope) {
