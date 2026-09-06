@@ -169,6 +169,7 @@ export class RuntimeScheduler {
 
     const clockSources = new Set(this.beatJobs.map((job) => job.sourceName));
     for (const sourceName of clockSources) {
+      if (sourceName.startsWith('__logic__')) continue;
       this.clockUnsubscribes.push(
         this.audio.subscribeClockTrigger(sourceName, () => this.tickBeat(sourceName)),
       );
@@ -183,6 +184,10 @@ export class RuntimeScheduler {
     for (const unsubscribe of this.clockUnsubscribes) unsubscribe();
     this.clockUnsubscribes = [];
     this.deferred = [];
+  }
+
+  emitTrigger(sourceName: string): void {
+    this.tickBeat(sourceName);
   }
 
   resetBeatPhase(): void {

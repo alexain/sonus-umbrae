@@ -1675,6 +1675,80 @@ there is no implicit quantization to `1/N`, `2/N`, etc.
 modifier applies to changes of the spread value, while the `loose` amount stays
 attached to that spread declaration.
 
+## LOGIC
+
+`LOGIC` declares a reusable multi-output event circuit. It combines `RHYTHM`
+SET values and earlier nodes in the same object. Each named node becomes a
+public event output addressed as `object.node`.
+
+```text
+SET groove: RHYTHM pattern [1 5 9 13] steps 16
+SET accents: RHYTHM every euclidean 5/16
+
+LOGIC gates with view:
+    xor fill [
+        groove,
+        accents
+    ]
+
+    and strong [
+        groove,
+        accents
+    ]
+
+    divider half [fill] by 2
+```
+
+The current combinational operators are `and`, `or`, `xor`, `nand`, and
+`nor`. `divider`, `counter`, and `flipflop` are stateful nodes. `divider` and
+`counter` accept `BY`/`COUNT 2..64`; `flipflop` toggles on each input pulse.
+Node inputs are event pulses, so combinational gates react to pulses that
+coincide in the same scheduler turn. `NOT` is intentionally deferred until
+Sonus Umbrae has an explicit sustained gate/boolean signal type.
+
+A LOGIC output can replace an inline timing clause on any property that already
+accepts `every`, `pattern`, or `rhythm`:
+
+```text
+VOICE lead:
+    sound sawtooth
+    pitch notes [C3 E3 G3] logic gates.fill
+
+VOICE bass:
+    sound square
+    pitch notes [C2 G2] logic gates.half chance 80
+```
+
+`chance`, `coin`, and `loose` remain local consumer modifiers. They do not
+change the LOGIC circuit itself.
+
+`WITH VIEW` draws the object as an animated digital schematic. AND/OR/XOR and
+their inverted variants use conventional logic-gate outlines; divider,
+counter, and flip-flop use digital block symbols. Input conductors illuminate
+when pulses arrive, the gate flashes when it emits, and the named output wire
+lights when the corresponding `object.node` event is produced.
+
+LOGIC is event-domain only in this first version. Inputs can be reusable `RHYTHM`
+SET values, inline timing expressions such as `every 1 beat`, `every euclidean 5/16`
+or `pattern [1 5 9 13]`, or earlier nodes in the same LOGIC object. For example:
+
+```text
+LOGIC gates:
+    xor fill [
+        groove,
+        every 1 beat
+    ]
+
+    and accent_gate [
+        every euclidean 5/16,
+        pattern [1 5 9 13]
+    ]
+```
+
+Inline LOGIC inputs describe trigger structure only; `chance`, `coin`, and `loose`
+remain consumer-local modifiers. MOD/audio-rate inputs and
+continuous comparators belong to a later control-signal extension.
+
 ## REGISTER
 
 `REGISTER` stores pitch values from a `SEQ` source. The first model is `shift`,

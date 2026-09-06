@@ -53,6 +53,7 @@ const RESERVED_IDENTIFIERS = new Set([
   'pattern',
   'scale',
   'gain',
+  'logic',
 
   // Current expression functions.
   'rnd',
@@ -119,6 +120,27 @@ export interface ParameterViewState {
 export interface VariableViewState {
   name: string;
   value: string;
+}
+
+
+export interface LogicViewInputState {
+  label: string;
+  active: boolean;
+}
+
+export interface LogicViewNodeState {
+  name: string;
+  operator: 'and' | 'or' | 'xor' | 'nand' | 'nor' | 'divider' | 'counter' | 'flipflop';
+  inputs: LogicViewInputState[];
+  outputActive: boolean;
+  stateValue: number;
+  parameter: number;
+}
+
+export interface LogicViewState {
+  name: string;
+  revision: number;
+  nodes: LogicViewNodeState[];
 }
 
 export interface TuringViewState {
@@ -404,6 +426,18 @@ interface LanguageSnakeDefinition extends SnakeDefinition {
 interface LanguageSnakeReaderDefinition {
   voice: string;
   seq: string;
+}
+
+type LanguageLogicOperator = 'and' | 'or' | 'xor' | 'nand' | 'nor' | 'divider' | 'counter' | 'flipflop';
+type LanguageLogicInput =
+  | { kind: 'node'; name: string }
+  | { kind: 'rhythm'; name: string; spec: LanguageCycleDefinition & { clockPrelude?: string; euclidean?: { hits: number; steps: number; rotate: number } | null } };
+interface LanguageLogicNodeDefinition {
+  owner: string;
+  name: string;
+  operator: LanguageLogicOperator;
+  inputs: LanguageLogicInput[];
+  parameter: number;
 }
 
 interface LanguageLifeDefinition {
@@ -724,6 +758,9 @@ export class SonusRuntime {
   private lifeViews = new Map<string, LifeViewState>();
   private constellationViews = new Map<string, ConstellationViewState>();
   private snakeViews = new Map<string, SnakeViewState>();
+  private logicViews = new Map<string, LogicViewState>();
+  private logicPulseUntil = new Map<string, number>();
+  private logicNodeState = new Map<string, { count: number; toggle: boolean }>();
   private drumkitViews = new Map<string, DrumkitViewState>();
   private drumViewMasterBeat = 0;
   private drumViewMasterBeatAt = performance.now();
@@ -791,6 +828,7 @@ export class SonusRuntime {
       lifeViews: this.lifeViews,
       constellationViews: this.constellationViews,
       snakeViews: this.snakeViews,
+      logicViews: this.logicViews,
       drumkitViews: this.drumkitViews,
       randomState: this.randomState,
     };
@@ -806,6 +844,7 @@ export class SonusRuntime {
       this.lifeViews = saved.lifeViews;
       this.constellationViews = saved.constellationViews;
       this.snakeViews = saved.snakeViews;
+      this.logicViews = saved.logicViews;
       this.drumkitViews = saved.drumkitViews;
       this.randomState = saved.randomState;
     }
@@ -847,6 +886,19 @@ export class SonusRuntime {
 
   getSnakeViews(): SnakeViewState[] {
     return [...this.snakeViews.values()].map((view) => ({ ...view, history: [...view.history] }));
+  }
+
+  getLogicViews(): LogicViewState[] {
+    const now = performance.now();
+    return [...this.logicViews.values()].map((view) => ({
+      ...view,
+      nodes: view.nodes.map((node) => ({
+        ...node,
+        inputs: node.inputs.map((input) => ({ ...input, active: (this.logicPulseUntil.get(`${view.name}:in:${node.name}:${input.label}`) ?? 0) > now })),
+        outputActive: (this.logicPulseUntil.get(`${view.name}:out:${node.name}`) ?? 0) > now,
+        stateValue: this.logicNodeState.get(`${view.name}.${node.name}`)?.count ?? (this.logicNodeState.get(`${view.name}.${node.name}`)?.toggle ? 1 : 0),
+      })),
+    }));
   }
 
   getDrumkitViews(): DrumkitViewState[] {
@@ -954,6 +1006,7 @@ export class SonusRuntime {
       lifeViews: this.lifeViews,
       constellationViews: this.constellationViews,
       snakeViews: this.snakeViews,
+      logicViews: this.logicViews,
       drumkitViews: this.drumkitViews,
       scheme: this.scheme,
       randomState: this.randomState,
@@ -971,6 +1024,7 @@ export class SonusRuntime {
       this.lifeViews = saved.lifeViews;
       this.constellationViews = saved.constellationViews;
       this.snakeViews = saved.snakeViews;
+      this.logicViews = saved.logicViews;
       this.drumkitViews = saved.drumkitViews;
       this.scheme = saved.scheme;
       this.randomState = saved.randomState;
@@ -998,6 +1052,8 @@ export class SonusRuntime {
       this.lifeReaderState.clear();
       this.constellationReaderState.clear();
       this.snakeReaderState.clear();
+      this.logicPulseUntil.clear();
+      this.logicNodeState.clear();
       this.registerState.clear();
       this.registerReaderState.clear();
       this.voiceSequenceState.clear();
@@ -1037,6 +1093,7 @@ export class SonusRuntime {
     const languageLives = new Map<string, LanguageLifeDefinition>();
     const languageConstellations = new Map<string, LanguageConstellationDefinition>();
     const languageSnakes = new Map<string, LanguageSnakeDefinition>();
+    const languageLogics = new Map<string, { view: boolean; nodes: LanguageLogicNodeDefinition[] }>();
     const languageSnakeReaders = new Map<string, LanguageSnakeReaderDefinition>();
     const languageConstellationReaders = new Map<string, LanguageConstellationReaderDefinition>();
     const languageLifeReaders = new Map<string, LanguageLifeReaderDefinition>();
@@ -1078,6 +1135,15 @@ export class SonusRuntime {
     const languageModSets: LanguageModSetDirective[] = [];
     let languageMasterClock: LanguageMasterClockDefinition | null = null;
     for (const { source: line, line: lineNumber } of lines) {
+      const logicDeclaration = parseLanguageLogicDirective(line);
+      if (logicDeclaration) { languageLogics.set(logicDeclaration.name, { view: logicDeclaration.view, nodes: [] }); continue; }
+      const logicNode = parseLanguageLogicNodeDirective(line);
+      if (logicNode) {
+        const logic = languageLogics.get(logicNode.owner);
+        if (logic) logic.nodes.push(logicNode);
+        continue;
+      }
+
       const compositePitch = parseLanguageCompositePitch(line);
       if (compositePitch) { languageCompositePitchVoices.add(compositePitch.name); continue; }
 
@@ -1834,7 +1900,7 @@ export class SonusRuntime {
     // source order. All module declarations already exist, so references between
     // modules are still independent from declaration order.
     for (const { source: line, line: lineNumber } of lines) {
-      if (parseLanguageCompositePitch(line) || parseLanguageCompositeTune(line) || parseLanguageCompositeEdge(line) || parseLanguageCompositeMix(line) || parseLanguageCompositeOutput(line) || parseLanguageDrumkitDirective(line) || parseLanguageDrumkitMetaDirective(line) || parseLanguageDrumSlotDirective(line) || parseLanguageTuningDirective(line) !== null || parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageSeqModel(line) || parseLanguageSeqWeights(line) || parseLanguageConstellationParam(line) || parseLanguageConstellationOctaves(line) || parseLanguageConstellationReader(line) || parseLanguageSnakeSize(line) || parseLanguageSnakeMovement(line) || parseLanguageSnakeMatrix(line) || parseLanguageSnakeReader(line) || parseLanguageSeqSize(line) || parseLanguageLifeDensity(line) || parseLanguageLifeReader(line) || parseLanguageLifeEvolve(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageEnvelopeDirective(line, lineNumber) || parseLanguageFxMetadata(line) || parseLanguageDelayTime(line) || parseLanguageDelayParam(line, lineNumber) || parseLanguageDelayParamDefault(line, lineNumber) || parseLanguageDelayParamCycle(line, lineNumber) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
+      if (parseLanguageLogicDirective(line) || parseLanguageLogicNodeDirective(line) || parseLanguageCompositePitch(line) || parseLanguageCompositeTune(line) || parseLanguageCompositeEdge(line) || parseLanguageCompositeMix(line) || parseLanguageCompositeOutput(line) || parseLanguageDrumkitDirective(line) || parseLanguageDrumkitMetaDirective(line) || parseLanguageDrumSlotDirective(line) || parseLanguageTuningDirective(line) !== null || parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageSeqModel(line) || parseLanguageSeqWeights(line) || parseLanguageConstellationParam(line) || parseLanguageConstellationOctaves(line) || parseLanguageConstellationReader(line) || parseLanguageSnakeSize(line) || parseLanguageSnakeMovement(line) || parseLanguageSnakeMatrix(line) || parseLanguageSnakeReader(line) || parseLanguageSeqSize(line) || parseLanguageLifeDensity(line) || parseLanguageLifeReader(line) || parseLanguageLifeEvolve(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageEnvelopeDirective(line, lineNumber) || parseLanguageFxMetadata(line) || parseLanguageDelayTime(line) || parseLanguageDelayParam(line, lineNumber) || parseLanguageDelayParamDefault(line, lineNumber) || parseLanguageDelayParamCycle(line, lineNumber) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
 
       const gainDeclaration = parseGainDeclaration(line);
       if (gainDeclaration) {
@@ -4721,6 +4787,88 @@ export class SonusRuntime {
       }
     }
 
+    // LOGIC objects turn reusable RHYTHM streams into named event outputs.
+    this.logicViews.clear();
+    for (const [logicName, logic] of languageLogics) {
+      if (logic.view) {
+        this.logicViews.set(logicName, {
+          name: logicName,
+          revision: 0,
+          nodes: logic.nodes.map((node) => ({
+            name: node.name,
+            operator: node.operator,
+            inputs: node.inputs.map((input) => ({ label: input.name, active: false })),
+            outputActive: false,
+            stateValue: 0,
+            parameter: node.parameter,
+          })),
+        });
+      }
+      const pendingInputs = new Map<string, Set<string>>();
+      let evaluationTimer: ReturnType<typeof setTimeout> | null = null;
+      // Inputs belonging to the same logical instant can arrive through separate
+      // scheduler callbacks.  A microtask is too early in that case: XOR sees
+      // each pulse separately and AND misses the coincidence.  Collect a very
+      // short event bucket before evaluating the graph.
+      const logicCoincidenceWindowMs = 6;
+      const markInput = (nodeName: string, inputName: string): void => {
+        const set = pendingInputs.get(nodeName) ?? new Set<string>();
+        set.add(inputName);
+        pendingInputs.set(nodeName, set);
+        this.logicPulseUntil.set(`${logicName}:in:${nodeName}:${inputName}`, performance.now() + 140);
+        if (evaluationTimer !== null) return;
+        evaluationTimer = setTimeout(() => {
+          evaluationTimer = null;
+          const nodeOutputs = new Map<string, boolean>();
+          let changed = false;
+          for (const node of logic.nodes) {
+            const activeNames = pendingInputs.get(node.name) ?? new Set<string>();
+            const values = node.inputs.map((input) => input.kind === 'node' ? Boolean(nodeOutputs.get(input.name)) : activeNames.has(input.name));
+            let output = false;
+            if (node.operator === 'and') output = values.every(Boolean);
+            else if (node.operator === 'or') output = values.some(Boolean);
+            else if (node.operator === 'xor') output = values.filter(Boolean).length % 2 === 1;
+            else if (node.operator === 'nand') output = !values.every(Boolean);
+            else if (node.operator === 'nor') output = !values.some(Boolean);
+            else if (node.operator === 'divider' || node.operator === 'counter') {
+              const key = `${logicName}.${node.name}`;
+              const state = this.logicNodeState.get(key) ?? { count: 0, toggle: false };
+              if (values[0]) state.count += 1;
+              output = values[0] && state.count % Math.max(2, node.parameter) === 0;
+              this.logicNodeState.set(key, state);
+            } else if (node.operator === 'flipflop') {
+              const key = `${logicName}.${node.name}`;
+              const state = this.logicNodeState.get(key) ?? { count: 0, toggle: false };
+              if (values[0]) state.toggle = !state.toggle;
+              output = values[0] && state.toggle;
+              this.logicNodeState.set(key, state);
+            }
+            nodeOutputs.set(node.name, output);
+            if (output) {
+              changed = true;
+              this.logicPulseUntil.set(`${logicName}:out:${node.name}`, performance.now() + 180);
+              this.scheduler.emitTrigger(`__logic__${logicName}.${node.name}`);
+            }
+          }
+          pendingInputs.clear();
+          const view = this.logicViews.get(logicName);
+          if (view && changed) view.revision += 1;
+        }, logicCoincidenceWindowMs);
+      };
+      for (const node of logic.nodes) {
+        for (const input of node.inputs) {
+          if (input.kind !== 'rhythm') continue;
+          const timing = input.spec;
+          const fire = (): void => markInput(node.name, input.name);
+          if (timing.unit === 'beat') this.scheduler.addBeatJob(`logic:${logicName}:${node.name}:${input.name}`, timing.amount, fire, false, timing.clockSource);
+          else {
+            const ms = timing.unit === 'sec' ? timing.amount * 1000 : timing.amount;
+            this.scheduler.addWallJob(`logic:${logicName}:${node.name}:${input.name}`, ms, fire);
+          }
+        }
+      }
+    }
+
     this.scheduler.start();
 
       for (const handler of whenHandlers) {
@@ -4946,6 +5094,23 @@ function matchesCycle(condition: CycleCondition | null, eventIndex: number): boo
   if (condition.first) return eventIndex === 1;
   if (condition.notFirst) return eventIndex > 1;
   return ((eventIndex - 1) % condition.length!) + 1 === condition.position;
+}
+
+function parseLanguageLogicDirective(line: string): { name: string; view: boolean } | null {
+  const match = line.match(/^__logic\("([A-Za-z_]\w*)",(true|false)\)$/);
+  if (!match) return null;
+  return { name: match[1], view: match[2] === 'true' };
+}
+
+function parseLanguageLogicNodeDirective(line: string): LanguageLogicNodeDefinition | null {
+  const match = line.match(/^__logicnode\("([A-Za-z_]\w*)","([A-Za-z_]\w*)","(and|or|xor|nand|nor|divider|counter|flipflop)","((?:[^"\\]|\\.)*)",(\d+)\)$/);
+  if (!match) return null;
+  try {
+    const inputs = JSON.parse(JSON.parse(`"${match[4]}"`)) as LanguageLogicInput[];
+    return { owner: match[1], name: match[2], operator: match[3] as LanguageLogicOperator, inputs, parameter: Number(match[5]) };
+  } catch {
+    return null;
+  }
 }
 
 function parseLanguageRegisterDeclaration(line: string): string | null {
@@ -5184,7 +5349,7 @@ function parseLanguageCycleDirective(
   line: string,
 ): ({ name: string } & LanguageCycleDefinition) | null {
   const match = line.match(
-    /^__cycle\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/,
+    /^__cycle\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([^"]+)"\)$/,
   );
   if (!match) return null;
   return {
@@ -5561,7 +5726,7 @@ function parseLanguageObjectEveryDirective(
   line: string,
 ): ({ name: string } & LanguageObjectEveryDefinition) | null {
   const match = line.match(
-    /^__objectevery\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/,
+    /^__objectevery\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([^"]+)"\)$/,
   );
   if (!match) return null;
   return {
@@ -5576,7 +5741,7 @@ function parseLanguageObjectEveryDirective(
 }
 
 function parseLanguageDriveEvery(line: string): ({ name: string } & LanguageObjectEveryDefinition) | null {
-  const match = line.match(/^__driveevery\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/);
+  const match = line.match(/^__driveevery\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([^"]+)"\)$/);
   if (!match) return null;
   return {
     name: match[1],

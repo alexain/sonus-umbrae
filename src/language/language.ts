@@ -93,7 +93,7 @@ export function parseProgramCapabilities(source: string): ProgramCapabilitySet {
   return { capabilities, tuningHz, directiveLine, directiveText };
 }
 
-type SourceKind = 'voice' | 'note' | 'freq' | 'time' | 'clock' | 'trigger' | 'scalar' | 'scale' | 'seq' | 'register' | 'envelope' | 'kit' | 'rhythm';
+type SourceKind = 'voice' | 'note' | 'freq' | 'time' | 'clock' | 'trigger' | 'scalar' | 'scale' | 'seq' | 'register' | 'envelope' | 'kit' | 'rhythm' | 'logic';
 
 type SourceDefinition =
   | { kind: 'scalar'; internalName?: string }
@@ -106,7 +106,8 @@ type SourceDefinition =
   | { kind: 'register'; size: number; display: string; internalName?: string }
   | { kind: 'envelope'; spec: EnvelopeSpec; display: string; internalName?: string }
   | { kind: 'kit'; kit: DrumKitDefinition; display: string; internalName?: string }
-  | { kind: 'rhythm'; spec: EverySpec; display: string; internalName?: string };
+  | { kind: 'rhythm'; spec: EverySpec; display: string; internalName?: string }
+  | { kind: 'logic'; display: string; internalName?: string };
 
 
 type EnvelopeCurve = 'lin' | 'log';
@@ -144,6 +145,9 @@ type DrumSlotDefaults = {
 type DrumKitEntry = { source: DrumVoiceId; alias: string; defaults: DrumSlotDefaults };
 type DrumKitDefinition = { entries: Map<string, DrumKitEntry> };
 type DrumkitState = { name: string; line: number; indentation: number; kit: DrumKitDefinition | null; viewSteps: number };
+
+type LogicOperator = 'and' | 'or' | 'xor' | 'nand' | 'nor' | 'divider' | 'counter' | 'flipflop';
+type LogicState = { name: string; line: number; indentation: number; view: boolean; nodes: Set<string> };
 
 const DRUM_DEFAULTS: DrumSlotDefaults = {
   level: 100, pan: 0, tune: 0, decay: 70,
@@ -1688,6 +1692,13 @@ type EverySpec = {
 };
 
 function splitEveryClause(value: string): { base: string; every: string | null } {
+  const logic = value.match(/^(.*?)\s+logic\s+([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)(.*)$/i);
+  if (logic) {
+    const tail = logic[4].trim();
+    const modifiers = tail ? ` ON ${tail.replace(/^,\s*/, '').trim()}` : '';
+    return { base: logic[1].trim(), every: `LOGIC ${logic[2]}.${logic[3]}${modifiers}` };
+  }
+
   const rhythm = value.match(/^(.*?)\s+rhythm\s+([A-Za-z_][A-Za-z0-9_]*)(.*)$/i);
   if (rhythm) {
     const tail = rhythm[3].trim();
@@ -1872,6 +1883,16 @@ function parseEverySpec(
   line: number,
   sourceDefinitions: Map<string, SourceDefinition>,
 ): EverySpec {
+  const logic = raw.trim().match(/^LOGIC\s+([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)(?:\s+ON\s+(.+))?$/i);
+  if (logic) {
+    const key = `${logic[1]}.${logic[2]}`;
+    const definition = sourceDefinitions.get(key);
+    if (!definition || definition.kind !== 'logic') throw new LanguageError([{ line, message: `unknown LOGIC output '${key}'` }]);
+    const modifiers = logic[3] ? logic[3].split(',').map((item) => item.trim()).filter(Boolean) : [];
+    const local = parseTimingModifiers(modifiers, line, 'beat');
+    return { amount: 1, unit: 'beat', chance: local.chance, drift: local.drift, loose: local.loose, clockSource: `__logic__${key}`, clockPrelude: '', euclidean: null };
+  }
+
   const rhythm = raw.trim().match(/^RHYTHM\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+ON\s+(.+))?$/i);
   if (rhythm) {
     const definition = sourceDefinitions.get(rhythm[1]);
@@ -2113,6 +2134,67 @@ function compileRegisterProperty(
   }
 
   throw new LanguageError([{ line, message: `unknown REGISTER property '${property}'` }]);
+}
+
+function compileLogicNode(
+  logic: LogicState,
+  raw: string,
+  line: number,
+  sourceDefinitions: Map<string, SourceDefinition>,
+  emittedClockPreludes: Set<string>,
+): string {
+  const match = raw.trim().match(/^(and|or|xor|nand|nor|divider|counter|flipflop)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[(.*)\](?:\s+(?:by|count)\s+(\d+))?$/i);
+  if (!match) throw new LanguageError([{ line, message: 'LOGIC node expects <operator> <name> [inputs] [BY|COUNT n]' }]);
+  const operator = match[1].toLowerCase() as LogicOperator;
+  const name = match[2];
+  if (logic.nodes.has(name)) throw new LanguageError([{ line, message: `LOGIC '${logic.name}' already defines '${name}'` }]);
+  const rawInputs = match[3].trim();
+  const inputs = (rawInputs.includes(';') ? rawInputs.split(';') : rawInputs.split(','))
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (operator === 'divider' || operator === 'counter' || operator === 'flipflop') {
+    if (inputs.length !== 1) throw new LanguageError([{ line, message: `LOGIC ${operator.toUpperCase()} expects exactly one input` }]);
+  } else if (inputs.length < 2) {
+    throw new LanguageError([{ line, message: `LOGIC ${operator.toUpperCase()} expects at least two inputs` }]);
+  }
+  const param = match[4] ? Number(match[4]) : (operator === 'divider' || operator === 'counter' ? 2 : 0);
+  if ((operator === 'divider' || operator === 'counter') && (!Number.isInteger(param) || param < 2 || param > 64)) {
+    throw new LanguageError([{ line, message: `LOGIC ${operator.toUpperCase()} expects BY/COUNT 2..64` }]);
+  }
+  const preludes: string[] = [];
+  const resolved = inputs.map((input) => {
+    if (logic.nodes.has(input)) return { kind: 'node', name: input };
+
+    const source = sourceDefinitions.get(input);
+    let spec: EverySpec;
+    if (source) {
+      if (source.kind !== 'rhythm') {
+        throw new LanguageError([{ line, message: `LOGIC input '${input}' must be a RHYTHM SET, inline timing expression, or an earlier node in this LOGIC object` }]);
+      }
+      spec = source.spec;
+    } else {
+      const inlineEvery = input.match(/^every\s+(.+)$/i);
+      const inlinePattern = /^pattern\s+\[/i.test(input);
+      if (!inlineEvery && !inlinePattern) {
+        throw new LanguageError([{ line, message: `unknown LOGIC trigger source '${input}'` }]);
+      }
+      spec = parseEverySpec(inlineEvery ? inlineEvery[1] : input, line, sourceDefinitions);
+      if (spec.chance !== 100 || spec.drift || spec.loose) {
+        throw new LanguageError([{ line, message: 'inline LOGIC inputs do not accept CHANCE, COIN, or LOOSE; apply those modifiers to the consumer instead' }]);
+      }
+    }
+
+    if (spec.clockPrelude && !emittedClockPreludes.has(spec.clockPrelude)) {
+      emittedClockPreludes.add(spec.clockPrelude);
+      preludes.push(spec.clockPrelude);
+    }
+    const runtimeSpec = { ...spec, clockPrelude: '' };
+    return { kind: 'rhythm', name: input, spec: runtimeSpec };
+  });
+  logic.nodes.add(name);
+  sourceDefinitions.set(`${logic.name}.${name}`, { kind: 'logic', display: `LOGIC ${logic.name}.${name}` });
+  const directive = `__logicnode(${JSON.stringify(logic.name)},${JSON.stringify(name)},${JSON.stringify(operator)},${JSON.stringify(JSON.stringify(resolved))},${param});`;
+  return preludes.length > 0 ? `${preludes.join('\n')}\n${directive}` : directive;
 }
 
 function requireSeqReady(seq: SeqState | null, diagnostics: LanguageDiagnostic[]): void {
@@ -3792,6 +3874,33 @@ export function compileLanguageSource(source: string): string {
     lines[index] = `${' '.repeat(indentation)}matrix [${rows.join('; ')}]`;
   }
 
+  // Multiline LOGIC node input lists compile to one structured line.
+  for (let index = 0; index < lines.length; index += 1) {
+    const raw = stripComment(lines[index]);
+    const trimmed = raw.trim();
+    const declaration = trimmed.match(/^(and|or|xor|nand|nor|divider|counter|flipflop)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*$/i);
+    if (!declaration) continue;
+    const indentation = raw.length - raw.trimStart().length;
+    const entries: string[] = [];
+    let next = index + 1;
+    let closed = false;
+    let suffix = '';
+    while (next < lines.length) {
+      const childRaw = stripComment(lines[next]);
+      const childTrimmed = childRaw.trim();
+      if (!childTrimmed) { lines[next] = ''; next += 1; continue; }
+      const closing = childTrimmed.match(/^\](?:\s+((?:by|count)\s+\d+))?\s*$/i);
+      if (closing) { lines[next] = ''; closed = true; suffix = closing[1] ? ` ${closing[1]}` : ''; break; }
+      const childIndentation = childRaw.length - childRaw.trimStart().length;
+      if (childIndentation <= indentation) break;
+      entries.push(childTrimmed.replace(/,\s*$/, '').trim());
+      lines[next] = '';
+      next += 1;
+    }
+    if (!closed || entries.length === 0) throw new LanguageError([{ line: index + 1, message: 'LOGIC node input list requires one or more inputs and a closing ]' }]);
+    lines[index] = `${' '.repeat(indentation)}${declaration[1]} ${declaration[2]} [${entries.join('; ')}]${suffix}`;
+  }
+
   const output = Array(lines.length).fill('') as string[];
   const diagnostics: LanguageDiagnostic[] = [];
   const voices = new Set<string>();
@@ -3839,6 +3948,9 @@ export function compileLanguageSource(source: string): string {
   };
   const seqs = new Set<string>();
   const registers = new Set<string>();
+  const logics = new Set<string>();
+  const emittedLogicClockPreludes = new Set<string>();
+  let currentLogic: LogicState | null = null;
   let currentSeq: SeqState | null = null;
   let currentRegister: RegisterState | null = null;
   let currentClock: ClockState | null = null;
@@ -3867,6 +3979,7 @@ export function compileLanguageSource(source: string): string {
     const indentation = withoutComment.length - withoutComment.trimStart().length;
 
     try {
+      if (currentLogic && indentation <= currentLogic.indentation) currentLogic = null;
       if (currentMod && indentation <= currentMod.indentation) currentMod = null;
       if (currentDrumkit && indentation <= currentDrumkit.indentation) { if (!currentDrumkit.kit) diagnostics.push({ line: currentDrumkit.line, message: `DRUMKIT '${currentDrumkit.name}' requires KIT` }); currentDrumkit = null; }
       if (currentSeq && indentation <= currentSeq.indentation) { requireSeqReady(currentSeq, diagnostics); currentSeq = null; }
@@ -3935,6 +4048,21 @@ export function compileLanguageSource(source: string): string {
         continue;
       }
 
+      const logicMatch = trimmed.match(/^LOGIC\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
+      if (logicMatch) {
+        if (indentation > 0) throw new LanguageError([{ line: lineNumber, message: 'LOGIC declarations are top-level only' }]);
+        requireVoiceSound(currentVoice, diagnostics); requireFxModel(currentFx, diagnostics); requireSeqReady(currentSeq, diagnostics); requireRegisterReady(currentRegister, diagnostics);
+        currentVoice = null; currentFx = null; currentFilter = null; currentMod = null; currentSeq = null; currentRegister = null; currentClock = null;
+        const name = logicMatch[1];
+        if (voices.has(name) || fxs.has(name) || filters.has(name) || scalarNames.has(name) || seqs.has(name) || registers.has(name) || logics.has(name) || sourceDefinitions.has(name)) {
+          throw new LanguageError([{ line: lineNumber, message: `LOGIC '${name}' conflicts with an existing object or variable` }]);
+        }
+        logics.add(name);
+        currentLogic = { name, line: lineNumber, indentation, view: Boolean(logicMatch[2]), nodes: new Set() };
+        output[index] = `__logic(${JSON.stringify(name)},${logicMatch[2] ? 'true' : 'false'});`;
+        continue;
+      }
+
       const seqMatch = trimmed.match(/^SEQ\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
       if (seqMatch) {
         if (indentation > 0) throw new LanguageError([{ line: lineNumber, message: 'SEQ declarations are top-level only' }]);
@@ -3953,6 +4081,11 @@ export function compileLanguageSource(source: string): string {
         currentSeq = { name, line: lineNumber, indentation, modelId: null, lifeVariant: 'conway', length: 8, change: 10, size: 8, density: 34, maxDensity: null, values: [], weights: [], material: null, stepwise: 60, leap: 20, repeat: 10, memory: 25, octaves: [{ octave: 0, weight: 100 }], phrase: 0, mutation: 0, snakeWidth: 4, snakeHeight: 4, snakeMovement: 'snake', matrixExplicit: false };
         const viewDirective = seqMatch[2] ? `\n__seqview(${JSON.stringify(name)});` : '';
         output[index] = `__seq(${JSON.stringify(name)});${viewDirective}`;
+        continue;
+      }
+
+      if (currentLogic && indentation > currentLogic.indentation) {
+        output[index] = compileLogicNode(currentLogic, trimmed, lineNumber, sourceDefinitions, emittedLogicClockPreludes);
         continue;
       }
 
@@ -4330,12 +4463,12 @@ export function compileLanguageSource(source: string): string {
       }
 
       if (/^[A-Za-z_][A-Za-z0-9_]*\s*:/.test(trimmed)) {
-        throw new LanguageError([{ line: lineNumber, message: 'only VOICE, FX, FILTER, MOD, SEQ, REGISTER, DRUMKIT and CLOCK blocks are supported' }]);
+        throw new LanguageError([{ line: lineNumber, message: 'only VOICE, FX, FILTER, MOD, SEQ, REGISTER, DRUMKIT, LOGIC and CLOCK blocks are supported' }]);
       }
 
       throw new LanguageError([{
         line: lineNumber,
-        message: 'each top-level statement must begin with VOICE, FX, FILTER, MOD, SEQ, REGISTER, DRUMKIT, SET, CLOCK, MAIN, or OUT',
+        message: 'each top-level statement must begin with VOICE, FX, FILTER, MOD, SEQ, REGISTER, DRUMKIT, LOGIC, SET, CLOCK, MAIN, or OUT',
       }]);
     } catch (error) {
       if (error instanceof LanguageError) diagnostics.push(...error.diagnostics);
