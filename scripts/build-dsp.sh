@@ -9,6 +9,7 @@ DAISYSP="$ROOT/vendor/daisysp"
 DSPARK="$ROOT/vendor/dspark"
 MACRO_OUTPUT="$ROOT/public/dsp/macro.wasm"
 DAISY_OSCILLATORS_OUTPUT="$ROOT/public/dsp/daisy-oscillators.wasm"
+COMPOSITE_OUTPUT="$ROOT/public/dsp/composite.wasm"
 SWELL_OUTPUT="$ROOT/public/dsp/swell.wasm"
 DICES_OUTPUT="$ROOT/public/dsp/dices.wasm"
 MIST_OUTPUT="$ROOT/public/dsp/mist.wasm"
@@ -242,6 +243,24 @@ em++ \
   -o "$DAISY_OSCILLATORS_OUTPUT"
 
 echo "Built $DAISY_OSCILLATORS_OUTPUT (Electrosmith DaisySP Oscillator backend)"
+
+echo "Building composite VOICE module..."
+em++ \
+  -std=c++17 \
+  -O3 \
+  -I"$DAISYSP/Source" \
+  -I"$DAISYSP/Source/Utility" \
+  "$ROOT/dsp/composite_bridge.cc" \
+  "$DAISYSP/Source/Synthesis/oscillator.cpp" \
+  -s STANDALONE_WASM=1 \
+  -s ALLOW_MEMORY_GROWTH=0 \
+  -s INITIAL_MEMORY=8388608 \
+  -s FILESYSTEM=0 \
+  -s EXPORTED_FUNCTIONS='["_su_composite_create","_su_composite_destroy","_su_composite_set_sample_rate","_su_composite_set_operator_count","_su_composite_set_operator","_su_composite_set_edge_count","_su_composite_set_edge","_su_composite_set_mix_count","_su_composite_set_mix_input_count","_su_composite_set_mix_input","_su_composite_set_output_count","_su_composite_set_output","_su_composite_out","_su_composite_process"]' \
+  -Wl,--no-entry \
+  -o "$COMPOSITE_OUTPUT"
+
+echo "Built $COMPOSITE_OUTPUT (DaisySP composite VOICE backend)"
 
 echo "Building DaisySP filter module (SVF)..."
 em++ \

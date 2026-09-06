@@ -1,3 +1,5 @@
+import type { CompositeDefinition, CompositeDomain } from '../language/composite/types';
+
 export type AudioEngineState = 'idle' | 'running' | 'suspended';
 
 export interface AudioEngineSnapshot {
@@ -39,6 +41,7 @@ export interface AudioProgram {
     dynamicPitch?: boolean;
     width: number;
   }>;
+  composites: CompositeDefinition[];
   macros: Array<{
     name: string;
     enabled: boolean;
@@ -206,6 +209,18 @@ interface BasicVoice {
   level: number;
   frequency: number;
   width: number;
+}
+
+interface CompositeRuntime {
+  domain: CompositeDomain;
+  enabled: boolean;
+  node: AudioWorkletNode;
+  mainGain: GainNode;
+  namedOutputs: Map<string, GainNode>;
+  operatorNames: Set<string>;
+  outputs: Array<{ name: string; level: number }>;
+  level: number;
+  pitchFrequency: number | null;
 }
 
 
@@ -447,6 +462,7 @@ export class AudioEngine {
   private testOscillator: OscillatorNode | null = null;
   private testGain: GainNode | null = null;
   private basicVoices = new Map<string, BasicVoice>();
+  private composites = new Map<string, CompositeRuntime>();
   private gains = new Map<string, GainVoice>();
   private macros = new Map<string, MacroVoice>();
   private matters = new Map<string, MatterVoice>();
@@ -465,6 +481,7 @@ export class AudioEngine {
   private clockTransportRunning = true;
   private macroWasmBytes: ArrayBuffer | null = null;
   private daisyOscillatorsWasmBytes: ArrayBuffer | null = null;
+  private compositeWasmBytes: ArrayBuffer | null = null;
   private matterWasmBytes: ArrayBuffer | null = null;
   private resonatorWasmBytes: ArrayBuffer | null = null;
   private swellWasmBytes: ArrayBuffer | null = null;
@@ -476,6 +493,7 @@ export class AudioEngine {
   private daisyFiltersWasmBytes: ArrayBuffer | null = null;
   private macroWorkletLoaded = false;
   private daisyOscillatorsWorkletLoaded = false;
+  private compositeWorkletLoaded = false;
   private matterWorkletLoaded = false;
   private resonatorWorkletLoaded = false;
   private swellWorkletLoaded = false;
@@ -502,7 +520,7 @@ export class AudioEngine {
           : 'suspended',
       sampleRate: this.context?.sampleRate ?? null,
       testFrequency: this.testOscillator?.frequency.value ?? null,
-      objectCount: this.basicVoices.size + this.gains.size + this.macros.size + this.matters.size + this.resonators.size + this.swells.size + this.dices.size + this.drumkits.size + this.mists.size + this.skies.size + this.delays.size + this.filters.size + this.clocks.size,
+      objectCount: this.basicVoices.size + this.composites.size + this.gains.size + this.macros.size + this.matters.size + this.resonators.size + this.swells.size + this.dices.size + this.drumkits.size + this.mists.size + this.skies.size + this.delays.size + this.filters.size + this.clocks.size,
       routeCount: this.routes.size,
     };
   }
@@ -518,6 +536,7 @@ export class AudioEngine {
     await this.applyRequestedOutputDevice(context);
     await this.ensureMacroRuntime();
     await this.ensureDaisyOscillatorsRuntime();
+    await this.ensureCompositeRuntime();
     await this.ensureMatterRuntime();
     await this.ensureResonatorRuntime();
     await this.ensureSwellRuntime();
@@ -612,6 +631,7 @@ export class AudioEngine {
     const hotReload = options.hotReload ?? false;
     if ((program.macros.length > 0 && !this.macroWorkletLoaded) ||
         (program.basicVoices.length > 0 && !this.daisyOscillatorsWorkletLoaded) ||
+        (program.composites.length > 0 && !this.compositeWorkletLoaded) ||
         (program.matters.length > 0 && !this.matterWorkletLoaded) ||
         (program.resonators.length > 0 && !this.resonatorWorkletLoaded) ||
         (program.swells.length > 0 && !this.swellWorkletLoaded) ||
@@ -634,6 +654,7 @@ export class AudioEngine {
     }
     const desiredClockSources = new Map(program.clockSources.map((definition) => [definition.name, definition]));
     const desiredBasicVoices = new Map(program.basicVoices.map((definition) => [definition.name, definition]));
+    const desiredComposites = new Map(program.composites.map((definition) => [definition.name, definition]));
     const desiredMacros = new Map(program.macros.map((definition) => [definition.name, definition]));
     const desiredMatters = new Map(program.matters.map((definition) => [definition.name, definition]));
     const desiredResonators = new Map(program.resonators.map((definition) => [definition.name, definition]));
@@ -662,6 +683,10 @@ export class AudioEngine {
 
     for (const [name] of this.basicVoices) {
       if (!desiredBasicVoices.has(name)) this.removeBasicVoice(name);
+    }
+
+    for (const [name] of this.composites) {
+      if (!desiredComposites.has(name)) this.removeComposite(name);
     }
 
     for (const [name] of this.gains) {
@@ -712,6 +737,11 @@ export class AudioEngine {
     for (const definition of program.basicVoices) {
       this.createBasicVoice(definition);
       this.updateBasicVoice(definition, hotReload);
+    }
+
+    for (const definition of program.composites) {
+      this.createComposite(definition);
+      this.updateComposite(definition, hotReload);
     }
 
     for (const definition of program.macros) {
@@ -842,6 +872,76 @@ export class AudioEngine {
       frequency,
       width: definition.width / 100,
     });
+    // Composite operators are private instances which inherit the source
+    // VOICE engine configuration live. Their instance pitch can still be
+    // overridden by the owning composite.
+    this.updateCompositeOperator(definition.name, {
+      waveform: definition.waveform,
+      frequency,
+      width: definition.width,
+    });
+  }
+
+  private createComposite(definition: AudioProgram['composites'][number]): void {
+    if (this.composites.has(definition.name)) return;
+    if (!this.compositeWorkletLoaded || !this.compositeWasmBytes) throw new Error('Composite DSP is not ready; run :start after building the DSP');
+    const context = this.ensureContext();
+    // Output 0 is the composite master bus. Each explicitly declared output
+    // also gets its own raw public tap at output index + 1.
+    const outputCount = Math.max(1, definition.outputs.length + 1);
+    const node = new AudioWorkletNode(context, 'sonus-composite', {
+      numberOfInputs: 0,
+      numberOfOutputs: outputCount,
+      outputChannelCount: Array(outputCount).fill(1),
+      processorOptions: { wasmBytes: this.compositeWasmBytes.slice(0), hostSampleRate: context.sampleRate, outputCount },
+    });
+    const mainGain = context.createGain();
+    mainGain.gain.value = definition.enabled && (definition.domain === 'voice' || definition.outputs.length === 1) ? definition.level / 100 : 0;
+    node.connect(mainGain, 0, 0);
+    const namedOutputs = new Map<string, GainNode>();
+    definition.outputs.forEach((output, index) => {
+      const gain = context.createGain();
+      gain.gain.value = definition.enabled ? definition.level / 100 : 0;
+      node.connect(gain, index + 1, 0);
+      namedOutputs.set(output.name, gain);
+    });
+    this.composites.set(definition.name, {
+      domain: definition.domain, enabled: definition.enabled, node, mainGain, namedOutputs,
+      operatorNames: new Set(definition.operators.map((operator) => operator.name)), outputs: definition.outputs.map((output) => ({ ...output })), level: definition.level,
+      pitchFrequency: definition.pitchFrequency,
+    });
+  }
+
+  private updateComposite(definition: AudioProgram['composites'][number], hotReload = false): void {
+    let composite = this.composites.get(definition.name);
+    if (!composite) return;
+    const outputSignature = (domain: CompositeDomain, outputs: Array<{ name: string; level: number }>) => `${domain}\0${outputs.map((output) => output.name).join('\0')}`;
+    if (outputSignature(composite.domain, composite.outputs) !== outputSignature(definition.domain, definition.outputs)) {
+      this.removeComposite(definition.name);
+      this.createComposite(definition);
+      composite = this.composites.get(definition.name)!;
+    }
+    const pitchFrequency = hotReload && definition.dynamicPitch && composite.pitchFrequency !== null
+      ? composite.pitchFrequency
+      : definition.pitchFrequency;
+    composite.domain = definition.domain;
+    composite.enabled = definition.enabled;
+    composite.level = definition.level;
+    composite.pitchFrequency = pitchFrequency;
+    composite.operatorNames = new Set(definition.operators.map((operator) => operator.name));
+    composite.outputs = definition.outputs.map((output) => ({ ...output }));
+    const gain = definition.enabled ? definition.level / 100 : 0;
+    const context = this.ensureContext();
+    const mainGain = definition.domain === 'voice' || definition.outputs.length === 1 ? gain : 0;
+    composite.mainGain.gain.setTargetAtTime(mainGain, context.currentTime, 0.008);
+    for (const output of composite.namedOutputs.values()) output.gain.setTargetAtTime(gain, context.currentTime, 0.008);
+    composite.node.port.postMessage({ type: 'config', ...definition, pitchFrequency });
+  }
+
+  private updateCompositeOperator(name: string, patch: Record<string, number | string>): void {
+    for (const composite of this.composites.values()) {
+      if (composite.operatorNames.has(name)) composite.node.port.postMessage({ type: 'operator', name, patch });
+    }
   }
 
   private createMacro(definition: AudioProgram['macros'][number]): void {
@@ -1741,10 +1841,28 @@ export class AudioEngine {
       return { node, output: 0 };
     }
 
+    const compositeNamed = signal.match(/^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/);
+    if (compositeNamed) {
+      const composite = this.composites.get(compositeNamed[1]);
+      if (composite && compositeNamed[2] !== 'out' && compositeNamed[2] !== 'aux') {
+        const output = composite.namedOutputs.get(compositeNamed[2]);
+        if (!output) throw new Error(`composite '${compositeNamed[1]}' does not expose '${compositeNamed[2]}'`);
+        return { node: output, output: 0 };
+      }
+    }
+
     const match = signal.match(/^([A-Za-z_]\w*)\.(out|aux)$/);
     if (!match) throw new Error(`unknown signal: ${signal}`);
     const [, name, port] = match;
 
+    const composite = this.composites.get(name);
+    if (composite) {
+      if (port === 'aux') throw new Error(`aux output is not available on composite ${name}`);
+      if (composite.domain === 'mod' && composite.outputs.length !== 1) {
+        throw new Error(`MOD composite '${name}' has multiple outputs; use one of its named outputs`);
+      }
+      return { node: composite.mainGain, output: 0 };
+    }
     const voice = this.macros.get(name);
     if (voice) return { node: port === 'aux' ? voice.auxGain : voice.outGain, output: 0 };
     const matter = this.matters.get(name);
@@ -1941,10 +2059,18 @@ export class AudioEngine {
       matter.auxGain.gain.setTargetAtTime(gain, context.currentTime, 0.008);
       return;
     }
+    const composite = this.composites.get(name);
+    if (composite) {
+      composite.level = level;
+      composite.mainGain.gain.setTargetAtTime(gain, context.currentTime, 0.008);
+      for (const output of composite.namedOutputs.values()) output.gain.setTargetAtTime(gain, context.currentTime, 0.008);
+      return;
+    }
     const basicVoice = this.basicVoices.get(name);
     if (basicVoice) {
       basicVoice.level = level;
       basicVoice.output.gain.setTargetAtTime(gain, context.currentTime, 0.008);
+      this.updateCompositeOperator(name, { level });
       return;
     }
     const voice = this.macros.get(name);
@@ -1997,17 +2123,27 @@ export class AudioEngine {
       return;
     }
 
+    const compositeVoice = this.composites.get(name);
+    if (compositeVoice) {
+      if (parameter !== 'freq') return;
+      compositeVoice.pitchFrequency = value;
+      compositeVoice.node.port.postMessage({ type: 'pitch', frequency: value });
+      return;
+    }
+
     const basicVoice = this.basicVoices.get(name);
     if (basicVoice) {
       if (parameter === 'freq') {
         basicVoice.frequency = value;
         basicVoice.node.port.postMessage({ type: 'params', frequency: value });
+        this.updateCompositeOperator(name, { frequency: value });
         return;
       }
       if (parameter === 'width') {
         if (basicVoice.waveform !== 'square') throw new RangeError('WIDTH is only available for SOUND square');
         basicVoice.width = value;
         basicVoice.node.port.postMessage({ type: 'params', width: value / 100 });
+        this.updateCompositeOperator(name, { width: value });
         return;
       }
       return;
@@ -2110,11 +2246,20 @@ export class AudioEngine {
         matter.auxGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
         return;
       }
+      const composite = this.composites.get(name);
+      if (composite) {
+        composite.enabled = !disabled;
+        const level = disabled ? 0 : Math.max(0, Math.min(1, composite.level / 100));
+        composite.mainGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
+        for (const output of composite.namedOutputs.values()) output.gain.setTargetAtTime(level, context.currentTime, 0.008);
+        return;
+      }
       const basicVoice = this.basicVoices.get(name);
       if (basicVoice) {
         basicVoice.enabled = !disabled;
         const level = disabled ? 0 : Math.max(0, Math.min(1, basicVoice.level / 100));
         basicVoice.output.gain.setTargetAtTime(level, context.currentTime, 0.008);
+        this.updateCompositeOperator(name, { level: disabled ? 0 : basicVoice.level });
         return;
       }
       const voice = this.macros.get(name);
@@ -2451,6 +2596,18 @@ export class AudioEngine {
       if (sourceName && musicalSources.has(sourceName)) this.removeRoute(key);
     }
 
+    // Composite graphs keep rendering internally even when all declarative
+    // routes have been removed. Silence their public buses as well so musical
+    // stop is deterministic even after a hot-reload/output-port rebuild. The
+    // next applyProgram() restores these gains from the composite definition.
+    const context = this.ensureContext();
+    for (const composite of this.composites.values()) {
+      composite.mainGain.gain.setTargetAtTime(0, context.currentTime, 0.004);
+      for (const output of composite.namedOutputs.values()) {
+        output.gain.setTargetAtTime(0, context.currentTime, 0.004);
+      }
+    }
+
     // FILTER is not a tail-preserving effect. Clear the SVF integrator state on
     // musical stop so high resonance cannot remain audible after transport stops.
     for (const filter of this.filters.values()) filter.node.port.postMessage({ type: 'reset' });
@@ -2492,6 +2649,25 @@ export class AudioEngine {
     }
 
     this.routes.delete(key);
+  }
+
+  private removeComposite(name: string): void {
+    const composite = this.composites.get(name);
+    if (!composite) return;
+
+    // Routes retain concrete WebAudio node references. If the composite is
+    // rebuilt because its exported-output signature changed, keeping those
+    // route objects would leave them connected to the old, disconnected gain
+    // nodes and connect() would incorrectly consider them still valid.
+    for (const [key, route] of [...this.routes.entries()]) {
+      const sourceName = route.source.match(/^([A-Za-z_]\w*)\./)?.[1];
+      if (sourceName === name) this.removeRoute(key);
+    }
+
+    try { composite.node.disconnect(); } catch {}
+    composite.mainGain.disconnect();
+    for (const output of composite.namedOutputs.values()) output.disconnect();
+    this.composites.delete(name);
   }
 
   private removeBasicVoice(name: string): void {
@@ -2775,6 +2951,16 @@ export class AudioEngine {
     this.resonatorWorkletLoaded = true;
   }
 
+  private async ensureCompositeRuntime(): Promise<void> {
+    if (this.compositeWorkletLoaded && this.compositeWasmBytes) return;
+    const context = this.ensureContext();
+    const response = await fetch(publicAssetUrl('/dsp/composite.wasm'));
+    if (!response.ok) throw new Error(`failed to load composite DSP: ${response.status}`);
+    this.compositeWasmBytes = await response.arrayBuffer();
+    await context.audioWorklet.addModule(publicAssetUrl('/worklets/composite-processor.js'));
+    this.compositeWorkletLoaded = true;
+  }
+
   private async ensureDaisyOscillatorsRuntime(): Promise<void> {
     if (this.daisyOscillatorsWorkletLoaded && this.daisyOscillatorsWasmBytes) return;
     const context = this.ensureContext();
@@ -2824,6 +3010,7 @@ export class AudioEngine {
     for (const name of [...this.resonators.keys()]) this.removeResonator(name);
     for (const name of [...this.matters.keys()]) this.removeMatter(name);
     for (const name of [...this.macros.keys()]) this.removeMacro(name);
+    for (const name of [...this.composites.keys()]) this.removeComposite(name);
     for (const name of [...this.basicVoices.keys()]) this.removeBasicVoice(name);
     for (const name of [...this.gains.keys()]) this.removeGain(name);
     for (const signal of [...this.views.keys()]) this.removeView(signal);
@@ -2842,8 +3029,10 @@ export class AudioEngine {
     this.pendingProgram = null;
     this.macroWasmBytes = null;
     this.daisyOscillatorsWasmBytes = null;
+    this.compositeWasmBytes = null;
     this.macroWorkletLoaded = false;
     this.daisyOscillatorsWorkletLoaded = false;
+    this.compositeWorkletLoaded = false;
     this.matterWorkletLoaded = false;
     this.resonatorWorkletLoaded = false;
     this.swellWorkletLoaded = false;

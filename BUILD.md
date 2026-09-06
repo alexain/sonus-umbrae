@@ -105,6 +105,7 @@ The generated WASM artifacts are written to:
 ```text
 public/dsp/macro.wasm
 public/dsp/daisy-oscillators.wasm
+public/dsp/composite.wasm
 public/dsp/swell.wasm
 public/dsp/dices.wasm
 public/dsp/mist.wasm
@@ -114,7 +115,7 @@ public/dsp/sky.wasm
 public/dsp/daisy-filters.wasm
 ```
 
-`macro.wasm` provides the Mutable/Plaits `macro.*` VOICE backend, `daisy-oscillators.wasm` provides the basic `sine`, `triangle`, `sawtooth`, `ramp`, and `square` VOICE backend, `swell.wasm` provides the Tides-derived four-output modulation backend, `dices.wasm` provides the Marbles-derived random-voltage `MOD dices` backend, and `mist.wasm` provides the current Mist stereo `FX` backend. `sky.wasm` provides the ambient `sky` reverb backed by CloudSeedCore. `matter.wasm` and `resonator.wasm` provide the physical-model and resonator engines. `daisy-filters.wasm` is a separate DaisySP filter-area module containing the SVF backend. The oscillator and filter areas intentionally remain separate WASM modules.
+`macro.wasm` provides the Mutable/Plaits `macro.*` VOICE backend, `daisy-oscillators.wasm` provides the basic `sine`, `triangle`, `sawtooth`, `ramp`, and `square` VOICE backend, `composite.wasm` provides the audio-rate graph backend for `sound composite`, `swell.wasm` provides the Tides-derived four-output modulation backend, `dices.wasm` provides the Marbles-derived random-voltage `MOD dices` backend, and `mist.wasm` provides the current Mist stereo `FX` backend. `sky.wasm` provides the ambient `sky` reverb backed by CloudSeedCore. `matter.wasm` and `resonator.wasm` provide the physical-model and resonator engines. `daisy-filters.wasm` is a separate DaisySP filter-area module containing the SVF backend. The oscillator and filter areas intentionally remain separate WASM modules.
 
 Generated WASM files are ignored by Git and should be rebuilt locally.
 
@@ -304,7 +305,7 @@ The runtime loads `/dsp/sky.wasm` automatically when an `FX` declares `MODEL sky
 
 ## DaisySP WebAssembly modules
 
-`npm run dsp:setup` fetches Electrosmith DaisySP into `vendor/daisysp/`. Sonus currently builds two independent DaisySP areas: `daisy-oscillators.wasm` from `Source/Synthesis/oscillator.cpp`, and `daisy-filters.wasm` from `Source/Filters/svf.cpp`.
+`npm run dsp:setup` fetches Electrosmith DaisySP into `vendor/daisysp/`. Sonus currently builds three independent DaisySP areas: `daisy-oscillators.wasm` from `Source/Synthesis/oscillator.cpp`, `composite.wasm` from the same oscillator core plus the Sonus graph bridge, and `daisy-filters.wasm` from `Source/Filters/svf.cpp`.
 
 The modules are deliberately separate. Additional permissively licensed DaisySP effects, synthesis or utility code can later be built into their own WASM modules rather than growing one monolithic binary.
 

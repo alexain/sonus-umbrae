@@ -271,15 +271,135 @@ sound ramp
 sound square
 ```
 
-The basic oscillators inherit the normal VOICE pitch, level, routing and timing behaviour. `square` additionally exposes `WIDTH 0..100`, defaulting to 50; the other basic oscillator sounds have no sound-specific parameters.
+The basic oscillators inherit the normal VOICE pitch, level, routing and timing behaviour. `square` additionally exposes `width 0..100`, defaulting to 50; the other basic oscillator sounds have no sound-specific parameters.
 
-Typical macro-engine parameters include:
+### Composite voices
+
+`VOICE ... sound composite` builds an audio-rate graph from other VOICE objects. In the first implementation the operators must use the basic DaisySP oscillator sounds (`sine`, `triangle`, `sawtooth`, `ramp`, or `square`). The composite owns private DSP operator instances, so using a VOICE inside a composite does not change that VOICE's normal dry output or routing.
 
 ```text
-harmo 50
-timbre 50
-morph 50
+VOICE op1:
+    sound sine
+    pitch freqs [110]
+    out mute
+
+VOICE op2:
+    sound square
+    pitch freqs [220]
+    width 35
+    out mute
+
+VOICE op3:
+    sound triangle
+    pitch freqs [220]
+    out mute
+
+VOICE complex:
+    sound composite
+    fm op1 to op2 with depth 45
+    am op2 to op3 with depth 60, bias 20
+    output op2 at 70, op3 at 100
 ```
+
+The audio-rate point-to-point relations are `fm`, `pm`, `am`, `ring`, and `sync`:
+
+```text
+fm   ... with depth 0..100, feedback 0..100, invert
+pm   ... with depth 0..100, feedback 0..100, phase 0..100, invert
+am   ... with depth 0..100, bias 0..100, mix 0..100, invert
+ring ... with depth 0..100, mix 0..100, drive 0..100, invert
+sync ... with phase 0..100, invert
+```
+
+Cross-modulation and self-feedback are valid because the DSP graph keeps one-sample state for cyclic edges:
+
+```text
+fm op1 to op2 with depth 45
+fm op2 to op1 with depth 20
+```
+
+`mix` is a real named internal audio bus, not a point-to-point modulation relation. It can combine several operators into one signal, with a level and optional local pitch offset per input:
+
+```text
+mix audio1 [
+    op1 at 100,
+    op2 at 70 with octave 1, detune 5,
+    op3 at 80 with octave -1, detune -7
+]
+
+output audio1
+```
+
+`at` is `0..100`, `octave` is an integer from `-8..8`, and `detune` is measured in cents (`-1200..1200`). An octave/detune modifier creates a private shifted oscillator tap inside that mix; it never changes the original operator VOICE or any of its external routing.
+
+`output` is both the export list and the final audio mixer. Every listed node becomes an individually routable public port, and the same listed signals are mixed into the composite's main `.out` bus. The optional `at` value controls only that node's contribution to the main bus; the named public tap remains unscaled apart from the composite VOICE level.
+
+```text
+fm op1 to op2 with depth 45
+am op2 to op3 with depth 50
+output op2 at 70, op3 at 100
+```
+
+This exposes `complex.op2` and `complex.op3`, while `complex.out` contains `op2 * 0.70 + op3 * 1.00`. `op1` remains internal: it is neither included in `complex.out` nor available as `complex.op1` because it was not declared in `output`. Named mixes follow the same rule: `output audio1` exposes `complex.audio1` and includes that bus in `complex.out`.
+
+If `output` is omitted, one named mix is inferred when the composite has exactly one mix; otherwise a unique terminal operator can still be inferred. Ambiguous or fully cyclic graphs require an explicit `output` declaration.
+
+A composite does not automatically mute its operator VOICE objects. Use `out mute` on an operator when it should remain active for the composite but should not be routed directly to MAIN. `_VOICE`, by contrast, disables the VOICE and therefore removes its contribution from the composite as well.
+
+A composite is itself a normal pitchable `VOICE`. Referencing an operator creates a private runtime instance of that VOICE's sound engine. Engine-specific parameters are inherited live by every private instance, while runtime instance state remains independent.
+
+```text
+VOICE op1:
+    sound square
+    pitch freqs [110]
+    width 40
+    out mute
+
+VOICE mini:
+    sound composite
+    pitch notes [C3 E3 G3 C4] every 1 beat
+
+    mix oscillators [
+        op1 at 100
+    ]
+
+    output oscillators
+```
+
+Here the standalone `op1` keeps its own 110 Hz pitch, while the private `mini::op1` follows `mini`'s pitch. Changing the source VOICE engine or an engine-specific parameter such as `width` updates all composite instances derived from that VOICE. Pitch is per-instance and is not propagated from the standalone VOICE when the composite declares its own pitch. If the composite has no `pitch`, each private operator falls back to its source VOICE pitch.
+
+Future amplitude/envelope state follows the same per-instance rule as pitch, so triggering or shaping the standalone VOICE will not alter its copies inside composite voices. `octave` and `detune` remain composite-only mix-input modifiers; they are not properties of the source VOICE.
+
+
+### Composite graph domains
+
+`composite` is a graph model shared by multiple object domains. The containing object determines the graph policy; the objects referenced inside the graph do not determine the resulting object type.
+
+A `VOICE ... sound composite` is an audible audio object. It may use the VOICE-only named `mix` buses described above, and every item declared by `output` is both exported as a named tap and included in the mixed `.out` master bus.
+
+A `MOD ... model composite` is an audio-rate modulator. It uses the same point-to-point `fm`, `pm`, `am`, `ring`, and `sync` relations, but `mix` is deliberately unavailable: each exported MOD output remains one signal rather than becoming part of an implicit master mixer.
+
+```text
+VOICE modOsc1:
+    sound sine
+    out mute
+
+VOICE modOsc2:
+    sound triangle
+    out mute
+
+MOD motion:
+    model composite
+    fm modOsc1 to modOsc2 with depth 45
+    output modOsc2
+```
+
+With one declared output, `motion.out` aliases that single modulation signal and `motion.modOsc2` is also available as its named tap. With multiple declared outputs, only the named taps are valid; there is no mixed `motion.out` bus.
+
+Composite graphs are intentionally typed by the containing domain rather than by node class. The architecture therefore permits future mixed graphs such as VOICE composites containing MOD nodes or MOD composites containing VOICE nodes. The current DSP adapter can clone the DaisySP basic oscillator VOICE engines as private graph instances; adapters for `swell`, `dices`, and other engine/model families are still pending and produce an explicit diagnostic instead of silently sharing their standalone runtime state.
+
+Private graph instances inherit engine/model parameters live from their source definitions, while per-instance runtime state remains independent. For VOICE-derived oscillator nodes this means engine changes such as `sound`/`width` propagate to every composite copy, while pitch, future amp/envelope state, phase, and composite-only octave/detune offsets remain local to each instance.
+
 
 ### Matter physical-modeling voices
 
@@ -1036,6 +1156,15 @@ provided, for example `body.in2`.
 
 ### Automatic MAIN routing
 
+`out mute` suppresses only the implicit MAIN route of the containing audio object. The object remains active and its signal is still available to explicit routes and composite VOICE graphs. This is distinct from the leading underscore live-disable syntax, which disables the object itself.
+
+```text
+VOICE operator:
+    sound sine
+    out mute
+```
+
+
 An audio-producing object that is not used as the source of any explicit `OUT`
 route is connected automatically from its primary output to `MAIN` at 100
 percent. Thus:
@@ -1183,7 +1312,7 @@ FX grain with view:
 
 VOICE views show the source object's output at the voice's own level.
 
-MOD views use the four-output modulation visualization.
+MOD views are output-driven rather than tied to one model. `swell` and `dices` keep their four named traces, while a `model composite` view displays exactly the signals declared by its `output` property, from one output to any number of named outputs.
 
 FX/Mist views are stereo.
 

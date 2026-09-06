@@ -280,13 +280,14 @@ type ModState = {
   line: number;
   indentation: number;
   ownerVoice: string | null;
-  modelId: 'swell' | 'dices';
+  modelId: 'swell' | 'dices' | 'composite';
 };
 
 type ModSourceDefinition = {
   internalName: string;
   ownerVoice: string | null;
-  modelId: 'swell' | 'dices';
+  modelId: 'swell' | 'dices' | 'composite';
+  outputs: Set<string>;
 };
 
 
@@ -350,6 +351,7 @@ const SOUND_ENGINE_REGISTRY: Record<string, SoundEngineSchema> = {
   'sawtooth': { parameters: {}, options: new Set() },
   'ramp': { parameters: {}, options: new Set() },
   'square': { parameters: SQUARE_PARAMETERS, options: new Set() },
+  'composite': { parameters: {}, options: new Set() },
 
   'macro.analog': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
   'macro.waves': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
@@ -947,6 +949,52 @@ function envelopeFromValue(value: string, line: number, sourceDefinitions: Map<s
   return definition?.kind === 'envelope' ? definition.spec : null;
 }
 
+function compileCompositeEdgeDirective(ownerName: string, relation: string, value: string, line: number): string {
+  if (!['fm', 'pm', 'am', 'ring', 'sync'].includes(relation)) {
+    throw new LanguageError([{ line, message: `unknown composite relation '${relation}'` }]);
+  }
+  const edge = value.match(/^([A-Za-z_][A-Za-z0-9_]*)\s+to\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(.+))?$/i);
+  if (!edge) throw new LanguageError([{ line, message: `${relation} expects <source> to <target> [with parameter value, ...]` }]);
+  const params: Record<string, number | boolean> = {};
+  const allowed: Record<string, Set<string>> = {
+    fm: new Set(['depth', 'feedback', 'invert']),
+    pm: new Set(['depth', 'feedback', 'phase', 'invert']),
+    am: new Set(['depth', 'bias', 'mix', 'invert']),
+    ring: new Set(['depth', 'mix', 'drive', 'invert']),
+    sync: new Set(['phase', 'invert']),
+  };
+  for (const item of (edge[3] ?? '').split(',').map((part) => part.trim()).filter(Boolean)) {
+    if (/^invert$/i.test(item)) {
+      if (!allowed[relation].has('invert')) throw new LanguageError([{ line, message: `${relation} does not support invert` }]);
+      params.invert = true;
+      continue;
+    }
+    const parsed = item.match(/^([A-Za-z_][A-Za-z0-9_-]*)\s+(-?\d+(?:\.\d+)?)$/);
+    if (!parsed) throw new LanguageError([{ line, message: `invalid ${relation} parameter '${item}'` }]);
+    const name = parsed[1].toLowerCase();
+    const number = Number(parsed[2]);
+    if (!allowed[relation].has(name)) throw new LanguageError([{ line, message: `${name} is not available for ${relation}` }]);
+    if (number < 0 || number > 100) throw new LanguageError([{ line, message: `${relation} ${name} expects 0..100` }]);
+    params[name] = number;
+  }
+  if ((relation === 'fm' || relation === 'pm' || relation === 'am' || relation === 'ring') && params.depth === undefined) params.depth = 100;
+  return `__compositeedge(${JSON.stringify(ownerName)},${JSON.stringify(relation)},${JSON.stringify(edge[1])},${JSON.stringify(edge[2])},${JSON.stringify(JSON.stringify(params))});`;
+}
+
+function compileCompositeOutputDirective(ownerName: string, value: string, line: number): string {
+  const items = value.split(',').map((item) => item.trim()).filter(Boolean);
+  if (items.length === 0) throw new LanguageError([{ line, message: 'output expects one or more node names separated by commas' }]);
+  const outputs = items.map((item) => {
+    const parsed = item.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\s+at\s+(-?\d+(?:\.\d+)?))?$/i);
+    if (!parsed) throw new LanguageError([{ line, message: `invalid output '${item}'; use <node> [at 0..100]` }]);
+    const level = parsed[2] === undefined ? 100 : Number(parsed[2]);
+    if (level < 0 || level > 100) throw new LanguageError([{ line, message: `output '${parsed[1]}' level expects 0..100` }]);
+    return { name: parsed[1], level };
+  });
+  if (new Set(outputs.map((item) => item.name)).size !== outputs.length) throw new LanguageError([{ line, message: 'output contains duplicate node names' }]);
+  return `__compositeoutput(${JSON.stringify(ownerName)},${JSON.stringify(JSON.stringify(outputs))});`;
+}
+
 function compileVoiceProperty(
   voice: VoiceState,
   property: string,
@@ -959,6 +1007,9 @@ function compileVoiceProperty(
 ): string {
   let key = property.toLowerCase();
   let value = rawValue.trim();
+  const compositePitchMarker = key === 'pitch' && voice.soundId === 'composite'
+    ? `__compositepitch(${JSON.stringify(voice.name)}); `
+    : '';
   if (/^from\b/i.test(value)) {
     throw new LanguageError([{ line, message: "FROM is no longer supported; use the source name directly" }]);
   }
@@ -974,7 +1025,7 @@ function compileVoiceProperty(
         throw new LanguageError([{ line, message: `REGISTER '${registerEndpoint[1]}' stage must be from 1 to ${definition.size}` }]);
       }
       claimPitchProperty(voice, 'note', line, 'VOICE');
-      return `${voice.name}.freq(440); __registerpitch(${JSON.stringify(voice.name)},${JSON.stringify(registerEndpoint[1])},${stage});`;
+      return `${compositePitchMarker}${voice.name}.freq(440); __registerpitch(${JSON.stringify(voice.name)},${JSON.stringify(registerEndpoint[1])},${stage});`;
     }
 
     const explicit = value.match(/^(notes|freqs|scale)\s+(.+)$/i);
@@ -993,6 +1044,46 @@ function compileVoiceProperty(
   } else if (key === 'note' || key === 'freq' || key === 'scale') {
     throw new LanguageError([{ line, message: `\${property.toUpperCase()} is no longer a VOICE property; use PITCH SCALE ..., PITCH NOTES ..., or PITCH FREQS ...` }]);
   }
+  if (key === 'mix') {
+    if (voice.soundId !== 'composite') throw new LanguageError([{ line, message: 'mix is available only for sound composite' }]);
+    const match = value.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*\[(.*)\]$/);
+    if (!match) throw new LanguageError([{ line, message: 'mix expects <name> [ <source> at <level> [with octave <n>, detune <cents>]; ... ]' }]);
+    const mixName = match[1];
+    const entries = match[2].split(';').map((item) => item.trim()).filter(Boolean);
+    if (entries.length === 0) throw new LanguageError([{ line, message: `mix '${mixName}' requires at least one input` }]);
+    const inputs = entries.map((entry) => {
+      const input = entry.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\s+at\s+(-?\d+(?:\.\d+)?))?(?:\s+with\s+(.+))?$/i);
+      if (!input) throw new LanguageError([{ line, message: `invalid mix input '${entry}'` }]);
+      const level = input[2] === undefined ? 100 : Number(input[2]);
+      if (level < 0 || level > 100) throw new LanguageError([{ line, message: `mix '${mixName}' input level expects 0..100` }]);
+      let octave = 0;
+      let detune = 0;
+      for (const modifier of (input[3] ?? '').split(',').map((part) => part.trim()).filter(Boolean)) {
+        const parsed = modifier.match(/^(octave|detune)\s+(-?\d+(?:\.\d+)?)$/i);
+        if (!parsed) throw new LanguageError([{ line, message: `invalid mix modifier '${modifier}'` }]);
+        if (parsed[1].toLowerCase() === 'octave') {
+          octave = Number(parsed[2]);
+          if (!Number.isInteger(octave) || octave < -8 || octave > 8) throw new LanguageError([{ line, message: `mix '${mixName}' octave expects an integer from -8 to 8` }]);
+        } else {
+          detune = Number(parsed[2]);
+          if (detune < -1200 || detune > 1200) throw new LanguageError([{ line, message: `mix '${mixName}' detune expects -1200..1200 cents` }]);
+        }
+      }
+      return { source: input[1], level, octave, detune };
+    });
+    return `__compositemix(${JSON.stringify(voice.name)},${JSON.stringify(mixName)},${JSON.stringify(JSON.stringify(inputs))});`;
+  }
+
+  if (key === 'fm' || key === 'pm' || key === 'am' || key === 'ring' || key === 'sync') {
+    if (voice.soundId !== 'composite') throw new LanguageError([{ line, message: `${key} is available only for sound composite` }]);
+    return compileCompositeEdgeDirective(voice.name, key, value, line);
+  }
+
+  if (key === 'output') {
+    if (voice.soundId !== 'composite') throw new LanguageError([{ line, message: 'output is available only for sound composite' }]);
+    return compileCompositeOutputDirective(voice.name, value, line);
+  }
+
   const soundParameter = voice.soundId ? SOUND_ENGINE_REGISTRY[voice.soundId]?.parameters[key] : undefined;
   if (SOUND_PARAMETER_NAMES.has(key)) {
     if (!voice.soundId) {
@@ -1054,13 +1145,13 @@ function compileVoiceProperty(
           const amount = walk ? (walk[1] === undefined ? 1 : numberValue(walk[1], line, 'walk')) : 0;
           if (amount < 0) throw new LanguageError([{ line, message: 'walk amount must be greater than 0' }]);
           const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
-          return `${voice.name}.freq(${initial}); __lifereader(${JSON.stringify(voice.name)},${JSON.stringify(sourceName)},${JSON.stringify(mode)},${amount},${view ? 'true' : 'false'});${every}`;
+          return `${compositePitchMarker}${voice.name}.freq(${initial}); __lifereader(${JSON.stringify(voice.name)},${JSON.stringify(sourceName)},${JSON.stringify(mode)},${amount},${view ? 'true' : 'false'});${every}`;
         }
         if (direct.modifiers.length > 0) {
           throw new LanguageError([{ line, message: 'SEQ turing controls its own generation; PITCH using a Turing SEQ does not accept selection modifiers' }]);
         }
         const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
-        return `${voice.name}.freq(${initial}); __seqvoice(${JSON.stringify(voice.name)},${JSON.stringify(sourceName)});${every}`;
+        return `${compositePitchMarker}${voice.name}.freq(${initial}); __seqvoice(${JSON.stringify(voice.name)},${JSON.stringify(sourceName)});${every}`;
       }
 
       const view = direct.modifiers.some((modifier) => /^view$/i.test(modifier));
@@ -1106,7 +1197,7 @@ function compileVoiceProperty(
       const piano = view && (key === 'note' || key === 'scale')
         ? ` ${inlinePianoDirective('voice', voice.name, key, line, values)}`
         : '';
-      return `${voice.name}.freq(${values[0]});${sequence}${every}${piano}`;
+      return `${compositePitchMarker}${voice.name}.freq(${values[0]});${sequence}${every}${piano}`;
     }
   }
 
@@ -1242,7 +1333,7 @@ function compileVoiceProperty(
       const sequence = frequencies.length > 1 ? ` ${sequenceDirective(voice.name, frequencies, selection.mode, selection.amount, favor)}` : '';
       const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
       const piano = noteView ? ` ${inlinePianoDirective('voice', voice.name, 'note', line, frequencies)}` : '';
-      return `${voice.name}.freq(${frequencies[0]});${sequence}${every}${piano}`;
+      return `${compositePitchMarker}${voice.name}.freq(${frequencies[0]});${sequence}${every}${piano}`;
     }
 
     case 'freq': {
@@ -1268,7 +1359,7 @@ function compileVoiceProperty(
       }
       const sequence = values.length > 1 ? ` ${sequenceDirective(voice.name, values, selection.mode, selection.amount)}` : '';
       const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
-      return `${voice.name}.freq(${values[0]});${sequence}${every}`;
+      return `${compositePitchMarker}${voice.name}.freq(${values[0]});${sequence}${every}`;
     }
 
     case 'scale': {
@@ -1282,7 +1373,7 @@ function compileVoiceProperty(
         }
         const selection = parseSelectionMode(modifiers, line, 'scale');
         const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
-        return `${sourceSequenceCode(voice.name, directSource.values, selection.mode, selection.amount, selection.favor, false, line)}${every}`;
+        return `${compositePitchMarker}${sourceSequenceCode(voice.name, directSource.values, selection.mode, selection.amount, selection.favor, false, line)}${every}`;
       }
       const parsed = parseScaleSpec(split.base, line, true);
       if (!parsed) {
@@ -1292,7 +1383,7 @@ function compileVoiceProperty(
         }]);
       }
       const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
-      return `${sourceSequenceCode(voice.name, parsed.values, parsed.mode, parsed.amount, parsed.favor, parsed.view, line)}${every}`;
+      return `${compositePitchMarker}${sourceSequenceCode(voice.name, parsed.values, parsed.mode, parsed.amount, parsed.favor, parsed.view, line)}${every}`;
     }
 
     case 'every': {
@@ -2171,11 +2262,20 @@ function compileModProperty(mod: ModState, property: string, rawValue: string, l
 
   if (key === 'model') {
     const model = value.toLowerCase();
-    if (model !== 'swell' && model !== 'dices') {
-      throw new LanguageError([{ line, message: 'MOD model expects swell or dices' }]);
+    if (model !== 'swell' && model !== 'dices' && model !== 'composite') {
+      throw new LanguageError([{ line, message: 'MOD model expects swell, dices, or composite' }]);
     }
-    mod.modelId = model as 'swell' | 'dices';
+    mod.modelId = model as 'swell' | 'dices' | 'composite';
     return `__modset(${JSON.stringify(mod.internalName)},"model",${JSON.stringify(model)});`;
+  }
+
+  if (mod.modelId === 'composite') {
+    if (key === 'mix') throw new LanguageError([{ line, message: 'mix is not available for MOD composite; each output must remain one signal' }]);
+    if (key === 'fm' || key === 'pm' || key === 'am' || key === 'ring' || key === 'sync') {
+      return compileCompositeEdgeDirective(mod.internalName, key, value, line);
+    }
+    if (key === 'output') return compileCompositeOutputDirective(mod.internalName, value, line);
+    throw new LanguageError([{ line, message: `unknown MOD composite property '${property}'` }]);
   }
 
   if (mod.modelId === 'dices') {
@@ -2326,7 +2426,7 @@ function compileModulationRoute(
   line: number,
   modSources: Map<string, ModSourceDefinition>,
 ): string | null {
-  const match = value.match(/^([A-Za-z_][A-Za-z0-9_]*)\.(a|b|c|d|x1|x2|x3|y)(?:\s+with\s+depth\s+(-?\d+(?:\.\d+)?))?$/i);
+  const match = value.match(/^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+depth\s+(-?\d+(?:\.\d+)?))?$/i);
   if (!match) return null;
   const source = modSources.get(modSourceKey(voice.name, match[1])) ?? modSources.get(match[1]);
   if (!source) throw new LanguageError([{ line, message: `unknown MOD source '${match[1]}'` }]);
@@ -2335,8 +2435,18 @@ function compileModulationRoute(
     throw new LanguageError([{ line, message: 'modulation depth must be between -100 and 100' }]);
   }
   const token = match[2].toLowerCase();
-  const port = ({ a: 1, b: 2, c: 3, d: 4, x1: 1, x2: 2, x3: 3, y: 4 } as const)[token as 'a'|'b'|'c'|'d'|'x1'|'x2'|'x3'|'y'];
-  const sourcePort = source.modelId === 'dices' ? (['x1','x2','x3','y'] as const)[port - 1] : `out${port}`;
+  let sourcePort: string;
+  if (source.modelId === 'composite') {
+    if (token !== 'out' && !source.outputs.has(token)) {
+      throw new LanguageError([{ line, message: `MOD composite '${match[1]}' does not expose '${match[2]}'` }]);
+    }
+    sourcePort = token;
+  } else {
+    const aliases = ({ a: 1, b: 2, c: 3, d: 4, x1: 1, x2: 2, x3: 3, y: 4 } as const);
+    const port = aliases[token as keyof typeof aliases];
+    if (!port) return null;
+    sourcePort = source.modelId === 'dices' ? (['x1','x2','x3','y'] as const)[port - 1] : `out${port}`;
+  }
   return `${source.internalName}.${sourcePort}(${depth}) -> ${voice.name}.${parameter};`;
 }
 
@@ -2679,7 +2789,7 @@ function compileFxProperty(
   return `${initial} __fxparamdefault(${JSON.stringify(fx.name)},${JSON.stringify(parameter)},${JSON.stringify(expression)});`;
 }
 
-type OutPort = 'out' | 'main' | 'aux' | 'lp' | 'hp' | 'bp' | 'np' | 'in' | 'in2' | null;
+type OutPort = string | null;
 
 type OutEndpoint = {
   name: string;
@@ -2699,12 +2809,12 @@ type OutInput =
   | { stereo: true; left: string; right: string };
 
 function parseOutEndpoint(raw: string, line: number): OutEndpoint {
-  const match = raw.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\.(out|main|aux|lp|hp|bp|np|in|in2|L|R))?(?:\s+at\s+(.+))?$/i);
+  const match = raw.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\.([A-Za-z_][A-Za-z0-9_]*|L|R))?(?:\s+at\s+(.+))?$/i);
   if (!match) throw new LanguageError([{ line, message: `invalid OUT endpoint '${raw.trim()}'` }]);
   const suffix = match[2]?.toLowerCase() ?? null;
   return {
     name: match[1],
-    port: suffix === 'out' || suffix === 'main' || suffix === 'aux' || suffix === 'lp' || suffix === 'hp' || suffix === 'bp' || suffix === 'np' || suffix === 'in' || suffix === 'in2' ? suffix : null,
+    port: suffix === 'l' || suffix === 'r' ? null : suffix,
     channel: suffix === 'l' ? 'L' : suffix === 'r' ? 'R' : null,
     amount: match[3] === undefined ? 100 : normalizedAmount(match[3].trim(), line),
   };
@@ -2715,7 +2825,7 @@ function normalizeLocalOutSource(localSource: string, raw: string, line: number)
   if (!text) return localSource;
   const amountOnly = text.match(/^at\s+(.+)$/i);
   if (amountOnly) return `${localSource} at ${amountOnly[1]}`;
-  const port = text.match(/^(out|main|aux|lp|hp|bp|np|L|R)(?:\s+at\s+(.+))?$/i);
+  const port = text.match(/^([A-Za-z_][A-Za-z0-9_]*|L|R)(?:\s+at\s+(.+))?$/i);
   if (!port) {
     throw new LanguageError([{ line, message: `inside an object, OUT expects [port] [AT amount] TO destination` }]);
   }
@@ -2790,6 +2900,8 @@ function compileOut(
     if (kind === 'voice') {
       if (endpoint.channel) throw new LanguageError([{ line, message: 'VOICE outputs are mono ports; .L/.R are not valid' }]);
       if (endpoint.port === 'in' || endpoint.port === 'in2') throw new LanguageError([{ line, message: `VOICE '${endpoint.name}' does not expose an audio input` }]);
+      const sound = voiceSoundIds.get(endpoint.name) ?? '';
+      if (sound === 'composite') return { stereo: false, mono: `${endpoint.name}.${endpoint.port ?? 'out'}` };
       if (endpoint.port && !['out', 'aux'].includes(endpoint.port)) throw new LanguageError([{ line, message: `VOICE '${endpoint.name}' output must be .out or .aux` }]);
       return { stereo: false, mono: `${endpoint.name}.${endpoint.port ?? 'out'}` };
     }
@@ -3159,6 +3271,34 @@ export function compileLanguageSource(source: string): string {
     lines[index] = `${' '.repeat(indentation)}SET ${declaration[1]}: ENVELOPE [${properties.join(', ')}]`;
   }
 
+  // Multiline composite MIX buses keep one source per physical line so commas
+  // can remain available for per-source modifiers (for example octave/detune).
+  for (let index = 0; index < lines.length; index += 1) {
+    const raw = stripComment(lines[index]);
+    const trimmed = raw.trim();
+    const declaration = trimmed.match(/^mix\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*$/i);
+    if (!declaration) continue;
+    const indentation = raw.length - raw.trimStart().length;
+    const entries: string[] = [];
+    let next = index + 1;
+    let closed = false;
+    while (next < lines.length) {
+      const childRaw = stripComment(lines[next]);
+      const childTrimmed = childRaw.trim();
+      if (!childTrimmed) { lines[next] = ''; next += 1; continue; }
+      if (childTrimmed === ']') { lines[next] = ''; closed = true; break; }
+      const childIndentation = childRaw.length - childRaw.trimStart().length;
+      if (childIndentation <= indentation) break;
+      entries.push(childTrimmed.replace(/,\s*$/, '').trim());
+      lines[next] = '';
+      next += 1;
+    }
+    if (!closed || entries.length === 0) {
+      throw new LanguageError([{ line: index + 1, message: 'mix <name> [ ... ] requires one or more inputs and a closing ]' }]);
+    }
+    lines[index] = `${' '.repeat(indentation)}mix ${declaration[1]} [${entries.join('; ')}]`;
+  }
+
   const output = Array(lines.length).fill('') as string[];
   const diagnostics: LanguageDiagnostic[] = [];
   const voices = new Set<string>();
@@ -3174,6 +3314,7 @@ export function compileLanguageSource(source: string): string {
   const modSources = new Map<string, ModSourceDefinition>();
   const drumkits = new Set<string>();
   const pendingOuts: Array<{ index: number; line: number; text: string; localSource: string | null }> = [];
+  const mutedRouteSources = new Set<string>();
   const kitDefinitions = new Map<string, DrumKitDefinition>([['sonus606', cloneDrumKit(SONUS606_KIT)]]);
   const localKitDefinitions = new Map<string, Map<string, DrumKitDefinition>>();
 
@@ -3371,7 +3512,7 @@ export function compileLanguageSource(source: string): string {
         if (modSources.has(scopeKey)) throw new LanguageError([{ line: lineNumber, message: `MOD '${name}' is already defined in this scope` }]);
         const internalName = ownerObject ? `__mod_${ownerObject}_${name}` : name;
         currentMod = { name, internalName, line: lineNumber, indentation, ownerVoice: ownerObject, modelId: 'swell' };
-        modSources.set(scopeKey, { internalName, ownerVoice: ownerObject, modelId: 'swell' });
+        modSources.set(scopeKey, { internalName, ownerVoice: ownerObject, modelId: 'swell', outputs: new Set() });
         const viewDirective = modMatch[2] ? `\n${internalName}.view();` : '';
         output[index] = `${internalName} = Swell();\n__modmeta(${JSON.stringify(internalName)},${JSON.stringify(name)},${JSON.stringify(ownerObject ?? '')});${viewDirective}`;
         continue;
@@ -3401,7 +3542,12 @@ export function compileLanguageSource(source: string): string {
         output[index] = compileModProperty(currentMod, property, value, lineNumber);
         const scopeKey = modSourceKey(currentMod.ownerVoice, currentMod.name);
         const source = modSources.get(scopeKey);
-        if (source) source.modelId = currentMod.modelId;
+        if (source) {
+          source.modelId = currentMod.modelId;
+          if (currentMod.modelId === 'composite' && property.toLowerCase() === 'output') {
+            source.outputs = new Set(value.split(',').map((item) => item.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)/)?.[1]).filter((item): item is string => Boolean(item)));
+          }
+        }
         continue;
       }
 
@@ -3614,6 +3760,12 @@ export function compileLanguageSource(source: string): string {
         if (indentation > 0 && !localSource) {
           throw new LanguageError([{ line: lineNumber, message: 'OUT can be local only inside an audio object' }]);
         }
+        if (/^OUT\s+MUTE$/i.test(trimmed)) {
+          if (!localSource) throw new LanguageError([{ line: lineNumber, message: 'OUT MUTE is valid only inside an audio object' }]);
+          mutedRouteSources.add(localSource);
+          output[index] = '';
+          continue;
+        }
         pendingOuts.push({ index, line: lineNumber, text: trimmed, localSource });
         output[index] = '';
         continue;
@@ -3718,7 +3870,7 @@ export function compileLanguageSource(source: string): string {
 
   const implicitRoutes: string[] = [];
   const autoRoute = (name: string): void => {
-    if (explicitRouteSources.has(name)) return;
+    if (explicitRouteSources.has(name) || mutedRouteSources.has(name)) return;
     try {
       implicitRoutes.push(compileOut(`OUT ${name} TO MAIN`, 0, null, voices, fxs, filters, drumkits, voiceEmbeddedFilters, voiceSoundIds).code);
     } catch (error) {

@@ -1,6 +1,8 @@
 import { AudioEngine, type AudioProgram, type SignalKind } from '../audio/engine';
 import { evaluateExpression, ExpressionError, type ScalarValue } from './expression';
 import { RuntimeScheduler, parseRuntimePatternSource } from './runtime/scheduler';
+import type { CompositeDefinition, CompositeDomain } from './composite/types';
+import { COMPOSITE_DOMAIN_POLICY } from './composite/types';
 import {
   createShiftRegister,
   readShiftRegister,
@@ -215,7 +217,7 @@ interface GainDefinition {
   parameters: Map<string, string>;
 }
 
-type VoiceEngineKind = 'macro' | 'matter' | 'resonator' | 'oscillator';
+type VoiceEngineKind = 'macro' | 'matter' | 'resonator' | 'oscillator' | 'composite';
 type VoiceParameterName = 'harmo' | 'timbre' | 'morph' | 'width' | 'geometry' | 'structure' | 'brightness' | 'damping' | 'position' | 'space' | 'bow' | 'bowTimbre' | 'blow' | 'blowTimbre' | 'strike' | 'strikeTimbre';
 
 interface VoiceDefinition {
@@ -248,7 +250,7 @@ interface VoiceDefinition {
 }
 
 interface SwellDefinition {
-  model: 'swell' | 'dices';
+  model: 'swell' | 'dices' | 'composite';
   frequency: number;
   slope: number;
   shape: number;
@@ -972,11 +974,34 @@ export class SonusRuntime {
     const languageFxPitchCycles = new Map<string, LanguageCycleDefinition>();
     const languageFxModulations: LanguageFxModulationDefinition[] = [];
     const languageMods = new Map<string, LanguageModMetadata>();
+    const languageCompositeEdges = new Map<string, Array<{ relation: 'fm' | 'pm' | 'am' | 'ring' | 'sync'; source: string; target: string; params: Record<string, number | boolean> }>>();
+    const languageCompositeMixes = new Map<string, Array<{ name: string; inputs: Array<{ source: string; level: number; octave: number; detune: number }> }>>();
+    const languageCompositeOutputs = new Map<string, Array<{ name: string; level: number }>>();
+    const languageCompositePitchVoices = new Set<string>();
     const languageDrumkits = new Map<string, { kit: string; disabled: boolean; viewSteps: number }>();
     const languageDrumSlots: LanguageDrumSlotDefinition[] = [];
     const languageModSets: LanguageModSetDirective[] = [];
     let languageMasterClock: LanguageMasterClockDefinition | null = null;
     for (const { source: line, line: lineNumber } of lines) {
+      const compositePitch = parseLanguageCompositePitch(line);
+      if (compositePitch) { languageCompositePitchVoices.add(compositePitch.name); continue; }
+
+      const compositeEdge = parseLanguageCompositeEdge(line);
+      if (compositeEdge) {
+        const list = languageCompositeEdges.get(compositeEdge.name) ?? [];
+        list.push({ relation: compositeEdge.relation, source: compositeEdge.source, target: compositeEdge.target, params: compositeEdge.params });
+        languageCompositeEdges.set(compositeEdge.name, list);
+        continue;
+      }
+      const compositeMix = parseLanguageCompositeMix(line);
+      if (compositeMix) {
+        const list = languageCompositeMixes.get(compositeMix.name) ?? [];
+        list.push({ name: compositeMix.mix, inputs: compositeMix.inputs });
+        languageCompositeMixes.set(compositeMix.name, list);
+        continue;
+      }
+      const compositeOutput = parseLanguageCompositeOutput(line);
+      if (compositeOutput) { languageCompositeOutputs.set(compositeOutput.name, compositeOutput.outputs); continue; }
       const drumkitDeclaration = parseLanguageDrumkitDirective(line);
       if (drumkitDeclaration) { languageDrumkits.set(drumkitDeclaration.name, { kit: 'sonus606', disabled: drumkitDeclaration.disabled, viewSteps: drumkitDeclaration.viewSteps }); continue; }
       const drumkitMeta = parseLanguageDrumkitMetaDirective(line);
@@ -1668,7 +1693,7 @@ export class SonusRuntime {
     // source order. All module declarations already exist, so references between
     // modules are still independent from declaration order.
     for (const { source: line, line: lineNumber } of lines) {
-      if (parseLanguageDrumkitDirective(line) || parseLanguageDrumkitMetaDirective(line) || parseLanguageDrumSlotDirective(line) || parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageSeqModel(line) || parseLanguageSeqSize(line) || parseLanguageLifeDensity(line) || parseLanguageLifeReader(line) || parseLanguageLifeEvolve(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageEnvelopeDirective(line, lineNumber) || parseLanguageFxMetadata(line) || parseLanguageDelayTime(line) || parseLanguageDelayParam(line, lineNumber) || parseLanguageDelayParamDefault(line, lineNumber) || parseLanguageDelayParamCycle(line, lineNumber) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
+      if (parseLanguageCompositePitch(line) || parseLanguageCompositeEdge(line) || parseLanguageCompositeMix(line) || parseLanguageCompositeOutput(line) || parseLanguageDrumkitDirective(line) || parseLanguageDrumkitMetaDirective(line) || parseLanguageDrumSlotDirective(line) || parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageSeqModel(line) || parseLanguageSeqSize(line) || parseLanguageLifeDensity(line) || parseLanguageLifeReader(line) || parseLanguageLifeEvolve(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageEnvelopeDirective(line, lineNumber) || parseLanguageFxMetadata(line) || parseLanguageDelayTime(line) || parseLanguageDelayParam(line, lineNumber) || parseLanguageDelayParamDefault(line, lineNumber) || parseLanguageDelayParamCycle(line, lineNumber) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
 
       const gainDeclaration = parseGainDeclaration(line);
       if (gainDeclaration) {
@@ -2215,7 +2240,19 @@ export class SonusRuntime {
           diagnostics.push({ line: lineNumber, message: `unknown source object: ${sourceName}` });
           continue;
         }
-        if (sourcePort === 'aux' && !voices.has(sourceName)) {
+        const compositeSource = voices.get(sourceName)?.engine === 'composite';
+        const standardSourcePorts = new Set(['out','aux','out_L','out_R','out1','out2','out3','out4','t1','t2','t3','x1','x2','x3','y','lp','hp','bp','np']);
+        if (compositeSource) {
+          const exposed = (languageCompositeOutputs.get(sourceName) ?? []).map((item) => item.name);
+          if (sourcePort !== 'out' && !exposed.includes(sourcePort)) {
+            diagnostics.push({ line: lineNumber, message: `composite '${sourceName}' does not expose output '${sourcePort}'` });
+            continue;
+          }
+        } else if (!standardSourcePorts.has(sourcePort)) {
+          diagnostics.push({ line: lineNumber, message: `unknown output '${sourcePort}' on ${sourceName}` });
+          continue;
+        }
+        if (sourcePort === 'aux' && (!voices.has(sourceName) || voices.get(sourceName)?.engine === 'composite')) {
           diagnostics.push({ line: lineNumber, message: `aux output is only available on Voice objects: ${sourceName}` });
           continue;
         }
@@ -2394,8 +2431,8 @@ export class SonusRuntime {
       const parameter = directive.parameter;
       if (parameter === 'model') {
         const model = directive.value.toLowerCase();
-        if (model !== 'swell' && model !== 'dices') {
-          diagnostics.push({ line: directive.line, message: 'MOD model expects swell or dices' });
+        if (model !== 'swell' && model !== 'dices' && model !== 'composite') {
+          diagnostics.push({ line: directive.line, message: 'MOD model expects swell, dices, or composite' });
           continue;
         }
         swell.model = model;
@@ -2668,18 +2705,30 @@ export class SonusRuntime {
       addEmbeddedView(signal, signalKind as SignalKind);
     }
 
+    const moduleModViewSignals = (name: string): string[] => {
+      const mod = swells.get(name);
+      if (!mod) return [];
+      if (mod.model === 'dices') return [`${name}.x1`, `${name}.x2`, `${name}.x3`, `${name}.y`];
+      if (mod.model === 'composite') {
+        return (languageCompositeOutputs.get(name) ?? []).map((output) => `${name}.${output.name}`);
+      }
+      return [1, 2, 3, 4].map((port) => `${name}.out${port}`);
+    };
+
     for (const name of moduleViews) {
       const ownerViews = embeddedViews.get(name) ?? [];
       if (swells.has(name)) {
         const mod = swells.get(name)!;
-        const signals = mod.model === 'dices'
-          ? [`${name}.x1`, `${name}.x2`, `${name}.x3`, `${name}.y`]
-          : [1, 2, 3, 4].map((port) => `${name}.out${port}`);
-        ownerViews.push({
+        const signals = moduleModViewSignals(name);
+        if (signals.length > 0) ownerViews.push({
           signal: signals[0],
           signals,
           signalKind: 'signal',
-          port: mod.model === 'dices' ? 'X1 / X2 / X3 / Y' : 'OUT 1-4',
+          port: mod.model === 'dices'
+            ? 'X1 / X2 / X3 / Y'
+            : mod.model === 'composite'
+              ? signals.map((signal) => signal.slice(signal.lastIndexOf('.') + 1).toUpperCase()).join(' / ')
+              : 'OUT 1-4',
         });
       } else if (voices.has(name)) {
         ownerViews.push({
@@ -2855,7 +2904,7 @@ export class SonusRuntime {
         target: route.target.startsWith('Audio.')
           ? 'Audio'
           : route.target.replace(/\.(out_[LR]|inL|inR|in|trig|clock|v_oct|harmo|timbre|morph)$/, ''),
-        sourcePort: (route.source.match(/\.(out|aux|lp|hp|bp|np|out[1-4]|out_[LR]|t[1-3]|x[1-3]|y)$/)?.[1] ?? 'out').toUpperCase(),
+        sourcePort: (route.source.match(/\.([A-Za-z_]\w*)$/)?.[1] ?? 'out').toUpperCase(),
         targetPort: route.target.endsWith('.trig')
           ? 'TRIG'
           : route.target.endsWith('.clock')
@@ -2907,6 +2956,71 @@ export class SonusRuntime {
       }
     }
 
+    const buildCompositeDefinition = (
+      name: string,
+      domain: CompositeDomain,
+      enabled: boolean,
+      level: number,
+      pitchFrequency: number | null,
+      dynamicPitch: boolean,
+    ): CompositeDefinition => {
+      const edges = languageCompositeEdges.get(name) ?? [];
+      const mixes = languageCompositeMixes.get(name) ?? [];
+      const declaredOutputs = languageCompositeOutputs.get(name) ?? [];
+      const policy = COMPOSITE_DOMAIN_POLICY[domain];
+      if (!policy.allowMix && mixes.length > 0) {
+        throw new SonusEvaluationError([{ line: 0, message: `${domain.toUpperCase()} composite '${name}' does not support mix buses` }]);
+      }
+      const duplicateMix = mixes.find((mix, index) => mixes.findIndex((candidate) => candidate.name === mix.name) !== index);
+      if (duplicateMix) throw new SonusEvaluationError([{ line: 0, message: `composite '${name}' defines mix '${duplicateMix.name}' more than once` }]);
+      const mixNames = new Set(mixes.map((mix) => mix.name));
+      const operatorNames = [...new Set([
+        ...edges.flatMap((edge) => [edge.source, edge.target]),
+        ...mixes.flatMap((mix) => mix.inputs.map((input) => input.source)),
+        ...declaredOutputs.filter((output) => !mixNames.has(output.name)).map((output) => output.name),
+      ])];
+      for (const mix of mixes) {
+        if (operatorNames.includes(mix.name)) throw new SonusEvaluationError([{ line: 0, message: `composite '${name}' mix '${mix.name}' collides with an operator name` }]);
+      }
+      const operators = operatorNames.map((operatorName) => {
+        const operator = voices.get(operatorName);
+        if (!operator) {
+          const mod = swells.get(operatorName);
+          if (mod) {
+            throw new SonusEvaluationError([{ line: 0, message: `composite '${name}' can contain mixed object types, but the current DSP adapter cannot yet clone MOD '${operatorName}' (${mod.model}) as a private graph node` }]);
+          }
+          throw new SonusEvaluationError([{ line: 0, message: `composite '${name}' references unknown graph object '${operatorName}'` }]);
+        }
+        if (operator.engine !== 'oscillator') throw new SonusEvaluationError([{ line: 0, message: `composite '${name}' currently requires composite-capable graph nodes; '${operatorName}' is ${operator.soundId}` }]);
+        return {
+          name: operatorName,
+          waveform: operator.soundId as 'sine' | 'triangle' | 'sawtooth' | 'ramp' | 'square',
+          // Composite nodes are private runtime instances. Generic VOICE level
+          // belongs to the standalone instance; graph/output gain is local.
+          level: operator.disabled ? 0 : 100,
+          frequency: operator.frequency,
+          width: operator.width,
+        };
+      });
+      let outputs = declaredOutputs;
+      if (outputs.length === 0) {
+        if (domain === 'voice' && mixes.length === 1) outputs = [{ name: mixes[0].name, level: 100 }];
+        else {
+          const sources = new Set(edges.map((edge) => edge.source));
+          const sinks = operatorNames.filter((operator) => !sources.has(operator));
+          if (sinks.length !== 1) throw new SonusEvaluationError([{ line: 0, message: `composite '${name}' has no unique terminal node; add output <node> [at level][, ...]` }]);
+          outputs = [{ name: sinks[0], level: 100 }];
+        }
+      }
+      for (const output of outputs) {
+        if (!operatorNames.includes(output.name) && !mixNames.has(output.name)) {
+          throw new SonusEvaluationError([{ line: 0, message: `composite '${name}' output '${output.name}' is not an operator or named mix` }]);
+        }
+      }
+      if (edges.length === 0 && mixes.length === 0) throw new SonusEvaluationError([{ line: 0, message: `composite '${name}' requires at least one graph relation${domain === 'voice' ? ' or named mix' : ''}` }]);
+      return { name, domain, enabled, level, pitchFrequency, dynamicPitch, operators, edges, mixes, outputs };
+    };
+
     const program: AudioProgram = {
       clock: { bpm: clockBpm, jitter: masterJitter, drift: masterTimingDrift },
       mainLevel,
@@ -2954,6 +3068,24 @@ export class SonusRuntime {
           damping: definition.damping,
           position: definition.position,
         })),
+      composites: [
+        ...[...voices.entries()]
+          .filter(([, definition]) => definition.engine === 'composite')
+          .map(([name, definition]) => {
+            const pitchFrequency = languageCompositePitchVoices.has(name) ? definition.frequency : null;
+            return buildCompositeDefinition(
+              name,
+              'voice',
+              !definition.disabled,
+              definition.level,
+              pitchFrequency,
+              pitchFrequency !== null && (languageSequences.has(name) || languageTuringVoiceSources.has(name)),
+            );
+          }),
+        ...[...swells.entries()]
+          .filter(([, definition]) => definition.model === 'composite')
+          .map(([name]) => buildCompositeDefinition(name, 'mod', true, 100, null, false)),
+      ],
       basicVoices: [...voices.entries()]
         .filter(([, definition]) => definition.engine === 'oscillator')
         .map(([name, definition]) => ({
@@ -3078,15 +3210,12 @@ export class SonusRuntime {
         }
         for (const name of moduleViews) {
           if (swells.has(name)) {
-            const mod = swells.get(name)!;
-            if (mod.model === 'dices') {
-              for (const port of ['x1', 'x2', 'x3', 'y']) monitors.set(`${name}.${port}`, 'signal');
-            } else {
-              for (let port = 1; port <= 4; port += 1) monitors.set(`${name}.out${port}`, 'signal');
-            }
+            for (const signal of moduleModViewSignals(name)) monitors.set(signal, 'signal');
           } else if (voices.has(name)) {
+            const voice = voices.get(name)!;
             monitors.set(`${name}.out`, 'signal');
-            monitors.set(`${name}.aux`, 'signal');
+            if (voice.engine !== 'composite') monitors.set(`${name}.aux`, 'signal');
+            else for (const output of languageCompositeOutputs.get(name) ?? []) monitors.set(`${name}.${output.name}`, 'signal');
           } else if (mists.has(name)) {
             monitors.set(`${name}.out_L`, 'signal');
             monitors.set(`${name}.out_R`, 'signal');
@@ -4550,6 +4679,39 @@ function parseLanguageRegisterWrite(line: string): { name: string; timing: Langu
   };
 }
 
+function parseLanguageCompositePitch(line: string): { name: string } | null {
+  const match = line.match(/^__compositepitch\("([A-Za-z_]\w*)"\)$/);
+  return match ? { name: match[1] } : null;
+}
+
+function parseLanguageCompositeEdge(line: string): { name: string; relation: 'fm'|'pm'|'am'|'ring'|'sync'; source: string; target: string; params: Record<string, number | boolean> } | null {
+  const match = line.match(/^__compositeedge\("([A-Za-z_]\w*)","(fm|pm|am|ring|sync)","([A-Za-z_]\w*)","([A-Za-z_]\w*)","((?:[^"\\]|\\.)*)"\)$/);
+  if (!match) return null;
+  let params: Record<string, number | boolean> = {};
+  try { params = JSON.parse(JSON.parse(`"${match[5]}"`)); } catch { return null; }
+  return { name: match[1], relation: match[2] as 'fm'|'pm'|'am'|'ring'|'sync', source: match[3], target: match[4], params };
+}
+
+function parseLanguageCompositeMix(line: string): { name: string; mix: string; inputs: Array<{ source: string; level: number; octave: number; detune: number }> } | null {
+  const match = line.match(/^__compositemix\("([A-Za-z_]\w*)","([A-Za-z_]\w*)","((?:[^"\\]|\\.)*)"\)$/);
+  if (!match) return null;
+  try {
+    const inputs = JSON.parse(JSON.parse(`"${match[3]}"`));
+    if (!Array.isArray(inputs)) return null;
+    return { name: match[1], mix: match[2], inputs };
+  } catch { return null; }
+}
+
+function parseLanguageCompositeOutput(line: string): { name: string; outputs: Array<{ name: string; level: number }> } | null {
+  const match = line.match(/^__compositeoutput\("([A-Za-z_]\w*)","((?:[^"\\]|\\.)*)"\)$/);
+  if (!match) return null;
+  try {
+    const outputs = JSON.parse(JSON.parse(`"${match[2]}"`));
+    if (!Array.isArray(outputs)) return null;
+    return { name: match[1], outputs };
+  } catch { return null; }
+}
+
 function parseLanguageRegisterPitch(line: string): LanguageRegisterVoiceDefinition | null {
   const match = line.match(/^__registerpitch\("([A-Za-z_]\w*)","([A-Za-z_]\w*)",(\d+)\)$/);
   return match ? { voice: match[1], register: match[2], stage: Number(match[3]) } : null;
@@ -5226,7 +5388,7 @@ function parseChainedCalls(tail: string): ChainedCall[] | null {
 
 interface ParsedRoute {
   sourceName: string;
-  sourcePort: 'out' | 'out_L' | 'out_R' | 'aux' | 'lp' | 'hp' | 'bp' | 'np' | 'out1' | 'out2' | 'out3' | 'out4' | 't1' | 't2' | 't3' | 'x1' | 'x2' | 'x3' | 'y';
+  sourcePort: string;
   amountExpression: string | null;
   targetName: string;
   targetPort: 'out' | 'out_L' | 'out_R' | 'in' | 'in2' | 'inL' | 'inR' | 'trig' | 'clock' | 'v_oct' | 'harmo' | 'timbre' | 'morph';
@@ -5245,7 +5407,7 @@ function parseRouteLine(line: string): ParsedRoute | null {
   if (!target) return null;
 
   const source = left.match(
-    /^([A-Za-z_]\w*)\.(out_L|out_R|out1|out2|out3|out4|t1|t2|t3|x1|x2|x3|y|lp|hp|bp|np|out|aux)(.*)$/,
+    /^([A-Za-z_]\w*)\.([A-Za-z_]\w*)(.*)$/,
   );
   if (!source) return null;
 
@@ -5687,6 +5849,13 @@ function applyVoiceCall(
 function applyVoiceModelValue(voice: VoiceDefinition, value: ScalarValue): string | null {
   if (typeof value === 'string') {
     const normalized = value.trim().toLowerCase();
+    if (normalized === 'composite') {
+      voice.engine = 'composite';
+      voice.soundId = normalized;
+      voice.lpg = false;
+      voice.parameters.set('MODEL', 'COMPOSITE');
+      return null;
+    }
     if (normalized === 'matter') {
       voice.engine = 'matter';
       voice.soundId = normalized;
@@ -5717,7 +5886,7 @@ function applyVoiceModelValue(voice: VoiceDefinition, value: ScalarValue): strin
     }
   }
   const model = parseVoiceModelValue(value);
-  if (model === null) return 'model expects macro.*, matter, resonator.*, sine, triangle, sawtooth, ramp, or square';
+  if (model === null) return 'model expects macro.*, matter, resonator.*, sine, triangle, sawtooth, ramp, square, or composite';
   voice.engine = 'macro';
   voice.model = model;
   voice.soundId = formatVoiceModelId(model);

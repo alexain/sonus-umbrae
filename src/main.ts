@@ -900,7 +900,7 @@ function notify(text: string): void {
 function normalizeLanguageCommandCase(): void {
   const normalized = editor.value
     .replace(
-      /^(\s*)(_?)(use|voice|drumkit|fx|filter|seq|register|out|set|clock|main)(?=\s|$)/gim,
+      /^(\s*)(_?)(use|voice|drumkit|fx|filter|seq|register|set|clock|main)(?=\s|$)/gim,
       (_match, indentation: string, disabled: string, commandName: string) =>
         `${indentation}${disabled}${commandName.toUpperCase()}`,
     )
@@ -1459,17 +1459,8 @@ function syncViews(): void {
     }
 
     const details = [...parameterViews.values()].filter((view) => view.signal.startsWith(`${node.id}.`));
-    const model = node.parameters.find((parameter) => parameter.name.toLowerCase() === 'model')?.value.toLowerCase();
     const compositeSignals = moduleViews.has(node.id)
-      ? / : MOD(?:\s+DICES)?$/i.test(node.label) && model === 'dices'
-        ? ['x1', 'x2', 'x3', 'y'].map((port) => `${node.id}.${port}`)
-        : / : (?:SWELL|MOD)$/i.test(node.label)
-          ? [1, 2, 3, 4].map((port) => `${node.id}.out${port}`)
-          : / : VOICE$/i.test(node.label)
-            ? [`${node.id}.out`, `${node.id}.aux`]
-            : / : (?:MIST|FX)$/i.test(node.label)
-              ? [`${node.id}.out_L`, `${node.id}.out_R`]
-              : []
+      ? node.views?.find((view) => (view.signals?.length ?? 0) > 0)?.signals ?? []
       : [];
 
     // User-created modules exist in VARIABLES and SCHEME automatically, but a
@@ -1697,29 +1688,32 @@ function buildModuleMonitorPanel(options: {
     label.className = 'monitor-section-label';
     const compositeIsDices = options.compositeSignals!.some(isDicesSignal);
     const scaleLabel = scopeScaleLabel(options.compositeSignals!, options.viewScale);
+    const compositePortNames = options.compositeSignals!.map((signal) =>
+      signal.slice(signal.lastIndexOf('.') + 1).toUpperCase()
+    );
+    const isGenericMod = / : MOD(?:\s+[A-Z0-9_-]+)?$/i.test(options.title);
     label.textContent = options.id === 'Audio'
       ? 'STEREO OUT'
       : (/: (?:MIST|FX)$/.test(options.title))
         ? 'OUT L / R'
-        : options.compositeSignals!.length === 2
-          ? 'OUT / AUX'
-          : compositeIsDices
-            ? `X1 / X2 / X3 / Y${scaleLabel ? ` · ${scaleLabel}` : ''}`
-            : / : MOD(?:\s+DICES)?$/i.test(options.title)
-              ? 'A / B / C / D'
-              : 'OUT 1-4';
+        : compositeIsDices
+          ? `X1 / X2 / X3 / Y${scaleLabel ? ` · ${scaleLabel}` : ''}`
+          : isGenericMod
+            ? `${compositePortNames.join(' / ')}${scaleLabel ? ` · ${scaleLabel}` : ''}`
+            : options.compositeSignals!.length === 2
+              ? 'OUT / AUX'
+              : compositePortNames.join(' / ');
 
     if (options.stereoLegend || (/: (?:MIST|FX)$/.test(options.title) && options.compositeSignals?.length === 2)) {
       const legend = document.createElement('span');
       legend.className = 'scope-stereo-legend';
       legend.innerHTML = '<span class="scope-legend-l">● L</span><span class="scope-legend-r">● R</span>';
       label.append(legend);
-    } else if (/ : MOD(?:\s+DICES)?$/i.test(options.title) && options.compositeSignals?.length === 4) {
-      const names = compositeIsDices ? ['X1', 'X2', 'X3', 'Y'] : ['A', 'B', 'C', 'D'];
+    } else if (isGenericMod && (options.compositeSignals?.length ?? 0) > 1) {
       const legend = document.createElement('span');
       legend.className = 'scope-stereo-legend';
-      legend.innerHTML = names.map((name, index) =>
-        `<span style="color:var(--scope-trace-${index + 1})">● ${name}</span>`
+      legend.innerHTML = compositePortNames.map((name, index) =>
+        `<span style="color:var(--scope-trace-${(index % 4) + 1})">● ${name}</span>`
       ).join('');
       label.append(legend);
     }
@@ -1728,7 +1722,7 @@ function buildModuleMonitorPanel(options: {
     canvas.dataset.signals = options.compositeSignals!.join(',');
     canvas.dataset.kind = 'multi-signal';
     canvas.dataset.scopeRange = String(effectiveScopeRange(options.compositeSignals!, options.viewScale));
-    if (/ : MOD(?:\s+DICES)?$/i.test(options.title)) {
+    if (isGenericMod) {
       canvas.dataset.modScope = 'true';
       canvas.dataset.modName = options.id;
     }

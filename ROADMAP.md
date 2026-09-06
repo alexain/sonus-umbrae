@@ -428,3 +428,5 @@ The 0.2.x environment now treats `Esc` as a compact live-performance menu and `>
 - [x] Persistent application-level output gain in Configuration.
 
 Post-0.3.0 candidates remain separate milestones: a polyphonic chord-oriented sound generator, logic/control objects, dedicated drum/sample playback, additional random/chaotic modulator families, and further REGISTER consumers.
+
+- [x] Extract a domain-neutral composite graph model and use it for both `VOICE ... sound composite` and `MOD ... model composite`. VOICE composites provide named internal mixer buses plus a mixed master output; MOD composites prohibit `mix` and expose one or more independent modulation signals. The first DSP adapter clones DaisySP basic oscillator VOICE nodes; adapters for MOD nodes and additional VOICE backends remain follow-up work.
