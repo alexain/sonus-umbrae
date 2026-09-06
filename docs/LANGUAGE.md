@@ -63,6 +63,7 @@ CLOCK set 120 bpm
 
 VOICE lead:
     sound macro.fm
+    pitch notes [C3]
     PITCH NOTES C4
 
 OUT lead TO MAIN
@@ -316,6 +317,65 @@ sound square
 
 The basic oscillators inherit the normal VOICE pitch, level, routing and timing behaviour. `square` additionally exposes `width 0..100`, defaulting to 50; the other basic oscillator sounds have no sound-specific parameters.
 
+
+A `VOICE` must declare exactly one `sound` and exactly one `pitch`. The `pitch`
+statement is the voice's primary musical trigger: changing other parameters does
+not retrigger the voice. A single fixed pitch is valid when no sequencing is
+needed.
+
+```text
+VOICE drone:
+    sound sawtooth
+    pitch notes [C3]
+```
+
+### VCA envelopes
+
+`vca` applies an existing `ENVELOPE` value to a public VOICE output. Without a
+target it controls the main `.out` port and is retriggered by every event from
+the VOICE's single `pitch` statement:
+
+```text
+SET pluck: ENVELOPE [
+    ATTACK 5 ms
+    DECAY 180 ms
+]
+
+VOICE lead:
+    sound sawtooth
+    pitch notes [C3 E3 G3] every 1 beat
+    vca pluck
+```
+
+The envelope may also be declared inline:
+
+```text
+VOICE lead:
+    sound square
+    pitch notes [C3 G3] every 1 beat
+    vca ENVELOPE [att 2 ms, dec 120 ms]
+```
+
+A VOICE can declare several VCAs when they target different public outputs.
+`TO <output>` selects the output; omitting it is equivalent to `TO out`:
+
+```text
+VOICE complex:
+    sound composite
+    pitch notes [C3 E3 G3] every 1 beat
+    fm op1 to op2 with depth 45
+    output op1, op2
+    vca main_env
+    vca short_env to op1
+    vca long_env to op2
+```
+
+Only one VCA may target a given output. `aux` can be targeted on VOICE engines
+that expose it. Composite named targets must be declared by `output`. VCA gain
+is applied only to the public output of that VOICE; private operator instances
+inside another composite do not inherit or react to the source VOICE's VCA.
+The VCA envelope range must remain within `0..100`.
+
 ### Composite voices
 
 `VOICE ... sound composite` builds an audio-rate graph from other VOICE objects. In the first implementation the operators must use the basic DaisySP oscillator sounds (`sine`, `triangle`, `sawtooth`, `ramp`, or `square`). The composite owns private DSP operator instances, so using a VOICE inside a composite does not change that VOICE's normal dry output or routing.
@@ -339,6 +399,7 @@ VOICE op3:
 
 VOICE complex:
     sound composite
+    pitch notes [C3]
     fm op1 to op2 with depth 45
     am op2 to op3 with depth 60, bias 20
     output op2 at 70, op3 at 100

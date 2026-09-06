@@ -31,6 +31,7 @@ const DRUMKIT_OUTPUT_TRIM = 6.0;
 export interface AudioProgram {
   clock: { bpm: number; jitter: number; drift: number };
   mainLevel: number;
+  vcas: Array<{ name: string; output: string }>;
   clockSources: Array<{ name: string; rate: number; jitter: number; drift: number; enabled: boolean }>;
   basicVoices: Array<{
     name: string;
@@ -474,6 +475,7 @@ export class AudioEngine {
   private skies = new Map<string, SkyVoice>();
   private delays = new Map<string, DelayVoice>();
   private filters = new Map<string, SvfFilterVoice>();
+  private voiceVcaLevels = new Map<string, number>();
   private clocks = new Map<string, ClockSource>();
   private clockTriggerListeners = new Map<string, Set<() => void>>();
   private masterClockBpm = 0;
@@ -758,6 +760,8 @@ export class AudioEngine {
       this.createResonator(definition);
       this.updateResonator(definition, hotReload);
     }
+
+    this.syncVoiceVcas(program.vcas);
 
     for (const definition of program.filters) {
       this.createFilter(definition);
@@ -2024,6 +2028,76 @@ export class AudioEngine {
     };
   }
 
+  private voiceVcaKey(name: string, output: string): string { return `${name}.${output}`; }
+
+  private voiceVcaFactor(name: string, output: string): number {
+    return this.voiceVcaLevels.get(this.voiceVcaKey(name, output)) ?? 1;
+  }
+
+  private applyVoiceVcaGain(name: string, output: string): void {
+    const context = this.ensureContext();
+    const factor = this.voiceVcaFactor(name, output);
+    const resonator = this.resonators.get(name);
+    if (resonator) {
+      const node = output === 'aux' ? resonator.auxGain : output === 'out' ? resonator.mainGain : null;
+      if (!node) throw new Error(`VOICE '${name}' does not expose '${output}'`);
+      const base = resonator.enabled ? Math.max(0, Math.min(1, resonator.level / 100)) * RESONATOR_OUTPUT_TRIM : 0;
+      node.gain.setTargetAtTime(base * factor, context.currentTime, 0.004);
+      return;
+    }
+    const matter = this.matters.get(name);
+    if (matter) {
+      const node = output === 'aux' ? matter.auxGain : output === 'out' ? matter.mainGain : null;
+      if (!node) throw new Error(`VOICE '${name}' does not expose '${output}'`);
+      const base = matter.enabled ? Math.max(0, Math.min(1, matter.level / 100)) : 0;
+      node.gain.setTargetAtTime(base * factor, context.currentTime, 0.004);
+      return;
+    }
+    const composite = this.composites.get(name);
+    if (composite) {
+      const node = output === 'out' ? composite.mainGain : composite.namedOutputs.get(output) ?? null;
+      if (!node) throw new Error(`VOICE '${name}' does not expose '${output}'`);
+      const base = composite.enabled ? Math.max(0, Math.min(1, composite.level / 100)) : 0;
+      node.gain.setTargetAtTime(base * factor, context.currentTime, 0.004);
+      return;
+    }
+    const basic = this.basicVoices.get(name);
+    if (basic) {
+      if (output !== 'out') throw new Error(`VOICE '${name}' does not expose '${output}'`);
+      const base = basic.enabled ? Math.max(0, Math.min(1, basic.level / 100)) : 0;
+      basic.output.gain.setTargetAtTime(base * factor, context.currentTime, 0.004);
+      return;
+    }
+    const voice = this.macros.get(name);
+    if (!voice) throw new Error(`unknown Voice object: ${name}`);
+    const node = output === 'aux' ? voice.auxGain : output === 'out' ? voice.outGain : null;
+    if (!node) throw new Error(`VOICE '${name}' does not expose '${output}'`);
+    const base = voice.enabled ? Math.max(0, Math.min(1, voice.level / 100)) : 0;
+    node.gain.setTargetAtTime(base * factor, context.currentTime, 0.004);
+  }
+
+  private syncVoiceVcas(definitions: AudioProgram['vcas']): void {
+    const desired = new Set(definitions.map((definition) => this.voiceVcaKey(definition.name, definition.output)));
+    for (const key of [...this.voiceVcaLevels.keys()]) {
+      if (desired.has(key)) continue;
+      const separator = key.indexOf('.');
+      const name = key.slice(0, separator), output = key.slice(separator + 1);
+      this.voiceVcaLevels.delete(key);
+      this.applyVoiceVcaGain(name, output);
+    }
+    for (const definition of definitions) {
+      const key = this.voiceVcaKey(definition.name, definition.output);
+      if (!this.voiceVcaLevels.has(key)) this.voiceVcaLevels.set(key, 0);
+      this.applyVoiceVcaGain(definition.name, definition.output);
+    }
+  }
+
+  setVoiceOutputVcaLevel(name: string, output: string, level: number): void {
+    if (!Number.isFinite(level) || level < 0 || level > 100) throw new RangeError('VOICE VCA level must be 0..100');
+    this.voiceVcaLevels.set(this.voiceVcaKey(name, output), level / 100);
+    this.applyVoiceVcaGain(name, output);
+  }
+
   triggerVoice(name: string): void {
     const resonator = this.resonators.get(name);
     if (resonator) {
@@ -2042,42 +2116,23 @@ export class AudioEngine {
 
   setVoiceLevel(name: string, level: number): void {
     if (!Number.isFinite(level) || level < 0 || level > 100) throw new RangeError('VOICE level must be 0..100');
-    const context = this.ensureContext();
-    const gain = level / 100;
     const resonator = this.resonators.get(name);
-    if (resonator) {
-      resonator.level = level;
-      const calibratedGain = gain * RESONATOR_OUTPUT_TRIM;
-      resonator.mainGain.gain.setTargetAtTime(calibratedGain, context.currentTime, 0.008);
-      resonator.auxGain.gain.setTargetAtTime(calibratedGain, context.currentTime, 0.008);
-      return;
-    }
+    if (resonator) { resonator.level = level; this.applyVoiceVcaGain(name, 'out'); this.applyVoiceVcaGain(name, 'aux'); return; }
     const matter = this.matters.get(name);
-    if (matter) {
-      matter.level = level;
-      matter.mainGain.gain.setTargetAtTime(gain, context.currentTime, 0.008);
-      matter.auxGain.gain.setTargetAtTime(gain, context.currentTime, 0.008);
-      return;
-    }
+    if (matter) { matter.level = level; this.applyVoiceVcaGain(name, 'out'); this.applyVoiceVcaGain(name, 'aux'); return; }
     const composite = this.composites.get(name);
     if (composite) {
       composite.level = level;
-      composite.mainGain.gain.setTargetAtTime(gain, context.currentTime, 0.008);
-      for (const output of composite.namedOutputs.values()) output.gain.setTargetAtTime(gain, context.currentTime, 0.008);
+      this.applyVoiceVcaGain(name, 'out');
+      for (const output of composite.namedOutputs.keys()) this.applyVoiceVcaGain(name, output);
       return;
     }
     const basicVoice = this.basicVoices.get(name);
-    if (basicVoice) {
-      basicVoice.level = level;
-      basicVoice.output.gain.setTargetAtTime(gain, context.currentTime, 0.008);
-      this.updateCompositeOperator(name, { level });
-      return;
-    }
+    if (basicVoice) { basicVoice.level = level; this.applyVoiceVcaGain(name, 'out'); this.updateCompositeOperator(name, { level }); return; }
     const voice = this.macros.get(name);
     if (!voice) throw new Error(`unknown Voice object: ${name}`);
     voice.level = level;
-    voice.outGain.gain.setTargetAtTime(gain, context.currentTime, 0.008);
-    voice.auxGain.gain.setTargetAtTime(gain, context.currentTime, 0.008);
+    this.applyVoiceVcaGain(name, 'out'); this.applyVoiceVcaGain(name, 'aux');
   }
 
   setCompositeOperatorTune(
@@ -2258,43 +2313,36 @@ export class AudioEngine {
       const resonator = this.resonators.get(name);
       if (resonator) {
         resonator.enabled = !disabled;
-        const level = disabled
-          ? 0
-          : Math.max(0, Math.min(1, resonator.level / 100)) * RESONATOR_OUTPUT_TRIM;
-        resonator.mainGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
-        resonator.auxGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
+        this.applyVoiceVcaGain(name, 'out');
+        this.applyVoiceVcaGain(name, 'aux');
         return;
       }
       const matter = this.matters.get(name);
       if (matter) {
         matter.enabled = !disabled;
-        const level = disabled ? 0 : Math.max(0, Math.min(1, matter.level / 100));
-        matter.mainGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
-        matter.auxGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
+        this.applyVoiceVcaGain(name, 'out');
+        this.applyVoiceVcaGain(name, 'aux');
         return;
       }
       const composite = this.composites.get(name);
       if (composite) {
         composite.enabled = !disabled;
-        const level = disabled ? 0 : Math.max(0, Math.min(1, composite.level / 100));
-        composite.mainGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
-        for (const output of composite.namedOutputs.values()) output.gain.setTargetAtTime(level, context.currentTime, 0.008);
+        this.applyVoiceVcaGain(name, 'out');
+        for (const output of composite.namedOutputs.keys()) this.applyVoiceVcaGain(name, output);
         return;
       }
       const basicVoice = this.basicVoices.get(name);
       if (basicVoice) {
         basicVoice.enabled = !disabled;
-        const level = disabled ? 0 : Math.max(0, Math.min(1, basicVoice.level / 100));
-        basicVoice.output.gain.setTargetAtTime(level, context.currentTime, 0.008);
+        this.applyVoiceVcaGain(name, 'out');
         this.updateCompositeOperator(name, { level: disabled ? 0 : basicVoice.level });
         return;
       }
       const voice = this.macros.get(name);
       if (!voice) return;
       voice.enabled = !disabled;
-      const level = disabled ? 0 : Math.max(0, Math.min(1, voice.level / 100));
-      voice.outGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
-      voice.auxGain.gain.setTargetAtTime(level, context.currentTime, 0.008);
+      this.applyVoiceVcaGain(name, 'out');
+      this.applyVoiceVcaGain(name, 'aux');
       return;
     }
 

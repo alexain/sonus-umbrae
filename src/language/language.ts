@@ -228,6 +228,7 @@ type VoiceState = {
   hasSound: boolean;
   soundId: string | null;
   pitchProperty: 'note' | 'scale' | 'freq' | null;
+  vcaTargets: Set<string>;
   embeddedFilter: string | null;
 };
 
@@ -1058,10 +1059,10 @@ function claimPitchProperty(
   line: number,
   label: 'VOICE' | 'FX',
 ): void {
-  if (owner.pitchProperty && owner.pitchProperty !== property) {
+  if (owner.pitchProperty) {
     throw new LanguageError([{
       line,
-      message: `${label} '${owner.name}' already uses ${owner.pitchProperty}; PITCH can be declared only once per object`,
+      message: `${label} '${owner.name}' already declares PITCH; PITCH can be declared only once per object`,
     }]);
   }
   owner.pitchProperty = property;
@@ -1303,6 +1304,23 @@ function compileVoiceProperty(
   } else if (key === 'note' || key === 'freq' || key === 'scale') {
     throw new LanguageError([{ line, message: `\${property.toUpperCase()} is no longer a VOICE property; use PITCH SCALE ..., PITCH NOTES ..., or PITCH FREQS ...` }]);
   }
+
+  if (key === 'vca') {
+    let target = 'out';
+    let envelopeText = value;
+    const targetMatch = value.match(/^(.*)\s+to\s+([A-Za-z_][A-Za-z0-9_]*)$/i);
+    if (targetMatch) {
+      envelopeText = targetMatch[1].trim();
+      target = targetMatch[2];
+    }
+    const envelope = envelopeFromValue(envelopeText, line, sourceDefinitions);
+    if (!envelope) throw new LanguageError([{ line, message: 'vca expects ENVELOPE [...] or an ENVELOPE SET value, optionally followed by TO <output>' }]);
+    if (envelope.range[0] < 0 || envelope.range[1] > 100) throw new LanguageError([{ line, message: 'VCA ENVELOPE range must stay within 0..100' }]);
+    if (voice.vcaTargets.has(target)) throw new LanguageError([{ line, message: `VOICE '${voice.name}' already declares a VCA for output '${target}'` }]);
+    voice.vcaTargets.add(target);
+    return `__voicevca(${JSON.stringify(voice.name)},${JSON.stringify(target)},${envelopeLiteral(envelope)},${line});`;
+  }
+
   if (key === 'tune') {
     if (voice.soundId !== 'composite') throw new LanguageError([{ line, message: 'tune is available only for sound composite' }]);
     return compileCompositeTuneDirective(voice.name, value, line, sourceDefinitions);
@@ -1529,6 +1547,7 @@ function compileVoiceProperty(
     }
 
     case 'sound': {
+      if (voice.hasSound) throw new LanguageError([{ line, message: `VOICE '${voice.name}' can declare SOUND only once` }]);
       const match = value.match(/^([a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)?)(?:\s+with\s+(.+))?$/i);
       if (!match) {
         throw new LanguageError([{ line, message: 'sound expects an engine or engine.algorithm [with option, ...]' }]);
@@ -3725,10 +3744,10 @@ function requireFilterModel(filter: FilterState | null, diagnostics: LanguageDia
   if (filter && !filter.hasModel) diagnostics.push({ line: filter.line, message: `FILTER '${filter.name}' requires model` });
 }
 
-function requireVoiceSound(voice: VoiceState | null, diagnostics: LanguageDiagnostic[]): void {
-  if (voice && !voice.hasSound) {
-    diagnostics.push({ line: voice.line, message: `VOICE '${voice.name}' requires sound` });
-  }
+function requireVoiceReady(voice: VoiceState | null, diagnostics: LanguageDiagnostic[]): void {
+  if (!voice) return;
+  if (!voice.hasSound) diagnostics.push({ line: voice.line, message: `VOICE '${voice.name}' requires sound` });
+  if (!voice.pitchProperty) diagnostics.push({ line: voice.line, message: `VOICE '${voice.name}' requires pitch` });
 }
 
 
@@ -4025,7 +4044,7 @@ export function compileLanguageSource(source: string): string {
       const clockBlockMatch = trimmed.match(/^(_)?CLOCK\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
       if (clockBlockMatch) {
         if (indentation > 0) throw new LanguageError([{ line: lineNumber, message: 'CLOCK declarations are top-level only' }]);
-        requireVoiceSound(currentVoice, diagnostics); requireFxModel(currentFx, diagnostics); requireSeqReady(currentSeq, diagnostics);
+        requireVoiceReady(currentVoice, diagnostics); requireFxModel(currentFx, diagnostics); requireSeqReady(currentSeq, diagnostics);
         currentVoice = null; currentFx = null; currentFilter = null; currentMod = null; currentSeq = null;
         const disabled = Boolean(clockBlockMatch[1]);
         const name = clockBlockMatch[2];
@@ -4042,7 +4061,7 @@ export function compileLanguageSource(source: string): string {
       const registerMatch = trimmed.match(/^REGISTER\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*$/i);
       if (registerMatch) {
         if (indentation > 0) throw new LanguageError([{ line: lineNumber, message: 'REGISTER declarations are top-level only' }]);
-        requireVoiceSound(currentVoice, diagnostics);
+        requireVoiceReady(currentVoice, diagnostics);
         requireFxModel(currentFx, diagnostics);
         requireSeqReady(currentSeq, diagnostics);
         requireRegisterReady(currentRegister, diagnostics);
@@ -4065,7 +4084,7 @@ export function compileLanguageSource(source: string): string {
       const logicMatch = trimmed.match(/^LOGIC\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
       if (logicMatch) {
         if (indentation > 0) throw new LanguageError([{ line: lineNumber, message: 'LOGIC declarations are top-level only' }]);
-        requireVoiceSound(currentVoice, diagnostics); requireFxModel(currentFx, diagnostics); requireSeqReady(currentSeq, diagnostics); requireRegisterReady(currentRegister, diagnostics);
+        requireVoiceReady(currentVoice, diagnostics); requireFxModel(currentFx, diagnostics); requireSeqReady(currentSeq, diagnostics); requireRegisterReady(currentRegister, diagnostics);
         currentVoice = null; currentFx = null; currentFilter = null; currentMod = null; currentSeq = null; currentRegister = null; currentClock = null;
         const name = logicMatch[1];
         if (voices.has(name) || fxs.has(name) || filters.has(name) || scalarNames.has(name) || seqs.has(name) || registers.has(name) || logics.has(name) || sourceDefinitions.has(name)) {
@@ -4080,7 +4099,7 @@ export function compileLanguageSource(source: string): string {
       const seqMatch = trimmed.match(/^SEQ\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
       if (seqMatch) {
         if (indentation > 0) throw new LanguageError([{ line: lineNumber, message: 'SEQ declarations are top-level only' }]);
-        requireVoiceSound(currentVoice, diagnostics);
+        requireVoiceReady(currentVoice, diagnostics);
         requireFxModel(currentFx, diagnostics);
         requireRegisterReady(currentRegister, diagnostics);
         currentRegister = null;
@@ -4140,7 +4159,7 @@ export function compileLanguageSource(source: string): string {
           throw new LanguageError([{ line: lineNumber, message: 'local MOD must be inside a VOICE or FX' }]);
         }
         if (!ownerObject) {
-          requireVoiceSound(currentVoice, diagnostics);
+          requireVoiceReady(currentVoice, diagnostics);
           requireFxModel(currentFx, diagnostics);
           currentVoice = null;
           currentFx = null;
@@ -4209,7 +4228,7 @@ export function compileLanguageSource(source: string): string {
           currentVoice!.embeddedFilter = name;
           voiceEmbeddedFilters.set(currentVoice!.name, name);
         } else {
-          requireVoiceSound(currentVoice, diagnostics);
+          requireVoiceReady(currentVoice, diagnostics);
           requireFxModel(currentFx, diagnostics);
           currentVoice = null; currentFx = null; currentMod = null;
           if (filters.has(name) || voices.has(name) || fxs.has(name) || scalarNames.has(name) || seqs.has(name)) {
@@ -4227,7 +4246,7 @@ export function compileLanguageSource(source: string): string {
       const fxMatch = trimmed.match(/^(_)?FX\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
       if (fxMatch) {
         if (indentation > 0) throw new LanguageError([{ line: lineNumber, message: 'FX declarations are top-level only' }]);
-        requireVoiceSound(currentVoice, diagnostics);
+        requireVoiceReady(currentVoice, diagnostics);
         requireFxModel(currentFx, diagnostics);
         currentVoice = null;
         currentMod = null;
@@ -4246,7 +4265,7 @@ export function compileLanguageSource(source: string): string {
 
       const voiceMatch = trimmed.match(/^(_)?VOICE\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
       if (voiceMatch) {
-        requireVoiceSound(currentVoice, diagnostics);
+        requireVoiceReady(currentVoice, diagnostics);
         requireFxModel(currentFx, diagnostics);
         currentFx = null;
         const disabled = Boolean(voiceMatch[1]);
@@ -4256,7 +4275,7 @@ export function compileLanguageSource(source: string): string {
         }
         voices.add(name);
         sourceKinds.set(name, 'voice');
-        currentVoice = { name, line: lineNumber, indentation, hasSound: false, soundId: null, pitchProperty: null, embeddedFilter: null };
+        currentVoice = { name, line: lineNumber, indentation, hasSound: false, soundId: null, pitchProperty: null, vcaTargets: new Set(), embeddedFilter: null };
         const viewDirective = voiceMatch[3] ? `\n${name}.view();` : '';
         const disabledDirective = disabled ? `\n${name}.disabled(true);` : '';
         output[index] = `${name} = Voice();${viewDirective}${disabledDirective}`;
@@ -4299,7 +4318,7 @@ export function compileLanguageSource(source: string): string {
           continue;
         }
 
-        requireVoiceSound(currentVoice, diagnostics);
+        requireVoiceReady(currentVoice, diagnostics);
         requireFxModel(currentFx, diagnostics);
         requireSeqReady(currentSeq, diagnostics);
         requireClockReady(currentClock, diagnostics);
@@ -4363,7 +4382,7 @@ export function compileLanguageSource(source: string): string {
           continue;
         }
 
-        requireVoiceSound(currentVoice, diagnostics);
+        requireVoiceReady(currentVoice, diagnostics);
         requireFxModel(currentFx, diagnostics);
         currentVoice = null;
         currentFx = null;
@@ -4380,7 +4399,7 @@ export function compileLanguageSource(source: string): string {
 
       const mainMatch = trimmed.match(/^MAIN\s+level\s+(.+)$/i);
       if (mainMatch) {
-        requireVoiceSound(currentVoice, diagnostics);
+        requireVoiceReady(currentVoice, diagnostics);
         requireFxModel(currentFx, diagnostics);
         currentVoice = null;
         currentFx = null;
@@ -4490,7 +4509,7 @@ export function compileLanguageSource(source: string): string {
     }
   }
 
-  requireVoiceSound(currentVoice, diagnostics);
+  requireVoiceReady(currentVoice, diagnostics);
   requireFxModel(currentFx, diagnostics);
   requireFilterModel(currentFilter, diagnostics);
   requireSeqReady(currentSeq, diagnostics);

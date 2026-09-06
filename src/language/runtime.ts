@@ -646,6 +646,13 @@ type LanguageEnvelopeDefinition = {
   clockSource: string;
 };
 
+type LanguageVcaDefinition = {
+  owner: string;
+  output: string;
+  spec: LanguageEnvelopeSpec;
+  line: number;
+};
+
 type LanguageGenerativeMode = 'wander' | 'trend' | 'scatter' | 'flutter';
 
 interface LanguageGenerativeDefaultDefinition {
@@ -1112,6 +1119,7 @@ export class SonusRuntime {
     const languageInlinePianos: LanguageInlinePianoDefinition[] = [];
     const languageInlineScalars: LanguageInlineScalarDefinition[] = [];
     const languageEnvelopes: LanguageEnvelopeDefinition[] = [];
+    const languageVcas: LanguageVcaDefinition[] = [];
     const languageFilterSequences: LanguageFilterSequenceDefinition[] = [];
     const languageObjectEvery = new Map<string, LanguageObjectEveryDefinition>();
     const languageDriveEvery = new Map<string, LanguageObjectEveryDefinition>();
@@ -1305,6 +1313,9 @@ export class SonusRuntime {
         languageInlineScalars.push(inlineScalar);
         continue;
       }
+
+      const voiceVca = parseLanguageVcaDirective(line, lineNumber);
+      if (voiceVca) { languageVcas.push(voiceVca); continue; }
 
       const envelope = parseLanguageEnvelopeDirective(line, lineNumber);
       if (envelope) {
@@ -1900,7 +1911,7 @@ export class SonusRuntime {
     // source order. All module declarations already exist, so references between
     // modules are still independent from declaration order.
     for (const { source: line, line: lineNumber } of lines) {
-      if (parseLanguageLogicDirective(line) || parseLanguageLogicNodeDirective(line) || parseLanguageCompositePitch(line) || parseLanguageCompositeTune(line) || parseLanguageCompositeEdge(line) || parseLanguageCompositeMix(line) || parseLanguageCompositeOutput(line) || parseLanguageDrumkitDirective(line) || parseLanguageDrumkitMetaDirective(line) || parseLanguageDrumSlotDirective(line) || parseLanguageTuningDirective(line) !== null || parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageSeqModel(line) || parseLanguageSeqWeights(line) || parseLanguageConstellationParam(line) || parseLanguageConstellationOctaves(line) || parseLanguageConstellationReader(line) || parseLanguageSnakeSize(line) || parseLanguageSnakeMovement(line) || parseLanguageSnakeMatrix(line) || parseLanguageSnakeReader(line) || parseLanguageSeqSize(line) || parseLanguageLifeDensity(line) || parseLanguageLifeReader(line) || parseLanguageLifeEvolve(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageEnvelopeDirective(line, lineNumber) || parseLanguageFxMetadata(line) || parseLanguageDelayTime(line) || parseLanguageDelayParam(line, lineNumber) || parseLanguageDelayParamDefault(line, lineNumber) || parseLanguageDelayParamCycle(line, lineNumber) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
+      if (parseLanguageLogicDirective(line) || parseLanguageLogicNodeDirective(line) || parseLanguageCompositePitch(line) || parseLanguageCompositeTune(line) || parseLanguageCompositeEdge(line) || parseLanguageCompositeMix(line) || parseLanguageCompositeOutput(line) || parseLanguageDrumkitDirective(line) || parseLanguageDrumkitMetaDirective(line) || parseLanguageDrumSlotDirective(line) || parseLanguageTuningDirective(line) !== null || parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageSeqModel(line) || parseLanguageSeqWeights(line) || parseLanguageConstellationParam(line) || parseLanguageConstellationOctaves(line) || parseLanguageConstellationReader(line) || parseLanguageSnakeSize(line) || parseLanguageSnakeMovement(line) || parseLanguageSnakeMatrix(line) || parseLanguageSnakeReader(line) || parseLanguageSeqSize(line) || parseLanguageLifeDensity(line) || parseLanguageLifeReader(line) || parseLanguageLifeEvolve(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageVcaDirective(line, lineNumber) || parseLanguageEnvelopeDirective(line, lineNumber) || parseLanguageFxMetadata(line) || parseLanguageDelayTime(line) || parseLanguageDelayParam(line, lineNumber) || parseLanguageDelayParamDefault(line, lineNumber) || parseLanguageDelayParamCycle(line, lineNumber) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
 
       const gainDeclaration = parseGainDeclaration(line);
       if (gainDeclaration) {
@@ -3237,9 +3248,27 @@ export class SonusRuntime {
       return { name, domain, enabled, level, pitchFrequency, dynamicPitch, operators, edges, mixes, tunes, outputs };
     };
 
+
+    for (const definition of languageVcas) {
+      const voice = voices.get(definition.owner);
+      if (!voice) throw new SonusEvaluationError([{ line: definition.line, message: `VCA references unknown VOICE '${definition.owner}'` }]);
+      if (voice.engine === 'composite') {
+        if (definition.output !== 'out') {
+          const outputs = languageCompositeOutputs.get(definition.owner) ?? [];
+          const available = new Set(outputs.map((item) => item.name));
+          if (!available.has(definition.output)) throw new SonusEvaluationError([{ line: definition.line, message: `VOICE '${definition.owner}' does not expose composite output '${definition.output}'` }]);
+        }
+      } else if (definition.output === 'aux') {
+        if (!['macro', 'matter', 'resonator'].includes(voice.engine)) throw new SonusEvaluationError([{ line: definition.line, message: `VOICE '${definition.owner}' does not expose AUX` }]);
+      } else if (definition.output !== 'out') {
+        throw new SonusEvaluationError([{ line: definition.line, message: `VOICE '${definition.owner}' VCA target must be OUT${['macro', 'matter', 'resonator'].includes(voice.engine) ? ' or AUX' : ''}` }]);
+      }
+    }
+
     const program: AudioProgram = {
       clock: { bpm: clockBpm, jitter: masterJitter, drift: masterTimingDrift },
       mainLevel,
+      vcas: languageVcas.map((definition) => ({ name: definition.owner, output: definition.output })),
       clockSources: [
         { name: 'Clock', rate: 1, jitter: masterJitter, drift: masterTimingDrift, enabled: !(languageMasterClock?.disabled ?? false) },
         ...[...clockSources.entries()].map(([name, definition]) => ({ name, rate: definition.rate, jitter: definition.jitter, drift: definition.drift, enabled: !definition.disabled })),
@@ -3955,6 +3984,68 @@ export class SonusRuntime {
           this.scheduler.addWallJob(`envelope-trigger:${definition.ownerKind}:${definition.owner}:${definition.parameter}:${definition.line}`, baseMs, trigger);
         }
       }
+    }
+
+    const applyVoiceVcaValue = (definition: LanguageVcaDefinition, value: number): void => {
+      const checked = Math.max(0, Math.min(100, value));
+      this.audio.setVoiceOutputVcaLevel(definition.owner, definition.output, checked);
+    };
+
+    for (const definition of languageVcas) {
+      const spec = definition.spec;
+      const low = spec.range[0], high = spec.range[1];
+      const sustainValue = spec.sustain === null ? low : low + (high - low) * spec.sustain;
+      let active = false;
+      let stage = 0;
+      let stageElapsed = 0;
+      let stageStart = low;
+      let lastAt = performance.now();
+      const stages: Array<{ kind: string; time: LanguageEnvelopeStage | null; target: number }> = [];
+      if (spec.delay) stages.push({ kind: 'delay', time: spec.delay, target: low });
+      if (spec.attack) stages.push({ kind: 'attack', time: spec.attack, target: high });
+      if (spec.hold) stages.push({ kind: 'hold', time: spec.hold, target: high });
+      if (spec.decay) stages.push({ kind: 'decay', time: spec.decay, target: spec.sustain === null ? low : sustainValue });
+      if (spec.sustain !== null) stages.push({ kind: 'sustain', time: null, target: sustainValue });
+      else if (spec.release) stages.push({ kind: 'release', time: spec.release, target: low });
+
+      const trigger = (): void => {
+        active = true; stage = 0; stageElapsed = 0; stageStart = low; lastAt = performance.now();
+        applyVoiceVcaValue(definition, low);
+      };
+      const list = envelopeTriggers.get(definition.owner) ?? [];
+      list.push(trigger); envelopeTriggers.set(definition.owner, list);
+      applyVoiceVcaValue(definition, low);
+
+      this.scheduler.addWallJob(`vca-run:${definition.owner}:${definition.output}:${definition.line}`, 10, () => {
+        if (!active || stages.length === 0) return;
+        const now = performance.now();
+        const deltaMs = Math.max(0, now - lastAt); lastAt = now;
+        const current = stages[stage];
+        if (!current) { active = false; applyVoiceVcaValue(definition, low); return; }
+        if (current.kind === 'sustain') { applyVoiceVcaValue(definition, current.target); return; }
+        const time = current.time!;
+        let deltaProgress = 0;
+        if (time.unit === 'beat') {
+          const timing = this.audio.getClockTiming('Clock');
+          if (!timing.running || !Number.isFinite(timing.beatDurationMs)) return;
+          deltaProgress = deltaMs / (timing.beatDurationMs * time.amount);
+        } else {
+          const durationMs = time.unit === 'sec' ? time.amount * 1000 : time.amount;
+          deltaProgress = durationMs > 0 ? deltaMs / durationMs : 1;
+        }
+        stageElapsed += deltaProgress;
+        const p = Math.max(0, Math.min(1, stageElapsed));
+        const curved = time.curve === 'log' ? Math.log1p(9 * p) / Math.log(10) : p;
+        const value = current.kind === 'delay' || current.kind === 'hold'
+          ? current.target
+          : stageStart + (current.target - stageStart) * curved;
+        applyVoiceVcaValue(definition, value);
+        if (stageElapsed >= 1) {
+          applyVoiceVcaValue(definition, current.target);
+          stageStart = current.target; stage += 1; stageElapsed = 0;
+          if (stage >= stages.length) active = false;
+        }
+      });
     }
 
     const triggerVoiceEvent = (name: string): void => {
@@ -5576,6 +5667,18 @@ function parseLanguageMasterClockDirective(line: string, lineNumber: number): La
     disabled: match[7] === 'true',
     line: lineNumber,
   };
+}
+
+function parseLanguageVcaDirective(line: string, lineNumber: number): LanguageVcaDefinition | null {
+  const match = line.match(/^__voicevca\("([A-Za-z_]\w*)","([A-Za-z_]\w*)","((?:[^"\\]|\\.)*)",(\d+)\)$/);
+  if (!match) return null;
+  try {
+    const raw = JSON.parse(`"${match[3]}"`) as string;
+    const spec = JSON.parse(raw) as LanguageEnvelopeSpec;
+    return { owner: match[1], output: match[2], spec, line: Number(match[4]) || lineNumber };
+  } catch {
+    return null;
+  }
 }
 
 function parseLanguageEnvelopeDirective(line: string, lineNumber: number): LanguageEnvelopeDefinition | null {
