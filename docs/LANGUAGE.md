@@ -674,7 +674,7 @@ Scales are resolved from the catalog in `docs/SCALES.md`:
 
 ```text
 pitch scale C minor
-pitch scale C edo19_four_out_of_19
+pitch scale C edo19_4
 pitch scale C edo24_triforce_15
 ```
 
@@ -691,7 +691,7 @@ For non-12-EDO scales, ranges must use `nN@O`. In a scale range, `N` is the one-
 
 ```text
 pitch scale C edo24_triforce_15 with range n1@3 n15@4
-pitch scale C edo19_four_out_of_19 with range n1@3 n4@5
+pitch scale C edo19_4 with range n1@3 n4@5
 ```
 
 Selection modifiers remain composable with ranges:
