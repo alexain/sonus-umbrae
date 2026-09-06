@@ -28,6 +28,12 @@ import {
   type ConstellationDefinition,
   type ConstellationReaderState,
 } from './runtime/seq/constellation';
+import {
+  nextSnakeStep,
+  type SnakeDefinition,
+  type SnakeMovement,
+  type SnakeReaderState,
+} from './runtime/seq/snake';
 
 
 
@@ -139,6 +145,16 @@ export interface ConstellationViewState {
   stepwise: number;
   leap: number;
   memory: number;
+  revision: number;
+}
+
+export interface SnakeViewState {
+  name: string;
+  width: number;
+  height: number;
+  movement: SnakeMovement;
+  currentCell: number | null;
+  history: number[];
   revision: number;
 }
 
@@ -376,6 +392,16 @@ interface LanguageConstellationDefinition extends ConstellationDefinition {
 }
 
 interface LanguageConstellationReaderDefinition {
+  voice: string;
+  seq: string;
+}
+
+interface LanguageSnakeDefinition extends SnakeDefinition {
+  model: 'snake';
+  matrixExplicit: boolean;
+}
+
+interface LanguageSnakeReaderDefinition {
   voice: string;
   seq: string;
 }
@@ -697,6 +723,7 @@ export class SonusRuntime {
   private turingViews = new Map<string, TuringViewState>();
   private lifeViews = new Map<string, LifeViewState>();
   private constellationViews = new Map<string, ConstellationViewState>();
+  private snakeViews = new Map<string, SnakeViewState>();
   private drumkitViews = new Map<string, DrumkitViewState>();
   private drumViewMasterBeat = 0;
   private drumViewMasterBeatAt = performance.now();
@@ -713,6 +740,7 @@ export class SonusRuntime {
   private lifeDefinitions = new Map<string, LanguageLifeDefinition>();
   private lifeReaderState = new Map<string, { seq: string; cell: number; direction: number }>();
   private constellationReaderState = new Map<string, ConstellationReaderState>();
+  private snakeReaderState = new Map<string, SnakeReaderState>();
   private registerState = new Map<string, number[]>();
   private registerReaderState = new Map<string, { seq: string; cell: number; direction: number }>();
   private voiceSequenceState = new Map<string, { cursor: number; walkCursor: number; direction: number; shuffleCursor: number }>();
@@ -762,6 +790,7 @@ export class SonusRuntime {
       turingViews: this.turingViews,
       lifeViews: this.lifeViews,
       constellationViews: this.constellationViews,
+      snakeViews: this.snakeViews,
       drumkitViews: this.drumkitViews,
       randomState: this.randomState,
     };
@@ -776,6 +805,7 @@ export class SonusRuntime {
       this.turingViews = saved.turingViews;
       this.lifeViews = saved.lifeViews;
       this.constellationViews = saved.constellationViews;
+      this.snakeViews = saved.snakeViews;
       this.drumkitViews = saved.drumkitViews;
       this.randomState = saved.randomState;
     }
@@ -813,6 +843,10 @@ export class SonusRuntime {
 
   getConstellationViews(): ConstellationViewState[] {
     return [...this.constellationViews.values()].map((view) => ({ ...view, frequencies: [...view.frequencies], history: [...view.history] }));
+  }
+
+  getSnakeViews(): SnakeViewState[] {
+    return [...this.snakeViews.values()].map((view) => ({ ...view, history: [...view.history] }));
   }
 
   getDrumkitViews(): DrumkitViewState[] {
@@ -919,6 +953,7 @@ export class SonusRuntime {
       turingViews: this.turingViews,
       lifeViews: this.lifeViews,
       constellationViews: this.constellationViews,
+      snakeViews: this.snakeViews,
       drumkitViews: this.drumkitViews,
       scheme: this.scheme,
       randomState: this.randomState,
@@ -935,6 +970,7 @@ export class SonusRuntime {
       this.turingViews = saved.turingViews;
       this.lifeViews = saved.lifeViews;
       this.constellationViews = saved.constellationViews;
+      this.snakeViews = saved.snakeViews;
       this.drumkitViews = saved.drumkitViews;
       this.scheme = saved.scheme;
       this.randomState = saved.randomState;
@@ -961,6 +997,7 @@ export class SonusRuntime {
       this.lifeDefinitions.clear();
       this.lifeReaderState.clear();
       this.constellationReaderState.clear();
+      this.snakeReaderState.clear();
       this.registerState.clear();
       this.registerReaderState.clear();
       this.voiceSequenceState.clear();
@@ -998,6 +1035,8 @@ export class SonusRuntime {
     const languageTurings = new Map<string, LanguageTuringDefinition>();
     const languageLives = new Map<string, LanguageLifeDefinition>();
     const languageConstellations = new Map<string, LanguageConstellationDefinition>();
+    const languageSnakes = new Map<string, LanguageSnakeDefinition>();
+    const languageSnakeReaders = new Map<string, LanguageSnakeReaderDefinition>();
     const languageConstellationReaders = new Map<string, LanguageConstellationReaderDefinition>();
     const languageLifeReaders = new Map<string, LanguageLifeReaderDefinition>();
     const languageLifeEvolve = new Map<string, LanguageCycleDefinition>();
@@ -1126,11 +1165,18 @@ export class SonusRuntime {
         if (seqModel.model === 'life') {
           languageTurings.delete(seqModel.name);
           languageConstellations.delete(seqModel.name);
+          languageSnakes.delete(seqModel.name);
           languageLives.set(seqModel.name, { model: 'life', variant: seqModel.variant, size: 8, density: 34, maxDensity: null, respawn: false, values: [], cells: [] });
         } else if (seqModel.model === 'constellation') {
           languageTurings.delete(seqModel.name);
           languageLives.delete(seqModel.name);
+          languageSnakes.delete(seqModel.name);
           languageConstellations.set(seqModel.name, { model: 'constellation', values: [], weights: [], stepwise: 60, leap: 20, repeat: 10, memory: 25, octaves: [{ octave: 0, weight: 100 }], phrase: 0, mutation: 0 });
+        } else if (seqModel.model === 'snake') {
+          languageTurings.delete(seqModel.name);
+          languageLives.delete(seqModel.name);
+          languageConstellations.delete(seqModel.name);
+          languageSnakes.set(seqModel.name, { model: 'snake', width: 4, height: 4, values: [], movement: 'snake', matrixExplicit: false });
         }
         continue;
       }
@@ -1154,10 +1200,20 @@ export class SonusRuntime {
         if (life) life.values = seqValues.values;
         const constellation = languageConstellations.get(seqValues.name);
         if (constellation) constellation.values = seqValues.values;
+        const snake = languageSnakes.get(seqValues.name);
+        if (snake) snake.values = seqValues.values;
         continue;
       }
       const seqWeights = parseLanguageSeqWeights(line);
       if (seqWeights) { const seq = languageConstellations.get(seqWeights.name); if (seq) seq.weights = seqWeights.weights; continue; }
+      const snakeSize = parseLanguageSnakeSize(line);
+      if (snakeSize) { const seq = languageSnakes.get(snakeSize.name); if (seq) { seq.width = snakeSize.width; seq.height = snakeSize.height; } continue; }
+      const snakeMovement = parseLanguageSnakeMovement(line);
+      if (snakeMovement) { const seq = languageSnakes.get(snakeMovement.name); if (seq) seq.movement = snakeMovement.movement; continue; }
+      const snakeMatrix = parseLanguageSnakeMatrix(line);
+      if (snakeMatrix) { const seq = languageSnakes.get(snakeMatrix.name); if (seq) seq.matrixExplicit = snakeMatrix.explicit; continue; }
+      const snakeReader = parseLanguageSnakeReader(line);
+      if (snakeReader) { languageSnakeReaders.set(snakeReader.voice, snakeReader); continue; }
       const constellationParam = parseLanguageConstellationParam(line);
       if (constellationParam) { const seq = languageConstellations.get(constellationParam.name); if (seq) (seq as unknown as Record<string, unknown>)[constellationParam.param] = constellationParam.value; continue; }
       const constellationOctaves = parseLanguageConstellationOctaves(line);
@@ -1771,7 +1827,7 @@ export class SonusRuntime {
     // source order. All module declarations already exist, so references between
     // modules are still independent from declaration order.
     for (const { source: line, line: lineNumber } of lines) {
-      if (parseLanguageCompositePitch(line) || parseLanguageCompositeTune(line) || parseLanguageCompositeEdge(line) || parseLanguageCompositeMix(line) || parseLanguageCompositeOutput(line) || parseLanguageDrumkitDirective(line) || parseLanguageDrumkitMetaDirective(line) || parseLanguageDrumSlotDirective(line) || parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageSeqModel(line) || parseLanguageSeqWeights(line) || parseLanguageConstellationParam(line) || parseLanguageConstellationOctaves(line) || parseLanguageConstellationReader(line) || parseLanguageSeqSize(line) || parseLanguageLifeDensity(line) || parseLanguageLifeReader(line) || parseLanguageLifeEvolve(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageEnvelopeDirective(line, lineNumber) || parseLanguageFxMetadata(line) || parseLanguageDelayTime(line) || parseLanguageDelayParam(line, lineNumber) || parseLanguageDelayParamDefault(line, lineNumber) || parseLanguageDelayParamCycle(line, lineNumber) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
+      if (parseLanguageCompositePitch(line) || parseLanguageCompositeTune(line) || parseLanguageCompositeEdge(line) || parseLanguageCompositeMix(line) || parseLanguageCompositeOutput(line) || parseLanguageDrumkitDirective(line) || parseLanguageDrumkitMetaDirective(line) || parseLanguageDrumSlotDirective(line) || parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageSeqModel(line) || parseLanguageSeqWeights(line) || parseLanguageConstellationParam(line) || parseLanguageConstellationOctaves(line) || parseLanguageConstellationReader(line) || parseLanguageSnakeSize(line) || parseLanguageSnakeMovement(line) || parseLanguageSnakeMatrix(line) || parseLanguageSnakeReader(line) || parseLanguageSeqSize(line) || parseLanguageLifeDensity(line) || parseLanguageLifeReader(line) || parseLanguageLifeEvolve(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageEnvelopeDirective(line, lineNumber) || parseLanguageFxMetadata(line) || parseLanguageDelayTime(line) || parseLanguageDelayParam(line, lineNumber) || parseLanguageDelayParamDefault(line, lineNumber) || parseLanguageDelayParamCycle(line, lineNumber) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
 
       const gainDeclaration = parseGainDeclaration(line);
       if (gainDeclaration) {
@@ -3122,7 +3178,7 @@ export class SonusRuntime {
           name,
           enabled: !definition.disabled,
           note: 69 + 12 * Math.log2(definition.frequency / 440),
-          dynamicPitch: languageSequences.has(name) || languageTuringVoiceSources.has(name) || languageConstellationReaders.has(name),
+          dynamicPitch: languageSequences.has(name) || languageTuringVoiceSources.has(name) || languageConstellationReaders.has(name) || languageSnakeReaders.has(name),
           level: definition.level,
           drive: definition.drive,
           bowLevel: definition.bow,
@@ -3148,7 +3204,7 @@ export class SonusRuntime {
           model: definition.model,
           polyphony: definition.polyphony,
           note: 69 + 12 * Math.log2(definition.frequency / 440),
-          dynamicPitch: languageSequences.has(name) || languageTuringVoiceSources.has(name) || languageConstellationReaders.has(name),
+          dynamicPitch: languageSequences.has(name) || languageTuringVoiceSources.has(name) || languageConstellationReaders.has(name) || languageSnakeReaders.has(name),
           level: definition.level,
           structure: definition.structure,
           brightness: definition.brightness,
@@ -3166,7 +3222,7 @@ export class SonusRuntime {
               !definition.disabled,
               definition.level,
               pitchFrequency,
-              pitchFrequency !== null && (languageSequences.has(name) || languageTuringVoiceSources.has(name) || languageConstellationReaders.has(name)),
+              pitchFrequency !== null && (languageSequences.has(name) || languageTuringVoiceSources.has(name) || languageConstellationReaders.has(name) || languageSnakeReaders.has(name)),
             );
           }),
         ...[...swells.entries()]
@@ -3181,7 +3237,7 @@ export class SonusRuntime {
           waveform: definition.soundId as 'sine' | 'triangle' | 'sawtooth' | 'ramp' | 'square',
           level: definition.level,
           frequency: definition.frequency,
-          dynamicPitch: languageSequences.has(name) || languageTuringVoiceSources.has(name) || languageConstellationReaders.has(name),
+          dynamicPitch: languageSequences.has(name) || languageTuringVoiceSources.has(name) || languageConstellationReaders.has(name) || languageSnakeReaders.has(name),
           width: definition.width,
         })),
       macros: [...voices.entries()]
@@ -3193,7 +3249,7 @@ export class SonusRuntime {
           lpg: definition.lpg,
           level: definition.level,
           frequency: definition.frequency,
-          dynamicPitch: languageSequences.has(name) || languageTuringVoiceSources.has(name) || languageConstellationReaders.has(name),
+          dynamicPitch: languageSequences.has(name) || languageTuringVoiceSources.has(name) || languageConstellationReaders.has(name) || languageSnakeReaders.has(name),
           harmo: definition.harmo,
           timbre: definition.timbre,
           morph: definition.morph,
@@ -3457,6 +3513,22 @@ export class SonusRuntime {
       });
     }
 
+    const snakeViews = new Map<string, SnakeViewState>();
+    for (const name of languageTuringViews) {
+      const seq = languageSnakes.get(name);
+      if (!seq) continue;
+      const previous = hotReload ? this.snakeViews.get(name) : undefined;
+      snakeViews.set(name, {
+        name,
+        width: seq.width,
+        height: seq.height,
+        movement: seq.movement,
+        currentCell: previous?.currentCell ?? null,
+        history: previous ? [...previous.history] : [],
+        revision: (previous?.revision ?? 0) + 1,
+      });
+    }
+
     const drumkitViews = new Map<string, DrumkitViewState>();
     const masterBeatMs = clockBpm > 0 ? 60000 / clockBpm : Infinity;
     for (const [name, definition] of languageDrumkits) {
@@ -3493,6 +3565,7 @@ export class SonusRuntime {
     this.turingViews = turingViews;
     this.lifeViews = lifeViews;
     this.constellationViews = constellationViews;
+    this.snakeViews = snakeViews;
     this.drumkitViews = drumkitViews;
     this.inlineViews = inlineViews;
     this.parameterViews = [...parameterViews.values()];
@@ -3674,10 +3747,25 @@ export class SonusRuntime {
               view.revision += 1;
             }
           } else {
-            const life = languageLives.get(definition.source);
-            if (life) {
-              const mode = definition.mode === 'direct' ? 'order' : definition.mode;
-              next = nextRegisterLifeFrequency(name, definition.source, mode, definition.amount, fallback);
+            const snake = languageSnakes.get(definition.source);
+            if (snake && snake.values.length > 0) {
+              const stateKey = `register:${name}`;
+              const result = nextSnakeStep(snake, this.snakeReaderState.get(stateKey), random);
+              this.snakeReaderState.set(stateKey, result.state);
+              next = result.frequency;
+              const view = snakeViews.get(definition.source);
+              if (view) {
+                view.currentCell = result.cell;
+                view.history.push(result.cell);
+                if (view.history.length > 12) view.history.splice(0, view.history.length - 12);
+                view.revision += 1;
+              }
+            } else {
+              const life = languageLives.get(definition.source);
+              if (life) {
+                const mode = definition.mode === 'direct' ? 'order' : definition.mode;
+                next = nextRegisterLifeFrequency(name, definition.source, mode, definition.amount, fallback);
+              }
             }
           }
         }
@@ -4429,6 +4517,21 @@ export class SonusRuntime {
           }
           return result.frequency;
         }
+        const snakeReader = languageSnakeReaders.get(name);
+        if (snakeReader) {
+          const definition = languageSnakes.get(snakeReader.seq);
+          if (!definition || definition.values.length === 0) return voice.frequency;
+          const result = nextSnakeStep(definition, this.snakeReaderState.get(name), random);
+          this.snakeReaderState.set(name, result.state);
+          const view = snakeViews.get(snakeReader.seq);
+          if (view) {
+            view.currentCell = result.cell;
+            view.history.push(result.cell);
+            if (view.history.length > 12) view.history.splice(0, view.history.length - 12);
+            view.revision += 1;
+          }
+          return result.frequency;
+        }
         const turingSource = languageTuringVoiceSources.get(name);
         if (turingSource) return languageTurings.get(turingSource)?.current ?? voice.frequency;
         if (!sequence || sequence.values.length === 0) return voice.frequency;
@@ -4950,9 +5053,25 @@ function parseLanguageTuringView(line: string): string | null {
   return line.match(/^__seqview\("([A-Za-z_]\w*)"\)$/)?.[1] ?? null;
 }
 
-function parseLanguageSeqModel(line: string): { name: string; model: 'turing' | 'life' | 'constellation'; variant: LifeVariant } | null {
-  const match = line.match(/^__seqmodel\("([A-Za-z_]\w*)","(turing|life|constellation)","(conway|highlife|seeds|day-night|morley)"\)$/);
-  return match ? { name: match[1], model: match[2] as 'turing' | 'life' | 'constellation', variant: match[3] as LifeVariant } : null;
+function parseLanguageSeqModel(line: string): { name: string; model: 'turing' | 'life' | 'constellation' | 'snake'; variant: LifeVariant } | null {
+  const match = line.match(/^__seqmodel\("([A-Za-z_]\w*)","(turing|life|constellation|snake)","(conway|highlife|seeds|day-night|morley)"\)$/);
+  return match ? { name: match[1], model: match[2] as 'turing' | 'life' | 'constellation' | 'snake', variant: match[3] as LifeVariant } : null;
+}
+function parseLanguageSnakeSize(line: string): { name: string; width: number; height: number } | null {
+  const match = line.match(/^__snakesize\("([A-Za-z_]\w*)",(\d+),(\d+)\)$/);
+  return match ? { name: match[1], width: Number(match[2]), height: Number(match[3]) } : null;
+}
+function parseLanguageSnakeMovement(line: string): { name: string; movement: SnakeMovement } | null {
+  const match = line.match(/^__snakemovement\("([A-Za-z_]\w*)","(snake|rows|columns|spiral|diagonal|bounce|random|walk)"\)$/);
+  return match ? { name: match[1], movement: match[2] as SnakeMovement } : null;
+}
+function parseLanguageSnakeMatrix(line: string): { name: string; explicit: boolean } | null {
+  const match = line.match(/^__snakematrix\("([A-Za-z_]\w*)",(true|false)\)$/);
+  return match ? { name: match[1], explicit: match[2] === 'true' } : null;
+}
+function parseLanguageSnakeReader(line: string): LanguageSnakeReaderDefinition | null {
+  const match = line.match(/^__snakereader\("([A-Za-z_]\w*)","([A-Za-z_]\w*)"\)$/);
+  return match ? { voice: match[1], seq: match[2] } : null;
 }
 function parseLanguageSeqSize(line: string): { name: string; size: 8 | 16 } | null {
   const match = line.match(/^__seqsize\("([A-Za-z_]\w*)",(8|16)\)$/);

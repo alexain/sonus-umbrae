@@ -351,6 +351,12 @@ tune op3 pitch scale C minor with range C3 C5 pattern [1 5 9 13]
 
 The `pitch` form accepts `notes`, `freqs`, `scale`, their normal selection modifiers, and the same `every`, Euclidean, and pattern timing used by ordinary pitch sequencing. `tune ... pitch ...` cannot be combined with the relative `with octave/detune/ratio` form.
 
+Relative `tune` modifiers can be performance-controlled with `live`; every scalar modifier on the statement receives its own control, while `octave` remains discrete:
+
+```text
+live tune op1 with detune -5, ratio 1.5
+```
+
 `mix` is a real named internal audio bus, not a point-to-point modulation relation. It combines several graph signals into one bus and controls only their levels:
 
 ```text
@@ -363,7 +369,7 @@ mix audio1 [
 output audio1
 ```
 
-`at` is `0..100`. Pitch offsets no longer belong to `mix`; use `tune` so an operator keeps the same tuning everywhere it is used in the graph.
+`at` is `0..100`. Pitch offsets no longer belong to `mix`; use `tune` so an operator keeps the same tuning everywhere it is used in the graph. Prefixing the declaration with `live` exposes one level control for every `at` entry without changing the graph topology.
 
 `output` is both the export list and the final audio mixer. Every listed node becomes an individually routable public port, and the same listed signals are mixed into the composite's main `.out` bus. The optional `at` value controls only that node's contribution to the main bus; the named public tap remains unscaled apart from the composite VOICE level.
 
@@ -373,7 +379,7 @@ am op2 to op3 with depth 50
 output op2 at 70, op3 at 100
 ```
 
-This exposes `complex.op2` and `complex.op3`, while `complex.out` contains `op2 * 0.70 + op3 * 1.00`. `op1` remains internal: it is neither included in `complex.out` nor available as `complex.op1` because it was not declared in `output`. Named mixes follow the same rule: `output audio1` exposes `complex.audio1` and includes that bus in `complex.out`.
+This exposes `complex.op2` and `complex.op3`, while `complex.out` contains `op2 * 0.70 + op3 * 1.00`. `op1` remains internal: it is neither included in `complex.out` nor available as `complex.op1` because it was not declared in `output`. Named mixes follow the same rule: `output audio1` exposes `complex.audio1` and includes that bus in `complex.out`. `live output ...` similarly exposes one live control for each explicit `at` contribution to the main bus; the named public taps themselves remain unscaled.
 
 If `output` is omitted, one named mix is inferred when the composite has exactly one mix; otherwise a unique terminal operator can still be inferred. Ambiguous or fully cyclic graphs require an explicit `output` declaration.
 
@@ -1672,6 +1678,8 @@ when `size` changes.
 sequencer owns runtime state and can evolve independently from the VOICE or FX
 that reads it.
 
+Current generative models are `turing`, `constellation`, `snake`, and the `life` family. `turing` owns a current note and its own advance timing; `constellation` generates a new stateful melodic choice when a consumer requests one; `snake` walks a pitch matrix when a consumer requests a note; `life` exposes an evolving pitch pool rather than one current note. These differences are intentional and determine how consumers read each model.
+
 The first implemented model is `turing`, inspired by the shift-register
 behaviour of classic modular Turing Machine sequencers:
 
@@ -1791,7 +1799,63 @@ Weights written directly in `pitch notes` are the base probabilities. Unweighted
 
 Every consumer has independent constellation memory and phrase state, so two voices can read the same SEQ at different rates without changing each other's melodic trajectory.
 
-The `with view` monitor is intentionally non-numeric. It draws the available pitch/register space as a constellation, highlights the current note, and leaves a fading trail of recent motion. Short local paths make stepwise motion visually obvious; long segments reveal leaps; repeated notes pulse on the same point; stable phrases retrace similar paths while mutation creates deviations.
+The `with view` monitor is intentionally non-numeric: it visualizes behaviour rather than repeating parameter values already visible in the source. Every reachable pitch/register is drawn as a labelled star (`C3`, `Eb4`, and so on). The layout is pseudorandom but stable enough to read as a constellation, keeps a minimum visual separation between stars, and is normalized to use most of the available view area instead of collapsing around the centre. `stepwise` tends to keep melodically close destinations spatially closer, while `leap` permits a more dispersed field. The geometry can drift gradually as the generator runs; `memory` controls how strongly the existing constellation shape is retained, so low memory allows more motion and high memory makes the field increasingly stable.
+
+Only the most recent transition is drawn as a faint line. Earlier motion is represented by filled visit markers that fade away over time, avoiding overlapping path networks. A repeated note pulses at the same star rather than drawing a zero-length connection. The current note is the brightest point. Stable phrases therefore tend to revisit recognizable regions and paths, while `mutation` produces visible deviations without turning the monitor into a numeric dashboard.
+
+### Snake matrix sequencer
+
+`model snake` is a spatial single-note SEQ. It owns a matrix and a traversal rule, but it does not own timing: every consumer decides when to request the next matrix cell with its own `every`, `pattern`, or Euclidean timing.
+
+The compact form generates the matrix automatically from normal pitch material:
+
+```text
+SEQ path with view:
+    model snake
+    size 4x4
+    pitch scale C minor with range C3 C5
+    movement snake
+
+VOICE lead:
+    sound resonator.string
+    pitch path every 1/8 beat
+```
+
+`size` accepts rectangular matrices from `2x2` through `16x16`. When `pitch scale`, `pitch notes`, or `pitch freqs` supplies fewer values than there are cells, the pitch material cycles through the matrix in row-major cell order. If it supplies more values, cells consume the values they reach; traversal always maps a cell back into the declared pitch material.
+
+For an exact authored matrix, use `matrix [ ... ]`. Its row and column counts must match `size`:
+
+```text
+SEQ path with view:
+    model snake
+    size 4x4
+
+    matrix [
+        C3 D3 E3 G3
+        A3 C4 D4 E4
+        G4 A4 C5 D5
+        E5 G5 A5 C6
+    ]
+
+    movement spiral
+```
+
+The initial movement modes are:
+
+```text
+movement snake      // alternating left/right rows
+movement rows       // row-major scan
+movement columns    // column-major scan
+movement spiral     // perimeter inward
+movement diagonal   // diagonal zig-zag
+movement bounce     // row-major forward/backward pendulum
+movement random     // any matrix cell
+movement walk       // random orthogonal neighbour
+```
+
+Like Constellation, Snake keeps reader state per consumer. Two voices can therefore read the same matrix at different rates without moving each other's playhead. A `REGISTER` can also read a Snake source directly; its traversal state remains independent from VOICE consumers.
+
+The `with view` monitor shows a compact matrix of points rather than repeating note names from source code. The current cell is the bright head of the snake; recently visited cells form a fading body. The shape of that body makes `rows`, `columns`, `snake`, `spiral`, `diagonal`, `bounce`, `random`, and `walk` visually distinct while keeping the view useful at larger matrix sizes.
 
 ### Life note-pool sequencer
 

@@ -83,7 +83,7 @@ type SourceDefinition =
   | { kind: 'freq'; values: number[]; display: string; internalName?: string }
   | { kind: 'note'; values: number[]; display: string; favor: SequenceFavorEntry[]; internalName?: string }
   | { kind: 'scale'; values: number[]; display: string; internalName?: string }
-  | { kind: 'seq'; model: 'turing' | 'life' | 'constellation' | null; values: number[]; display: string; internalName?: string }
+  | { kind: 'seq'; model: 'turing' | 'life' | 'constellation' | 'snake' | null; values: number[]; display: string; internalName?: string }
   | { kind: 'register'; size: number; display: string; internalName?: string }
   | { kind: 'envelope'; spec: EnvelopeSpec; display: string; internalName?: string }
   | { kind: 'kit'; kit: DrumKitDefinition; display: string; internalName?: string };
@@ -228,7 +228,7 @@ type SeqState = {
   name: string;
   line: number;
   indentation: number;
-  modelId: 'turing' | 'life' | 'constellation' | null;
+  modelId: 'turing' | 'life' | 'constellation' | 'snake' | null;
   lifeVariant: 'conway' | 'highlife' | 'seeds' | 'day-night' | 'morley';
   length: number;
   change: number;
@@ -245,6 +245,10 @@ type SeqState = {
   octaves: Array<{ octave: number; weight: number }>;
   phrase: number;
   mutation: number;
+  snakeWidth: number;
+  snakeHeight: number;
+  snakeMovement: 'snake' | 'rows' | 'columns' | 'spiral' | 'diagonal' | 'bounce' | 'random' | 'walk';
+  matrixExplicit: boolean;
 };
 
 type RegisterState = {
@@ -1277,6 +1281,11 @@ function compileVoiceProperty(
           const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
           return `${compositePitchMarker}${voice.name}.freq(${initial}); __constellationreader(${JSON.stringify(voice.name)},${JSON.stringify(sourceName)});${every}`;
         }
+        if (definition.model === 'snake') {
+          if (direct.modifiers.length > 0) throw new LanguageError([{ line, message: 'SEQ snake controls its own matrix traversal and does not accept reader modifiers' }]);
+          const every = split.every ? ` ${everyDirective(voice.name, parseEverySpec(split.every, line, sourceDefinitions))}` : '';
+          return `${compositePitchMarker}${voice.name}.freq(${initial}); __snakereader(${JSON.stringify(voice.name)},${JSON.stringify(sourceName)});${every}`;
+        }
         if (direct.modifiers.length > 0) {
           throw new LanguageError([{ line, message: 'SEQ turing controls its own generation; PITCH using a Turing SEQ does not accept selection modifiers' }]);
         }
@@ -1926,7 +1935,7 @@ function compileRegisterProperty(
       readerAmount = walk ? (walk[1] === undefined ? 1 : numberValue(walk[1], line, 'walk')) : 0;
       if (readerAmount < 0) throw new LanguageError([{ line, message: 'walk amount must be greater than 0' }]);
     } else if (direct.modifiers.length > 0) {
-      throw new LanguageError([{ line, message: `SEQ turing source '${direct.base}' does not accept REGISTER reader modifiers` }]);
+      throw new LanguageError([{ line, message: `SEQ ${definition.model ?? 'turing'} source '${direct.base}' does not accept REGISTER reader modifiers` }]);
     }
 
     register.sourceName = direct.base;
@@ -1953,6 +1962,7 @@ function requireSeqReady(seq: SeqState | null, diagnostics: LanguageDiagnostic[]
   if (seq.values.length === 0) diagnostics.push({ line: seq.line, message: `SEQ '${seq.name}' requires PITCH SCALE, PITCH NOTES, or PITCH FREQS material` });
   if (seq.modelId !== 'constellation' && seq.weights.some((weight) => weight !== 100)) diagnostics.push({ line: seq.line, message: 'weighted SEQ notes are available only for MODEL constellation' });
   if (seq.modelId === 'constellation' && seq.mutation > 0 && seq.phrase <= 0) diagnostics.push({ line: seq.line, message: 'SEQ constellation MUTATION requires PHRASE > 0' });
+  if (seq.modelId === 'snake' && seq.matrixExplicit && seq.values.length !== seq.snakeWidth * seq.snakeHeight) diagnostics.push({ line: seq.line, message: `SEQ snake MATRIX must contain exactly ${seq.snakeWidth * seq.snakeHeight} notes` });
 }
 
 function compileSeqProperty(
@@ -1977,15 +1987,62 @@ function compileSeqProperty(
   if (effectiveKey === 'model') {
     const model = value.toLowerCase();
     const lifeModel = model.match(/^life(?:\.(highlife|seeds|day-night|morley))?$/);
-    if (model !== 'turing' && model !== 'constellation' && !lifeModel) throw new LanguageError([{ line, message: `unknown SEQ model '${value}'` }]);
-    seq.modelId = model === 'turing' ? 'turing' : model === 'constellation' ? 'constellation' : 'life';
+    if (model !== 'turing' && model !== 'constellation' && model !== 'snake' && !lifeModel) throw new LanguageError([{ line, message: `unknown SEQ model '${value}'` }]);
+    seq.modelId = model === 'turing' ? 'turing' : model === 'constellation' ? 'constellation' : model === 'snake' ? 'snake' : 'life';
     seq.lifeVariant = lifeModel ? ((lifeModel?.[1] ?? 'conway') as SeqState['lifeVariant']) : 'conway';
     const definition = sourceDefinitions.get(seq.name);
     if (definition?.kind === 'seq') definition.model = seq.modelId;
     return `__seqmodel(${JSON.stringify(seq.name)},${JSON.stringify(seq.modelId)},${JSON.stringify(seq.lifeVariant)});`;
   }
+  if (effectiveKey === 'size' && seq.modelId === 'snake') {
+    const match = value.match(/^(\d+)\s*x\s*(\d+)$/i);
+    if (!match) throw new LanguageError([{ line, message: 'SEQ snake SIZE expects <columns>x<rows>, for example 4x4' }]);
+    const width = Number(match[1]);
+    const height = Number(match[2]);
+    if (!Number.isInteger(width) || !Number.isInteger(height) || width < 2 || height < 2 || width > 16 || height > 16) {
+      throw new LanguageError([{ line, message: 'SEQ snake SIZE expects dimensions from 2x2 to 16x16' }]);
+    }
+    seq.snakeWidth = width;
+    seq.snakeHeight = height;
+    return `__snakesize(${JSON.stringify(seq.name)},${width},${height});`;
+  }
+  if (effectiveKey === 'movement') {
+    if (seq.modelId !== 'snake') throw new LanguageError([{ line, message: 'SEQ MOVEMENT is available only for MODEL snake' }]);
+    const movement = value.toLowerCase();
+    if (!/^(snake|rows|columns|spiral|diagonal|bounce|random|walk)$/.test(movement)) {
+      throw new LanguageError([{ line, message: "SEQ snake MOVEMENT expects snake, rows, columns, spiral, diagonal, bounce, random, or walk" }]);
+    }
+    seq.snakeMovement = movement as SeqState['snakeMovement'];
+    return `__snakemovement(${JSON.stringify(seq.name)},${JSON.stringify(movement)});`;
+  }
+  if (effectiveKey === 'matrix') {
+    if (seq.modelId !== 'snake') throw new LanguageError([{ line, message: 'SEQ MATRIX is available only for MODEL snake' }]);
+    const match = value.match(/^\[([\s\S]+)\]$/);
+    if (!match) throw new LanguageError([{ line, message: 'SEQ snake MATRIX expects a bracketed note matrix' }]);
+    const rows = match[1].split(/\s*;\s*/).map((row) => row.trim()).filter(Boolean);
+    if (rows.length !== seq.snakeHeight) throw new LanguageError([{ line, message: `SEQ snake MATRIX expects ${seq.snakeHeight} rows for SIZE ${seq.snakeWidth}x${seq.snakeHeight}` }]);
+    const values: number[] = [];
+    for (const row of rows) {
+      const tokens = row.split(/\s+/).filter(Boolean);
+      if (tokens.length !== seq.snakeWidth) throw new LanguageError([{ line, message: `each SEQ snake MATRIX row expects ${seq.snakeWidth} notes` }]);
+      for (const token of tokens) {
+        const parsed = parseNoteSequenceToken(token, line);
+        if (parsed.favor) throw new LanguageError([{ line, message: 'SEQ snake MATRIX does not use note weights' }]);
+        const midi = midiFromNote(parsed.note);
+        if (midi === null) throw new LanguageError([{ line, message: `invalid SEQ snake MATRIX note '${parsed.note}'` }]);
+        values.push(midiToFrequency(midi));
+      }
+    }
+    seq.values = values;
+    seq.weights = values.map(() => 100);
+    seq.material = 'notes';
+    seq.matrixExplicit = true;
+    const definition = sourceDefinitions.get(seq.name);
+    if (definition?.kind === 'seq') definition.values = [...values];
+    return `__seqvalues(${JSON.stringify(seq.name)},${JSON.stringify(values.join('|'))}); __snakematrix(${JSON.stringify(seq.name)},true);`;
+  }
   if (effectiveKey === 'size') {
-    if (seq.modelId !== 'life') throw new LanguageError([{ line, message: 'SEQ SIZE is available only for MODEL life' }]);
+    if (seq.modelId !== 'life') throw new LanguageError([{ line, message: 'SEQ SIZE is available only for MODEL life or snake' }]);
     const size = numberValue(value, line, 'SEQ life size');
     if (size !== 8 && size !== 16) throw new LanguageError([{ line, message: 'SEQ life size expects 8 or 16' }]);
     seq.size = size as 8 | 16;
@@ -2102,13 +2159,13 @@ function compileSeqProperty(
     return `${prefix}__lifeevolve(${JSON.stringify(seq.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
   }
   if (effectiveKey === 'every') {
-    if (seq.modelId === 'life' || seq.modelId === 'constellation') throw new LanguageError([{ line, message: `SEQ ${seq.modelId} has no playhead EVERY; schedule each consumer PITCH separately` }]);
+    if (seq.modelId === 'life' || seq.modelId === 'constellation' || seq.modelId === 'snake') throw new LanguageError([{ line, message: `SEQ ${seq.modelId} has no playhead EVERY; schedule each consumer PITCH separately` }]);
     const timing = parseEverySpec(value, line, sourceDefinitions);
     const prefix = timing.clockPrelude ? `${timing.clockPrelude}\n` : '';
     return `${prefix}__objectevery(${JSON.stringify(seq.name)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)});`;
   }
   if (effectiveKey === 'pattern') {
-    if (seq.modelId === 'life' || seq.modelId === 'constellation') throw new LanguageError([{ line, message: `SEQ ${seq.modelId} has no playhead PATTERN; schedule each consumer PITCH separately` }]);
+    if (seq.modelId === 'life' || seq.modelId === 'constellation' || seq.modelId === 'snake') throw new LanguageError([{ line, message: `SEQ ${seq.modelId} has no playhead PATTERN; schedule each consumer PITCH separately` }]);
     return objectPatternDirective(seq.name, value, line, sourceDefinitions);
   }
   throw new LanguageError([{ line, message: `unknown SEQ property '${property}'` }]);
@@ -3531,6 +3588,31 @@ export function compileLanguageSource(source: string): string {
     lines[index] = `${' '.repeat(indentation)}${declaration[1] ? 'live ' : ''}mix ${declaration[2]} [${entries.join('; ')}]`;
   }
 
+  // Multiline SEQ snake MATRIX keeps the visual matrix in source code while
+  // compiling to one structured property line.
+  for (let index = 0; index < lines.length; index += 1) {
+    const raw = stripComment(lines[index]);
+    const trimmed = raw.trim();
+    if (!/^matrix\s*\[\s*$/i.test(trimmed)) continue;
+    const indentation = raw.length - raw.trimStart().length;
+    const rows: string[] = [];
+    let next = index + 1;
+    let closed = false;
+    while (next < lines.length) {
+      const childRaw = stripComment(lines[next]);
+      const childTrimmed = childRaw.trim();
+      if (!childTrimmed) { lines[next] = ''; next += 1; continue; }
+      if (childTrimmed === ']') { lines[next] = ''; closed = true; break; }
+      const childIndentation = childRaw.length - childRaw.trimStart().length;
+      if (childIndentation <= indentation) break;
+      rows.push(childTrimmed.replace(/,\s*$/, '').trim());
+      lines[next] = '';
+      next += 1;
+    }
+    if (!closed || rows.length === 0) throw new LanguageError([{ line: index + 1, message: 'SEQ snake MATRIX requires one or more rows and a closing ]' }]);
+    lines[index] = `${' '.repeat(indentation)}matrix [${rows.join('; ')}]`;
+  }
+
   const output = Array(lines.length).fill('') as string[];
   const diagnostics: LanguageDiagnostic[] = [];
   const voices = new Set<string>();
@@ -3689,7 +3771,7 @@ export function compileLanguageSource(source: string): string {
         seqs.add(name);
         sourceKinds.set(name, 'seq');
         sourceDefinitions.set(name, { kind: 'seq', model: null, values: [], display: `SEQ ${name}` });
-        currentSeq = { name, line: lineNumber, indentation, modelId: null, lifeVariant: 'conway', length: 8, change: 10, size: 8, density: 34, maxDensity: null, values: [], weights: [], material: null, stepwise: 60, leap: 20, repeat: 10, memory: 25, octaves: [{ octave: 0, weight: 100 }], phrase: 0, mutation: 0 };
+        currentSeq = { name, line: lineNumber, indentation, modelId: null, lifeVariant: 'conway', length: 8, change: 10, size: 8, density: 34, maxDensity: null, values: [], weights: [], material: null, stepwise: 60, leap: 20, repeat: 10, memory: 25, octaves: [{ octave: 0, weight: 100 }], phrase: 0, mutation: 0, snakeWidth: 4, snakeHeight: 4, snakeMovement: 'snake', matrixExplicit: false };
         const viewDirective = seqMatch[2] ? `\n__seqview(${JSON.stringify(name)});` : '';
         output[index] = `__seq(${JSON.stringify(name)});${viewDirective}`;
         continue;

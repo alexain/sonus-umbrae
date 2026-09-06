@@ -71,3 +71,5 @@ The online build tracks the current public release from the `main` branch. Web A
 ### Constellation SEQ
 
 Sonus Umbrae also includes `SEQ ... model constellation`: a weighted melodic generator with stepwise/leap/repeat bias, recent-memory bias, weighted octave register, phrase memory/mutation, and a constellation-style `with view` monitor. Consumer timing remains external (`every`, `pattern`, Euclidean), consistent with the rest of the SEQ architecture.
+
+`SEQ ... model snake` adds a reusable matrix sequencer. A matrix can be generated from normal scale/note/frequency material or authored explicitly with `matrix [ ... ]`; traversal modes include snake, rows, columns, spiral, diagonal, bounce, random, and orthogonal walk. The optional view shows the current head and a fading body over the matrix.

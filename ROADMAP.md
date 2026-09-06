@@ -29,7 +29,7 @@ The items below describe directions beyond this baseline.
 
 ### Language core
 
-- Stateful `SEQ` generative sources; the first implemented model is a Turing Machine shift-register sequencer.
+- A conventional score/melody sequencer with explicit per-event note durations, rests, ties, and eventually chord events, if it proves useful beyond the current generative SEQ family (Turing, Life, Constellation, Snake).
 - Arithmetic, comparison, and logical expressions beyond the current scalar
   expression support.
 - Richer conditional execution.
@@ -40,7 +40,6 @@ The items below describe directions beyond this baseline.
 - Stateful generative helpers including `walk()`, `chaos()`, `slew()`,
   reproducible `seed()`, numeric `wrap()`, and `quantize()`.
 - Reusable timing/group constructs beyond per-property and object-level `every`.
-
 
 ### Signal routing
 
@@ -86,11 +85,9 @@ Current direction:
 - Additional DaisySP areas may be introduced as separate WASM modules rather than one monolithic library.
 - LIVE performance controls now cover scalar sliders and note piano views; future work can add direct note-list editing and scheduled mute/bypass state changes.
 - Additional permissively licensed DSP where appropriate.
-- [x] Consolidate the active DSP build around permissive licenses only.
 - Original Sonus Umbrae DSP modules.
 - Inspiration from other modular systems and open algorithms without necessarily reproducing their original user interfaces.
 - A stable module metadata format describing parameters, ports, signal semantics, and visual behavior.
-- [x] Route `THROUGH` by exposed audio-port capability rather than declaration category, so source/processor hybrids such as Resonator and Matter remain `VOICE` objects while accepting audio input.
 
 The language should not depend on the identity of any one upstream hardware module.
 
@@ -100,9 +97,6 @@ The language should not depend on the identity of any one upstream hardware modu
 
 Planned directions include:
 
-- [x] Master BPM with per-clock `jitter` and slow correlated `drifter` behaviour.
-- [x] Named clock objects with optional `RATE` relative to the master, local `JITTER`/`DRIFTER`, optional `WITH VIEW`, immediate live pause via `_CLOCK`, and master pause cascading through the full musical clock tree while wall-clock scheduling continues.
-- [x] Keep `SET` reserved for typed values: persistent clock objects are declared with `CLOCK`, with omitted `RATE` meaning master rate `*1`.
 - Meter information.
 - Phase offsets.
 - Swing.
@@ -113,8 +107,6 @@ Planned directions include:
 - Event-driven scripting connected to clock and trigger ports.
 
 The design is conceptually closer to a programmable modular timing source than to a conventional DAW transport.
-
-
 
 ## Event-driven language core
 
@@ -144,7 +136,6 @@ Initial modifiers:
 Modifiers are optional and order-independent. This avoids introducing a separate object/map configuration syntax solely for `when`.
 
 The language may later gain conventional `if`, `for`, or other control structures where genuinely useful, but musical event primitives should remain the preferred way to express temporal behavior.
-
 
 ## Visual engine / audiovisual performance
 
@@ -371,66 +362,18 @@ Sonus Umbrae should continue to follow these principles:
 - The runtime should reconcile changes rather than destructively restart the whole audio system.
 - The language should remain usable for ambient, generative, experimental, and modular composition without becoming pattern-centric.
 
-
 ## Matter physical modeling
 
-- [x] Compile Mutable Instruments Elements DSP into a dedicated `matter.wasm`.
-- [x] Run Elements in an AudioWorklet with host-rate resampling while preserving the original 32 kHz DSP contract.
-- [x] Expose Elements as one high-level `matter` VOICE engine with mixed BOW/BLOW/STRIKE exciters and stereo output.
-- [x] Integrate Matter voices with unified PITCH sequencing, routing, levels, hot reload, Scheme, and musical transport stop.
-- [x] Add typed AD/ADR/ASR/ADSR/DAHDSR envelope values, SET/FROM compatibility, and Matter DRIVE triggering through the global scheduler.
-- [ ] Evaluate future audio-rate modulation inputs for selected Matter parameters without exposing the original Eurorack panel semantics.
-
+- Evaluate future audio-rate modulation inputs for selected Matter parameters without exposing the original Eurorack panel semantics.
 
 ## Resonator physical modeling
 
-- [x] Compile Mutable Instruments Rings DSP into a dedicated `resonator.wasm`.
-- [x] Expose the three primary Rings resonator models as `resonator.modal`, `resonator.sympathetic`, and `resonator.string`.
-- [x] Support Rings 1/2/4-note internal polyphony through `SOUND ... WITH N NOTES`.
-- [x] Automatically strum on VOICE pitch events.
-- [x] Treat MAIN/AUX as a logical stereo output (MAIN -> L, AUX -> R) while allowing explicit `.main` / `.aux` mono routing.
-- [x] Expose the original mono audio input so a Resonator VOICE can also process another source in `PLAY ... THROUGH resonator THEN ...` chains.
-- [ ] Evaluate explicit strum/pitch decoupling only after the initial note-driven workflow has been tested musically.
+- Evaluate explicit strum/pitch decoupling only after the initial note-driven workflow has been tested musically.
 
-### Capability-gated runtime
+## Current follow-up priorities
 
-The language now reserves a single top-of-file `USE` directive for optional live capabilities (`visual`, `midi`, `audioin`, `osc`). Capability-set changes have an explicit confirmed runtime-restart lifecycle so future heavy subsystems can be dynamically loaded only when requested. Editor/debug facilities remain environment configuration rather than program capabilities.
-
-
-### Keyboard-first environment controls
-
-The 0.2.x environment now treats `Esc` as a compact live-performance menu and `>` as the explicit command prompt. Configuration navigation is keyboard-first and includes browser-supported audio-output selection, requested Web Audio sample rate, effective rate/latency reporting, and a confirmed audio-engine restart lifecycle for structural audio changes. Hardware bit depth is intentionally not reported because Web Audio does not expose it reliably.
-
-- CONFIG audio settings now include output device, requested sample rate and LATENCY MODE (`INTERACTIVE`, `BALANCED`, `PLAYBACK`), with effective latency readout and restart confirmation.
-
-- [x] Euclidean `EVERY` timing (`hits/steps`, clock selection, rotation, chance/loose composition).
-
-- [x] `REGISTER` object with `model shift`, stateful hot reload, multi-stage pitch outputs, and `write every ...` timing.
-
-- [x] Creative multi-line WASM delay: DSPark forward core, true reverse-window playback, probabilistic non-retroactive reverse capture, spread, feedback, tape colour, diffusion, and live parameter policies.
-
-- [x] Dices random modulator: Marbles-derived X1/X2/X3/Y core with spread, bias, steps, deja, length and diversity.
-
-
-<!-- SONUS-0.3.0-ROADMAP -->
-## 0.3.0 milestone
-
-0.3.0 consolidates the first generative-modulation and creative-delay expansion:
-
-- [x] `MOD dices` Marbles-derived random-voltage backend.
-- [x] Dices `x1`, `x2`, `x3`, and slow `y` outputs.
-- [x] `spread`, `bias`, `steps`, `deja`, `length`, and `diversity` controls.
-- [x] Dices `LIVE` editor integration with commit-on-release policy.
-- [x] Voltage-aware and relative module-view scales (`WITH VIEW <n>V`, `WITH VIEW <n>X`).
-- [x] Preservation of raw CV-domain values through slow-scope telemetry.
-- [x] Creative delay probabilistic pitch shifting using discrete window state.
-- [x] Creative delay ping-pong support.
-- [x] Persistent application-level output gain in Configuration.
-
-Post-0.3.0 candidates remain separate milestones: a polyphonic chord-oriented sound generator, logic/control objects, dedicated drum/sample playback, additional random/chaotic modulator families, and further REGISTER consumers.
-
-- [x] Extract a domain-neutral composite graph model and use it for both `VOICE ... sound composite` and `MOD ... model composite`. VOICE composites provide named internal mixer buses plus a mixed master output; MOD composites prohibit `mix` and expose one or more independent modulation signals. The first DSP adapter clones DaisySP basic oscillator VOICE nodes; adapters for MOD nodes and additional VOICE backends remain follow-up work.
-- [x] Add per-instance composite `tune` with relative ratio/octave/detune or independent PITCH expressions, plus LIVE sliders for tune, mix levels, and output levels.
-
-
-- [x] Constellation melodic SEQ with weighted note material, movement/memory bias, octave distribution, phrase mutation, per-consumer state, and constellation view.
+- Add DSP adapters so composite graphs can instantiate `MOD` nodes and additional `VOICE` backends, enabling genuinely mixed-domain composites without sharing standalone runtime instances.
+- Continue expanding composite-capable object families only where their domain policy and output contract are well defined.
+- Keep generative SEQ work focused on readers and refinements for the existing Turing, Life, Constellation, and Snake models; defer a conventional duration-aware score sequencer until its syntax and role are clearly distinct from inline `pitch` timing.
+- Add further random/chaotic modulator families, logic/control objects, and additional REGISTER consumers where they provide distinct musical behaviour.
+- Develop a polyphonic chord-oriented sound generator and extend dedicated drum/sample playback beyond the current baseline.

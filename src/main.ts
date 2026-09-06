@@ -1,6 +1,6 @@
 import './style.css';
 import { AudioEngine, type AudioLatencyMode } from './audio/engine';
-import { SonusEvaluationError, SonusRuntime, type DrumkitViewState, type InlineViewState, type LifeViewState, type ConstellationViewState, type ParameterViewState, type TuringViewState, type SchemeConnection, type SchemeModel, type SchemeNode } from './language/runtime';
+import { SonusEvaluationError, SonusRuntime, type DrumkitViewState, type InlineViewState, type LifeViewState, type ConstellationViewState, type SnakeViewState, type ParameterViewState, type TuringViewState, type SchemeConnection, type SchemeModel, type SchemeNode } from './language/runtime';
 import { compileLanguageSource, LanguageError, parseProgramCapabilities, type ProgramCapability } from './language/language';
 import { parameterUpdatePolicy, type ParameterUpdatePolicy } from './language/parameter-policy';
 
@@ -1401,6 +1401,7 @@ function syncViews(): void {
   const turingViews = runtime.getTuringViews();
   const lifeViews = runtime.getLifeViews();
   const constellationViews = runtime.getConstellationViews();
+  const snakeViews = runtime.getSnakeViews();
   const drumkitViews = runtime.getDrumkitViews();
   const scheme = runtime.getSchemeModel();
   const nodes = new Map(scheme.nodes.map((node) => [node.id, node]));
@@ -1412,6 +1413,7 @@ function syncViews(): void {
   for (const view of turingViews) panels.push(buildTuringPanel(view));
   for (const view of lifeViews) panels.push(buildLifePanel(view));
   for (const view of constellationViews) panels.push(buildConstellationPanel(view));
+  for (const view of snakeViews) panels.push(buildSnakePanel(view));
   for (const view of drumkitViews) panels.push(buildDrumkitPanel(view));
 
   const audio = nodes.get('Audio');
@@ -1610,6 +1612,136 @@ function buildLifePanel(view: LifeViewState): HTMLElement {
   }
 
   body.append(grid);
+  return card;
+}
+
+const SNAKE_CELL_GAP = 32;
+const SNAKE_FIELD_PAD = 20;
+const SNAKE_MIN_FIELD_WIDTH = 140;
+const SNAKE_MIN_FIELD_HEIGHT = 140;
+
+function snakeFieldGeometry(width: number, height: number): { fieldWidth: number; fieldHeight: number; originX: number; originY: number } {
+  const gridWidth = Math.max(0, width - 1) * SNAKE_CELL_GAP;
+  const gridHeight = Math.max(0, height - 1) * SNAKE_CELL_GAP;
+  const fieldWidth = Math.max(SNAKE_MIN_FIELD_WIDTH, gridWidth + SNAKE_FIELD_PAD * 2);
+  const fieldHeight = Math.max(SNAKE_MIN_FIELD_HEIGHT, gridHeight + SNAKE_FIELD_PAD * 2);
+  return {
+    fieldWidth,
+    fieldHeight,
+    originX: (fieldWidth - gridWidth) / 2,
+    originY: (fieldHeight - gridHeight) / 2,
+  };
+}
+
+function sizeSnakeField(field: HTMLElement, width: number, height: number): void {
+  const geometry = snakeFieldGeometry(width, height);
+  field.style.setProperty('--snake-field-width', `${geometry.fieldWidth}px`);
+  field.style.setProperty('--snake-field-height', `${geometry.fieldHeight}px`);
+}
+
+function snakeCellPosition(cell: number, width: number, height: number): { x: number; y: number } {
+  const column = cell % width;
+  const row = Math.floor(cell / width);
+  const geometry = snakeFieldGeometry(width, height);
+  return {
+    x: ((geometry.originX + column * SNAKE_CELL_GAP) / geometry.fieldWidth) * 100,
+    y: ((geometry.originY + row * SNAKE_CELL_GAP) / geometry.fieldHeight) * 100,
+  };
+}
+
+function positionSnakeRunner(element: HTMLElement, cell: number, width: number, height: number): void {
+  const point = snakeCellPosition(cell, width, height);
+  element.style.left = `${point.x}%`;
+  element.style.top = `${point.y}%`;
+}
+
+function updateSnakeRunnerConnector(
+  path: SVGPolylineElement,
+  currentCell: number | null,
+  recent: number[],
+  width: number,
+  height: number,
+): void {
+  const cells = [recent[2], recent[1], currentCell]
+    .filter((cell): cell is number => cell !== undefined && cell !== null);
+  const unique: number[] = [];
+  for (const cell of cells) {
+    if (unique.length === 0 || unique[unique.length - 1] !== cell) unique.push(cell);
+  }
+  if (unique.length < 2) {
+    path.setAttribute('points', '');
+    return;
+  }
+  path.setAttribute('points', unique.map((cell) => {
+    const point = snakeCellPosition(cell, width, height);
+    return `${point.x},${point.y}`;
+  }).join(' '));
+}
+
+function buildSnakePanel(view: SnakeViewState): HTMLElement {
+  const card = createMonitorCard(`SEQ:${view.name}`, `${view.name.toUpperCase()} : SEQ / SNAKE`, false);
+  card.classList.add('snake-monitor-card');
+  const body = card.querySelector<HTMLElement>('.monitor-body');
+  if (!body) return card;
+
+  const field = document.createElement('div');
+  field.className = 'snake-field';
+  field.dataset.snakeName = view.name;
+  field.dataset.revision = String(view.revision);
+  field.style.setProperty('--snake-cols', String(view.width));
+  field.style.setProperty('--snake-rows', String(view.height));
+  sizeSnakeField(field, view.width, view.height);
+  field.setAttribute('role', 'img');
+  field.setAttribute('aria-label', `${view.name} Snake ${view.width} by ${view.height} matrix`);
+
+  const cells = document.createElement('div');
+  cells.className = 'snake-cells';
+  for (let index = 0; index < view.width * view.height; index += 1) {
+    const cell = document.createElement('span');
+    cell.className = 'snake-cell';
+    positionSnakeRunner(cell, index, view.width, view.height);
+    cells.append(cell);
+  }
+  field.append(cells);
+
+  const runner = document.createElement('div');
+  runner.className = 'snake-runner-layer';
+
+  const connector = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  connector.classList.add('snake-runner-connector');
+  connector.setAttribute('viewBox', '0 0 100 100');
+  connector.setAttribute('preserveAspectRatio', 'none');
+  const connectorPath = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+  connectorPath.classList.add('snake-runner-connector-path');
+  connector.append(connectorPath);
+  runner.append(connector);
+
+  const recent = view.history.slice(-3).reverse();
+  for (let age = 2; age >= 1; age -= 1) {
+    const tail = document.createElement('span');
+    tail.className = `snake-runner tail tail-${age}`;
+    tail.dataset.tailAge = String(age);
+    const cell = recent[age];
+    if (cell !== undefined) {
+      positionSnakeRunner(tail, cell, view.width, view.height);
+    } else {
+      tail.classList.add('hidden');
+    }
+    runner.append(tail);
+  }
+  const head = document.createElement('span');
+  head.className = 'snake-runner head';
+  head.dataset.snakeHead = 'true';
+  if (view.currentCell !== null) {
+    positionSnakeRunner(head, view.currentCell, view.width, view.height);
+  } else {
+    head.classList.add('hidden');
+  }
+  runner.append(head);
+  updateSnakeRunnerConnector(connectorPath, view.currentCell, recent, view.width, view.height);
+  field.append(runner);
+
+  body.append(field);
   return card;
 }
 
@@ -2187,6 +2319,64 @@ function updateConstellationViews(): void {
   }
 }
 
+function updateSnakeViews(): void {
+  const states = new Map(runtime.getSnakeViews().map((view) => [view.name, view]));
+  for (const field of document.querySelectorAll<HTMLElement>('.snake-field[data-snake-name]')) {
+    const name = field.dataset.snakeName;
+    if (!name) continue;
+    const state = states.get(name);
+    if (!state) continue;
+    const revision = Number(field.dataset.revision ?? '-1');
+    if (revision === state.revision) continue;
+
+    field.dataset.revision = String(state.revision);
+    field.style.setProperty('--snake-cols', String(state.width));
+    field.style.setProperty('--snake-rows', String(state.height));
+    sizeSnakeField(field, state.width, state.height);
+
+    const cells = field.querySelector<HTMLElement>('.snake-cells');
+    const expectedCells = state.width * state.height;
+    if (cells) {
+      if (cells.childElementCount !== expectedCells) {
+        cells.replaceChildren(...Array.from({ length: expectedCells }, () => {
+          const cell = document.createElement('span');
+          cell.className = 'snake-cell';
+          return cell;
+        }));
+      }
+      Array.from(cells.children).forEach((child, index) => {
+        if (child instanceof HTMLElement) positionSnakeRunner(child, index, state.width, state.height);
+      });
+    }
+
+    const recent = state.history.slice(-3).reverse();
+    const connectorPath = field.querySelector<SVGPolylineElement>('.snake-runner-connector-path');
+    if (connectorPath) updateSnakeRunnerConnector(connectorPath, state.currentCell, recent, state.width, state.height);
+
+    const head = field.querySelector<HTMLElement>('.snake-runner.head');
+    if (head) {
+      if (state.currentCell !== null) {
+        head.classList.remove('hidden');
+        positionSnakeRunner(head, state.currentCell, state.width, state.height);
+      } else {
+        head.classList.add('hidden');
+      }
+    }
+
+    for (let age = 1; age <= 2; age += 1) {
+      const tail = field.querySelector<HTMLElement>(`.snake-runner.tail-${age}`);
+      if (!tail) continue;
+      const cell = recent[age];
+      if (cell === undefined) {
+        tail.classList.add('hidden');
+      } else {
+        tail.classList.remove('hidden');
+        positionSnakeRunner(tail, cell, state.width, state.height);
+      }
+    }
+  }
+}
+
 function updateDrumkitViews(): void {
   const states = new Map(runtime.getDrumkitViews().map((view) => [view.name, view]));
   const now = performance.now();
@@ -2232,6 +2422,7 @@ function drawScopes(): void {
   updateTuringViews();
   updateLifeViews();
   updateConstellationViews();
+  updateSnakeViews();
   updateDrumkitViews();
   updateSchemeLiveValues();
   const canvases = [...document.querySelectorAll<HTMLCanvasElement>('canvas.scope-canvas')];
@@ -2239,8 +2430,9 @@ function drawScopes(): void {
   const turingRegisters = document.querySelectorAll<HTMLElement>('.turing-register');
   const lifeGrids = document.querySelectorAll<HTMLElement>('.life-grid');
   const constellationFields = document.querySelectorAll<SVGSVGElement>('.constellation-field');
+  const snakeFields = document.querySelectorAll<HTMLElement>('.snake-field');
   const drumkitPatterns = document.querySelectorAll<HTMLElement>('.drumkit-pattern');
-  if (canvases.length === 0 && liveValues.length === 0 && turingRegisters.length === 0 && lifeGrids.length === 0 && constellationFields.length === 0 && drumkitPatterns.length === 0) return;
+  if (canvases.length === 0 && liveValues.length === 0 && turingRegisters.length === 0 && lifeGrids.length === 0 && constellationFields.length === 0 && snakeFields.length === 0 && drumkitPatterns.length === 0) return;
 
   const phosphor = getComputedStyle(document.documentElement).getPropertyValue('--phosphor-hot').trim() || '#ffe783';
 
