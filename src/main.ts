@@ -190,18 +190,16 @@ inlineViewStyle.textContent = `
     position: absolute;
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 3px;
     height: 1.08em;
     pointer-events: auto;
-    color: rgb(112 224 213);
-    text-shadow: 0 0 4px rgb(112 224 213 / .45);
   }
   .live-parameter-control input[type=range] {
     -webkit-appearance: none;
     appearance: none;
-    width: 78px;
+    width: 84px;
     height: 14px;
-    margin: 0 0 0 3px;
+    margin: 0 0 0 2px;
     background: linear-gradient(to right, rgb(224 228 236 / .9), rgb(224 228 236 / .9)) center / 100% 3px no-repeat;
     cursor: ew-resize;
   }
@@ -229,11 +227,12 @@ inlineViewStyle.textContent = `
     box-shadow: 0 0 4px rgb(112 224 213 / .25);
   }
   .live-parameter-value {
-    min-width: 2.2em;
-    font-size: 11px;
+    min-width: 1.8em;
+    font-size: 10px;
     line-height: 1;
     text-align: right;
-    color: currentColor;
+    color: rgb(112 226 223);
+    text-shadow: 0 0 3px rgb(112 226 223 / .35);
   }
 
   .syntax-inline-spacer {
@@ -3259,7 +3258,6 @@ type LiveControlSource = {
   max?: number;
   step?: number;
   label?: string;
-  lineEndSlot?: number;
 };
 
 type LiveBlockScope = {
@@ -3270,51 +3268,53 @@ type LiveBlockScope = {
   ownerVoice?: string;
 };
 
-const LIVE_CONTROL_GAP_COLUMNS = 10;
+const LIVE_CONTROL_GAP_COLUMNS = 8;
 const LIVE_CONTROL_GAP = ' '.repeat(LIVE_CONTROL_GAP_COLUMNS);
 
 type LiveControlGap = { start: number; end: number };
 
 function liveControlGapRanges(source: string): LiveControlGap[] {
   const ranges: LiveControlGap[] = [];
-  const lines = source.split('\n');
-  let offset = 0;
-  for (const line of lines) {
-    const codeEnd = commentStart(line);
-    const code = codeEnd < 0 ? line : line.slice(0, codeEnd);
-    const match = code.match(/^(\s*LIVE\s+[A-Za-z_][A-Za-z0-9_]*\s+\d+(?:\.\d+)?)([ \t]+)(?=(?:WITH\b|$))/i);
-    if (match && match[2].length >= LIVE_CONTROL_GAP_COLUMNS) {
-      const start = offset + match[1].length;
-      ranges.push({ start, end: start + match[2].length });
-    }
-    offset += line.length + 1;
+  for (const control of scanLiveControls(source)) {
+    let end = control.end;
+    while (end < source.length && source[end] === ' ') end += 1;
+    if (end - control.end >= LIVE_CONTROL_GAP_COLUMNS) ranges.push({ start: control.end, end });
   }
   return ranges;
 }
 
 function normalizeLiveControlSpacing(): boolean {
   const source = editor.value;
-  const lines = source.split('\n');
+  const controls = scanLiveControls(source);
   const edits: Array<{ start: number; end: number; replacement: string }> = [];
-  let offset = 0;
 
-  for (const line of lines) {
-    const commentAt = commentStart(line);
-    const code = commentAt < 0 ? line : line.slice(0, commentAt);
-    const live = code.match(/^(\s*LIVE\s+[A-Za-z_][A-Za-z0-9_]*\s+\d+(?:\.\d+)?)([ \t]+)(?=(?:WITH\b|$))/i);
-    if (live) {
-      const gapStart = offset + live[1].length;
-      const gapEnd = gapStart + live[2].length;
-      if (live[2] !== LIVE_CONTROL_GAP) edits.push({ start: gapStart, end: gapEnd, replacement: LIVE_CONTROL_GAP });
-    } else {
-      // If LIVE is removed, remove only a conspicuously large reserved gap.
-      // Ordinary user spacing (one or a few spaces) is preserved.
-      const stale = code.match(/^(\s*[A-Za-z_][A-Za-z0-9_]*\s+\d+(?:\.\d+)?)( {8,})(?=(?:WITH\b|$))/i);
-      if (stale) {
-        const gapStart = offset + stale[1].length;
-        const gapEnd = gapStart + stale[2].length;
-        const replacement = /WITH\b/i.test(code.slice(stale[0].length)) ? ' ' : '';
-        edits.push({ start: gapStart, end: gapEnd, replacement });
+  for (const control of controls) {
+    const lineEndAt = source.indexOf('\n', control.end);
+    const lineEnd = lineEndAt < 0 ? source.length : lineEndAt;
+    let gapEnd = control.end;
+    while (gapEnd < lineEnd && (source[gapEnd] === ' ' || source[gapEnd] === '\t')) gapEnd += 1;
+    const current = source.slice(control.end, gapEnd);
+    if (current !== LIVE_CONTROL_GAP) {
+      edits.push({ start: control.end, end: gapEnd, replacement: LIVE_CONTROL_GAP });
+    }
+  }
+
+  // Remove a reserved LIVE gap if the LIVE qualifier itself has been deleted.
+  // This deliberately targets only the exact spacer width generated above.
+  const lines = source.split('\n');
+  const controlledLines = new Set(controls.map((control) => control.line));
+  let offset = 0;
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex];
+    if (!controlledLines.has(lineIndex + 1) && !/\bLIVE\b/i.test(line)) {
+      let local = 0;
+      while ((local = line.indexOf(LIVE_CONTROL_GAP, local)) >= 0) {
+        const before = line.slice(0, local);
+        const after = line.slice(local + LIVE_CONTROL_GAP.length);
+        if (/-?\d+(?:\.\d+)?$/.test(before) && /^(?:,|\]|\s+WITH\b|\s*\/\/|$)/i.test(after)) {
+          edits.push({ start: offset + local, end: offset + local + LIVE_CONTROL_GAP.length, replacement: /^\s+WITH\b/i.test(after) ? ' ' : '' });
+        }
+        local += LIVE_CONTROL_GAP.length;
       }
     }
     offset += line.length + 1;
@@ -3329,7 +3329,10 @@ function normalizeLiveControlSpacing(): boolean {
     if (position >= edit.end) return position + edit.replacement.length - (edit.end - edit.start);
     return edit.start + edit.replacement.length;
   };
-  for (const edit of [...edits].sort((a, b) => b.start - a.start)) {
+
+  const uniqueEdits = [...new Map(edits.map((edit) => [`${edit.start}:${edit.end}`, edit])).values()]
+    .sort((a, b) => b.start - a.start);
+  for (const edit of uniqueEdits) {
     selectionStart = shift(selectionStart, edit);
     selectionEnd = shift(selectionEnd, edit);
     editor.setRangeText(edit.replacement, edit.start, edit.end, 'preserve');
@@ -3365,8 +3368,8 @@ function scanLiveControls(source: string): LiveControlSource[] {
     candidate.kind === 'voice' || candidate.kind === 'fx' || candidate.kind === 'filter' || candidate.kind === 'mod'
   );
   const addCompositeControl = (
-    lineIndex: number, code: string, lineOffset: number, localStart: number, literal: string,
-    scope: LiveBlockScope, property: string, label: string, min: number, max: number, step: number, slot = 0,
+    lineIndex: number, lineOffset: number, localStart: number, literal: string,
+    scope: LiveBlockScope, property: string, label: string, min: number, max: number, step: number,
   ): void => {
     const value = Number(literal);
     if (!Number.isFinite(value)) return;
@@ -3376,11 +3379,11 @@ function scanLiveControls(source: string): LiveControlSource[] {
       end: lineOffset + localStart + literal.length,
       value,
       property,
-      prefixColumns: code.length,
+      prefixColumns: localStart + literal.length,
       targetKind: scope.kind as 'voice' | 'fx' | 'filter' | 'mod',
       targetName: scope.targetName,
       updatePolicy: 'continuous',
-      min, max, step, label, lineEndSlot: slot,
+      min, max, step, label,
     });
   };
 
@@ -3398,7 +3401,7 @@ function scanLiveControls(source: string): LiveControlSource[] {
         if (input) {
           const literal = input[2];
           const localStart = input.index! + input[0].lastIndexOf(literal);
-          addCompositeControl(index, code, offset, localStart, literal, activeLiveMix.scope,
+          addCompositeControl(index, offset, localStart, literal, activeLiveMix.scope,
             `mix:${activeLiveMix.name}:${input[1]}`, `${input[1]} at`, 0, 100, 1);
         }
       } else if (trimmed && indentation <= activeLiveMix.indentation) activeLiveMix = null;
@@ -3436,14 +3439,13 @@ function scanLiveControls(source: string): LiveControlSource[] {
       const modifierBase = code.indexOf(modifierText, tune.index ?? 0);
       const regex = /(octave|detune|ratio)\s+(-?\d+(?:\.\d+)?)/gi;
       let match: RegExpExecArray | null;
-      let slot = 0;
       while ((match = regex.exec(modifierText))) {
         const key = match[1].toLowerCase();
         const literal = match[2];
         const localStart = modifierBase + match.index + match[0].lastIndexOf(literal);
         const range = key === 'octave' ? [-8, 8, 1] : key === 'detune' ? [-1200, 1200, 1] : [0.125, 32, 0.01];
-        addCompositeControl(index, code, offset, localStart, literal, scope,
-          `tune:${tune[1]}:${key}`, key, range[0], range[1], range[2], slot++);
+        addCompositeControl(index, offset, localStart, literal, scope,
+          `tune:${tune[1]}:${key}`, key, range[0], range[1], range[2]);
       }
       offset += line.length + 1;
       continue;
@@ -3455,12 +3457,11 @@ function scanLiveControls(source: string): LiveControlSource[] {
       const bodyBase = code.indexOf(body, output.index ?? 0);
       const regex = /([A-Za-z_][A-Za-z0-9_]*)\s+at\s+(-?\d+(?:\.\d+)?)/gi;
       let match: RegExpExecArray | null;
-      let slot = 0;
       while ((match = regex.exec(body))) {
         const literal = match[2];
         const localStart = bodyBase + match.index + match[0].lastIndexOf(literal);
-        addCompositeControl(index, code, offset, localStart, literal, scope,
-          `output:${match[1]}`, `${match[1]} at`, 0, 100, 1, slot++);
+        addCompositeControl(index, offset, localStart, literal, scope,
+          `output:${match[1]}`, `${match[1]} at`, 0, 100, 1);
       }
       offset += line.length + 1;
       continue;
@@ -3472,12 +3473,11 @@ function scanLiveControls(source: string): LiveControlSource[] {
       const bodyBase = code.indexOf(body, inlineMix.index ?? 0);
       const regex = /([A-Za-z_][A-Za-z0-9_]*)\s+at\s+(-?\d+(?:\.\d+)?)/gi;
       let match: RegExpExecArray | null;
-      let slot = 0;
       while ((match = regex.exec(body))) {
         const literal = match[2];
         const localStart = bodyBase + match.index + match[0].lastIndexOf(literal);
-        addCompositeControl(index, code, offset, localStart, literal, scope,
-          `mix:${inlineMix[1]}:${match[1]}`, `${match[1]} at`, 0, 100, 1, slot++);
+        addCompositeControl(index, offset, localStart, literal, scope,
+          `mix:${inlineMix[1]}:${match[1]}`, `${match[1]} at`, 0, 100, 1);
       }
       offset += line.length + 1;
       continue;
@@ -3587,6 +3587,22 @@ function commitLiveControlSource(): void {
   }, 0);
 }
 
+function positionLiveControl(control: HTMLElement): void {
+  const sourceEnd = Number(control.dataset.sourceEnd);
+  if (!Number.isFinite(sourceEnd)) return;
+  const anchor = editorOffsetRect(sourceEnd);
+  if (!anchor) return;
+  const host = liveControlLayer.getBoundingClientRect();
+  control.style.left = `${anchor.left - host.left + 3}px`;
+  control.style.top = `${anchor.top - host.top + 3}px`;
+}
+
+function repositionLiveControls(): void {
+  for (const control of liveControlLayer.querySelectorAll<HTMLElement>('.live-parameter-control')) {
+    positionLiveControl(control);
+  }
+}
+
 function replaceLiveControlValue(
   control: HTMLElement,
   value: number,
@@ -3616,6 +3632,7 @@ function replaceLiveControlValue(
   editor.setSelectionRange(shift(selectionStart), shift(selectionEnd), selectionDirection);
   const readout = control.querySelector<HTMLElement>('.live-parameter-value');
   if (readout) readout.textContent = replacement;
+  repositionLiveControls();
   if (updatePolicy === 'continuous') {
     scheduleLiveControlRuntimeUpdate(
       control.dataset.targetKind ?? '',
@@ -3630,29 +3647,16 @@ function renderLiveControls(): void {
   liveControlLayer.replaceChildren();
   const controls = scanLiveControls(editor.value);
   if (controls.length === 0) return;
-  const style = getComputedStyle(editor);
-  const font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
-  const canvas = document.createElement('canvas');
-  const context = canvas.getContext('2d');
-  if (!context) return;
-  context.font = font;
-  const lineHeight = Number.parseFloat(style.lineHeight) || Number.parseFloat(style.fontSize) * 1.08;
-  const lines = editor.value.split('\n');
-
   for (const entry of controls) {
-    const line = lines[entry.line - 1] ?? '';
-    const prefix = line.slice(0, entry.prefixColumns);
     const control = document.createElement('div');
     control.className = 'live-parameter-control';
     control.dataset.sourceStart = String(entry.start);
     control.dataset.sourceEnd = String(entry.end);
+    control.dataset.sourceLine = String(entry.line);
     control.dataset.targetKind = entry.targetKind;
     control.dataset.targetName = entry.targetName;
     control.dataset.property = entry.property;
     control.dataset.updatePolicy = entry.updatePolicy;
-    const preferredLeft = context.measureText(prefix).width + 8 + (entry.lineEndSlot ?? 0) * 132;
-    control.style.left = `${preferredLeft - editor.scrollLeft}px`;
-    control.style.top = `${(entry.line - 1) * lineHeight + inlineSpacerBeforePhysicalLine(entry.line) - editor.scrollTop}px`;
 
     const slider = document.createElement('input');
     slider.type = 'range';
@@ -3662,6 +3666,7 @@ function renderLiveControls(): void {
     control.dataset.step = String(entry.step ?? 1);
     slider.value = String(entry.value);
     slider.setAttribute('aria-label', `Live ${entry.label ?? entry.property}`);
+    control.title = entry.label ?? entry.property;
     slider.addEventListener('pointerdown', (event) => event.stopPropagation());
     slider.addEventListener('input', () =>
       replaceLiveControlValue(control, Number(slider.value), entry.updatePolicy)
@@ -3675,18 +3680,12 @@ function renderLiveControls(): void {
       renderLiveControls();
     });
 
-    if (entry.label) {
-      const label = document.createElement('span');
-      label.className = 'live-parameter-value';
-      label.textContent = entry.label;
-      control.append(label);
-    }
-
     const readout = document.createElement('span');
     readout.className = 'live-parameter-value';
     readout.textContent = (entry.step ?? 1) < 1 ? String(entry.value) : String(Math.round(entry.value));
     control.append(slider, readout);
     liveControlLayer.append(control);
+    positionLiveControl(control);
   }
 }
 
@@ -3795,8 +3794,8 @@ function editorCaretOffset(): number {
   return editor.selectionStart;
 }
 
-function caretRect(): DOMRect | null {
-  const offset = editorCaretOffset();
+function editorOffsetRect(offset: number): DOMRect | null {
+  const safeOffset = Math.max(0, Math.min(editor.value.length, offset));
   const editorRect = editor.getBoundingClientRect();
   const style = getComputedStyle(editor);
   const mirror = document.createElement('div');
@@ -3823,12 +3822,14 @@ function caretRect(): DOMRect | null {
   mirror.style.lineHeight = style.lineHeight;
   mirror.style.letterSpacing = style.letterSpacing;
   mirror.style.textTransform = style.textTransform;
+  mirror.style.tabSize = style.tabSize;
 
-  mirror.append(document.createTextNode(editor.value.slice(0, offset)));
+  mirror.append(document.createTextNode(editor.value.slice(0, safeOffset)));
   const marker = document.createElement('span');
   marker.style.display = 'inline-block';
   marker.style.width = '0';
   marker.style.height = '1em';
+  marker.style.verticalAlign = 'top';
   marker.textContent = '\u200b';
   mirror.append(marker);
   document.body.append(mirror);
@@ -3837,9 +3838,13 @@ function caretRect(): DOMRect | null {
   mirror.remove();
 
   const left = markerRect.left - editor.scrollLeft;
-  const physicalLine = editor.value.slice(0, offset).split('\n').length;
+  const physicalLine = editor.value.slice(0, safeOffset).split('\n').length;
   const top = markerRect.top - editor.scrollTop + inlineSpacerBeforePhysicalLine(physicalLine);
   return new DOMRect(left, top, 0, markerRect.height || Number.parseFloat(style.lineHeight) || 24);
+}
+
+function caretRect(): DOMRect | null {
+  return editorOffsetRect(editorCaretOffset());
 }
 
 function leaveBlockCaretTrail(): void {

@@ -1699,7 +1699,7 @@ function splitEveryClause(value: string): { base: string; every: string | null }
     return { base: logic[1].trim(), every: `LOGIC ${logic[2]}.${logic[3]}${modifiers}` };
   }
 
-  const rhythm = value.match(/^(.*?)\s+rhythm\s+([A-Za-z_][A-Za-z0-9_]*)(.*)$/i);
+  const rhythm = value.match(/^(.*?)\s+rhythm\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)(.*)$/i);
   if (rhythm) {
     const tail = rhythm[3].trim();
     let modifiers = '';
@@ -1893,16 +1893,30 @@ function parseEverySpec(
     return { amount: 1, unit: 'beat', chance: local.chance, drift: local.drift, loose: local.loose, clockSource: `__logic__${key}`, clockPrelude: '', euclidean: null };
   }
 
-  const rhythm = raw.trim().match(/^RHYTHM\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+ON\s+(.+))?$/i);
+  const rhythm = raw.trim().match(/^RHYTHM\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)(?:\s+ON\s+(.+))?$/i);
   if (rhythm) {
-    const definition = sourceDefinitions.get(rhythm[1]);
-    if (!definition) throw new LanguageError([{ line, message: `unknown RHYTHM source '${rhythm[1]}'` }]);
-    if (definition.kind !== 'rhythm') {
-      throw new LanguageError([{ line, message: `source '${rhythm[1]}' is ${definition.kind}, expected RHYTHM SET value` }]);
-    }
+    const sourceName = rhythm[1];
+    const definition = sourceDefinitions.get(sourceName);
+    if (!definition) throw new LanguageError([{ line, message: `unknown RHYTHM source '${sourceName}'` }]);
     const localModifiers = rhythm[2]
       ? rhythm[2].split(',').map((item) => item.trim()).filter(Boolean)
       : [];
+    if (definition.kind === 'logic') {
+      const local = parseTimingModifiers(localModifiers, line, 'beat');
+      return {
+        amount: 1,
+        unit: 'beat',
+        chance: local.chance,
+        drift: local.drift,
+        loose: local.loose,
+        clockSource: `__logic__${sourceName}`,
+        clockPrelude: '',
+        euclidean: null,
+      };
+    }
+    if (definition.kind !== 'rhythm') {
+      throw new LanguageError([{ line, message: `source '${sourceName}' is ${definition.kind}, expected RHYTHM or LOGIC trigger source` }]);
+    }
     const local = parseTimingModifiers(localModifiers, line, definition.spec.unit);
     return {
       ...definition.spec,

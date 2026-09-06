@@ -376,4 +376,5 @@ Sonus Umbrae should continue to follow these principles:
 - Continue expanding composite-capable object families only where their domain policy and output contract are well defined.
 - Keep generative SEQ work focused on readers and refinements for the existing Turing, Life, Constellation, and Snake models; defer a conventional duration-aware score sequencer until its syntax and role are clearly distinct from inline `pitch` timing.
 - Add further random/chaotic modulator families, extend LOGIC from event pulses to continuous control/gate comparison where useful, and add additional REGISTER consumers where they provide distinct musical behaviour.
-- Develop a polyphonic chord-oriented sound generator and extend dedicated drum/sample playback beyond the current baseline.
+- Add a dedicated `VOICE ... sound sample` engine as a near-term priority: WAV decoding, start/end, reverse, loop, tune/playback-rate, automatic/manual slicing, realtime playhead telemetry, and a compact waveform/slice view; keep transient detection and independent time-stretch/pitch-shift as follow-up work.
+- Develop a polyphonic chord-oriented sound generator and continue extending drum/sample playback beyond that sampler baseline.
