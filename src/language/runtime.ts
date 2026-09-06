@@ -1014,6 +1014,7 @@ export class SonusRuntime {
     const clockSources = new Map<string, ClockDefinition>();
     const languageClockConfigs = new Map<string, LanguageClockConfig>();
     let clockBpm = 0;
+    let referenceTuningHz = 440;
     let mainLevel = 100;
     const views = new Map<string, ViewKind>();
     const moduleViews = new Set<string>();
@@ -1315,6 +1316,12 @@ export class SonusRuntime {
       const modSet = parseLanguageModSetDirective(line, lineNumber);
       if (modSet) {
         languageModSets.push(modSet);
+        continue;
+      }
+
+      const tuning = parseLanguageTuningDirective(line);
+      if (tuning !== null) {
+        referenceTuningHz = tuning;
         continue;
       }
 
@@ -1827,7 +1834,7 @@ export class SonusRuntime {
     // source order. All module declarations already exist, so references between
     // modules are still independent from declaration order.
     for (const { source: line, line: lineNumber } of lines) {
-      if (parseLanguageCompositePitch(line) || parseLanguageCompositeTune(line) || parseLanguageCompositeEdge(line) || parseLanguageCompositeMix(line) || parseLanguageCompositeOutput(line) || parseLanguageDrumkitDirective(line) || parseLanguageDrumkitMetaDirective(line) || parseLanguageDrumSlotDirective(line) || parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageSeqModel(line) || parseLanguageSeqWeights(line) || parseLanguageConstellationParam(line) || parseLanguageConstellationOctaves(line) || parseLanguageConstellationReader(line) || parseLanguageSnakeSize(line) || parseLanguageSnakeMovement(line) || parseLanguageSnakeMatrix(line) || parseLanguageSnakeReader(line) || parseLanguageSeqSize(line) || parseLanguageLifeDensity(line) || parseLanguageLifeReader(line) || parseLanguageLifeEvolve(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageEnvelopeDirective(line, lineNumber) || parseLanguageFxMetadata(line) || parseLanguageDelayTime(line) || parseLanguageDelayParam(line, lineNumber) || parseLanguageDelayParamDefault(line, lineNumber) || parseLanguageDelayParamCycle(line, lineNumber) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
+      if (parseLanguageCompositePitch(line) || parseLanguageCompositeTune(line) || parseLanguageCompositeEdge(line) || parseLanguageCompositeMix(line) || parseLanguageCompositeOutput(line) || parseLanguageDrumkitDirective(line) || parseLanguageDrumkitMetaDirective(line) || parseLanguageDrumSlotDirective(line) || parseLanguageTuningDirective(line) !== null || parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageSeqModel(line) || parseLanguageSeqWeights(line) || parseLanguageConstellationParam(line) || parseLanguageConstellationOctaves(line) || parseLanguageConstellationReader(line) || parseLanguageSnakeSize(line) || parseLanguageSnakeMovement(line) || parseLanguageSnakeMatrix(line) || parseLanguageSnakeReader(line) || parseLanguageSeqSize(line) || parseLanguageLifeDensity(line) || parseLanguageLifeReader(line) || parseLanguageLifeEvolve(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageEnvelopeDirective(line, lineNumber) || parseLanguageFxMetadata(line) || parseLanguageDelayTime(line) || parseLanguageDelayParam(line, lineNumber) || parseLanguageDelayParamDefault(line, lineNumber) || parseLanguageDelayParamCycle(line, lineNumber) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
 
       const gainDeclaration = parseGainDeclaration(line);
       if (gainDeclaration) {
@@ -4328,7 +4335,7 @@ export class SonusRuntime {
         const pitch = nextPitch();
         fx.pitch = pitch;
         this.audio.setMistParameter(name, 'pitch', pitch);
-        updateInlinePiano('fx', name, midiToFrequency(60 + pitch));
+        updateInlinePiano('fx', name, midiToFrequency(60 + pitch, referenceTuningHz));
 
         const retrig = sequenceFavorForValue(pitch, sequence.favor, 'semitone')
           .find((entry) => entry.operator === 'retrig');
@@ -5369,6 +5376,13 @@ function parseLanguageModMetadata(line: string): LanguageModMetadata | null {
   return { internalName: match[1], displayName: match[2], ownerVoice: match[3] || null };
 }
 
+function parseLanguageTuningDirective(line: string): number | null {
+  const match = line.match(/^__tuning\((\d+(?:\.\d+)?)\);?$/);
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? value : null;
+}
+
 function parseLanguageClockParentDirective(line: string): { name: string; parent: string; rate: number; rateLabel: string } | null {
   const match = line.match(/^__clockparent\("([A-Za-z_]\w*)","([A-Za-z_]\w*)","([/*]\d+(?:\.\d+)?)"\)$/);
   if (!match) return null;
@@ -6290,8 +6304,8 @@ function percentError(value: number, name: string): string | null {
     : null;
 }
 
-function midiToFrequency(note: number): number {
-  return 440 * 2 ** ((note - 69) / 12);
+function midiToFrequency(note: number, tuningHz = 440): number {
+  return tuningHz * 2 ** ((note - 69) / 12);
 }
 
 function frequencyError(value: number): string | null {

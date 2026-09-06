@@ -126,7 +126,7 @@ app.innerHTML = `
 
       <div id="capability-restart-overlay" class="capability-restart-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="capability-restart-title">
         <div class="capability-restart-card">
-          <div id="capability-restart-title" class="audio-start-title">RUNTIME CAPABILITIES CHANGED</div>
+          <div id="capability-restart-title" class="audio-start-title">RUNTIME USE CHANGED</div>
           <div class="rule"></div>
           <div class="system-copy">CHANGING USE RESTARTS THE SONUS RUNTIME AND MAY INTERRUPT AUDIO BRIEFLY.</div>
           <div class="capability-diff"><span>CURRENT</span><code id="capability-current">NONE</code><span>NEW</span><code id="capability-next">NONE</code></div>
@@ -428,9 +428,10 @@ let appConfig: AppConfig = {
 };
 let configSelectionIndex = 0;
 let pendingAudioConfig: { sampleRate: SampleRateChoice; outputDeviceId: string; latencyMode: AudioLatencyMode } | null = null;
+let activeTuningHz = 440;
 let activeCapabilities = new Set<ProgramCapability>();
 let activeUseDirective: string | null = null;
-let pendingCapabilityRestart: { source: string; capabilities: Set<ProgramCapability>; directive: string | null } | null = null;
+let pendingCapabilityRestart: { source: string; capabilities: Set<ProgramCapability>; tuningHz: number; directive: string | null } | null = null;
 
 const PANEL_STATE_KEY = 'sonus-umbrae.monitor-panels';
 const panelCollapsed = new Map<string, boolean>();
@@ -658,6 +659,9 @@ async function runQuickMenuAction(key: string): Promise<void> {
       setSourceText('');
       runtime.evaluate('');
       setCodeRunning(false);
+      activeCapabilities = new Set();
+      activeTuningHz = 440;
+      activeUseDirective = null;
       syncViews();
       notify('new project');
       return;
@@ -673,26 +677,28 @@ function formatCapabilities(capabilities: ReadonlySet<ProgramCapability>): strin
   return names.length > 0 ? `USE ${names.join(', ')}` : 'NO USE';
 }
 
-function capabilitySetChanged(next: ReadonlySet<ProgramCapability>): boolean {
-  return capabilityKey(next) !== capabilityKey(activeCapabilities);
+function capabilitySetChanged(next: ReadonlySet<ProgramCapability>, tuningHz: number): boolean {
+  return capabilityKey(next) !== capabilityKey(activeCapabilities) || Math.abs(tuningHz - activeTuningHz) > 0.0001;
 }
 
 function rememberActiveCapabilities(source: string): void {
   const parsed = parseProgramCapabilities(source);
   activeCapabilities = new Set(parsed.capabilities);
+  activeTuningHz = parsed.tuningHz;
   activeUseDirective = parsed.directiveText;
 }
 
 function requestCapabilityRestart(source: string): boolean {
   const parsed = parseProgramCapabilities(source);
-  if (!codeRunning || !capabilitySetChanged(parsed.capabilities)) return false;
+  if (!capabilitySetChanged(parsed.capabilities, parsed.tuningHz)) return false;
   pendingCapabilityRestart = {
     source,
     capabilities: new Set(parsed.capabilities),
+    tuningHz: parsed.tuningHz,
     directive: parsed.directiveText,
   };
-  capabilityCurrent.textContent = formatCapabilities(activeCapabilities);
-  capabilityNext.textContent = formatCapabilities(parsed.capabilities);
+  capabilityCurrent.textContent = `${formatCapabilities(activeCapabilities)} · A4 ${activeTuningHz}Hz`;
+  capabilityNext.textContent = `${formatCapabilities(parsed.capabilities)} · A4 ${parsed.tuningHz}Hz`;
   capabilityRestartOverlay.classList.remove('hidden');
   capabilityApply.focus();
   return true;
@@ -3766,6 +3772,7 @@ async function runCommand(raw: string): Promise<void> {
       runtime.evaluate('');
       setCodeRunning(false);
       activeCapabilities = new Set();
+      activeTuningHz = 440;
       activeUseDirective = null;
       syncViews();
       leaveCommandMode();

@@ -3,7 +3,9 @@ import {
   midiFromNote,
   midiFromRoot,
   midiToFrequency,
+  setReferenceTuningHz,
 } from './parser/pitch';
+import { findScaleDefinition, type SupportedEdo } from './scales';
 
 export type LanguageDiagnostic = {
   line: number;
@@ -25,17 +27,23 @@ export type ProgramCapability = 'visual' | 'midi' | 'audioin' | 'osc';
 
 export type ProgramCapabilitySet = {
   capabilities: ReadonlySet<ProgramCapability>;
+  tuningHz: number;
   directiveLine: number | null;
   directiveText: string | null;
 };
 
 const PROGRAM_CAPABILITIES = new Set<ProgramCapability>(['visual', 'midi', 'audioin', 'osc']);
+export const DEFAULT_TUNING_HZ = 440;
+export const MIN_TUNING_HZ = 400;
+export const MAX_TUNING_HZ = 480;
 
 export function parseProgramCapabilities(source: string): ProgramCapabilitySet {
   const lines = source.replace(/\r\n/g, '\n').split('\n');
   let directiveLine: number | null = null;
   let directiveText: string | null = null;
   const capabilities = new Set<ProgramCapability>();
+  let tuningHz = DEFAULT_TUNING_HZ;
+  let tuningDeclared = false;
   let firstStatementLine: number | null = null;
 
   for (let index = 0; index < lines.length; index += 1) {
@@ -58,8 +66,19 @@ export function parseProgramCapabilities(source: string): ProgramCapabilitySet {
     const items = body.split(',').map((item) => item.trim().toLowerCase()).filter(Boolean);
     if (items.length == 0) throw new LanguageError([{ line: directiveLine, message: 'USE expects one or more capabilities separated by commas' }]);
     for (const item of items) {
+      const tuning = item.match(/^(\d+(?:\.\d+)?)hz$/i);
+      if (tuning) {
+        if (tuningDeclared) throw new LanguageError([{ line: directiveLine, message: 'USE can declare tuning only once' }]);
+        const value = Number(tuning[1]);
+        if (!Number.isFinite(value) || value < MIN_TUNING_HZ || value > MAX_TUNING_HZ) {
+          throw new LanguageError([{ line: directiveLine, message: `USE tuning must be between ${MIN_TUNING_HZ}hz and ${MAX_TUNING_HZ}hz` }]);
+        }
+        tuningHz = value;
+        tuningDeclared = true;
+        continue;
+      }
       if (!/^[a-z][a-z0-9_-]*$/i.test(item)) {
-        throw new LanguageError([{ line: directiveLine, message: `invalid USE capability '${item}'` }]);
+        throw new LanguageError([{ line: directiveLine, message: `invalid USE item '${item}'` }]);
       }
       if (!PROGRAM_CAPABILITIES.has(item as ProgramCapability)) {
         throw new LanguageError([{ line: directiveLine, message: `unknown USE capability '${item}'` }]);
@@ -71,7 +90,7 @@ export function parseProgramCapabilities(source: string): ProgramCapabilitySet {
     }
   }
 
-  return { capabilities, directiveLine, directiveText };
+  return { capabilities, tuningHz, directiveLine, directiveText };
 }
 
 type SourceKind = 'voice' | 'note' | 'freq' | 'time' | 'clock' | 'trigger' | 'scalar' | 'scale' | 'seq' | 'register' | 'envelope' | 'kit' | 'rhythm';
@@ -444,68 +463,126 @@ function formatSourceNumber(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
 }
 
+
+const EDO_NOTE = /^n(\d+)@(-?\d+)$/i;
+function parseEdoModifier(
+  modifiers: string[],
+  line: number,
+  property: string,
+): { edo: SupportedEdo; modifiers: string[]; explicit: boolean } {
+  let edo: SupportedEdo = 12;
+  let explicit = false;
+  const remaining: string[] = [];
+  for (const modifier of modifiers) {
+    const match = modifier.match(/^edo\s*(12|15|19|22|24)$/i);
+    if (!match) {
+      remaining.push(modifier);
+      continue;
+    }
+    if (explicit) throw new LanguageError([{ line, message: `${property} accepts only one EDO modifier` }]);
+    edo = Number(match[1]) as SupportedEdo;
+    explicit = true;
+  }
+  return { edo, modifiers: remaining, explicit };
+}
+
+function edoNoteFrequency(token: string, edo: SupportedEdo, line: number, property: string): number {
+  const match = token.match(EDO_NOTE);
+  if (!match) throw new LanguageError([{ line, message: `invalid ${property} EDO note '${token}'; use n<step>@<octave>` }]);
+  const noteNumber = Number(match[1]);
+  const octave = Number(match[2]);
+  if (!Number.isInteger(noteNumber) || noteNumber < 1 || noteNumber > edo) {
+    throw new LanguageError([{ line, message: `${property} ${edo}-EDO note expects n1..n${edo}` }]);
+  }
+  const cMidi = midiFromNote(`C${octave}`);
+  if (cMidi === null) throw new LanguageError([{ line, message: `invalid ${property} octave '${octave}'` }]);
+  return midiToFrequency(cMidi) * 2 ** ((noteNumber - 1) / edo);
+}
+
 function scaleValues(
   root: string,
   modeRaw: string,
   rangeStart: string | null,
   rangeEnd: string | null,
   line: number,
-): { values: number[]; display: string } {
-  const mode = modeRaw.toLowerCase();
-  const intervals = MODE_INTERVALS[mode];
-  if (!intervals) {
-    throw new LanguageError([{ line, message: `unknown scale mode '${modeRaw}'` }]);
-  }
-
-  const rootClass = midiFromRoot(root, 0);
-  if (rootClass === null) {
-    throw new LanguageError([{ line, message: `invalid scale root '${root}'` }]);
-  }
-  const pitchClass = ((rootClass % 12) + 12) % 12;
-  const allowed = new Set(intervals.map((interval) => (pitchClass + interval) % 12));
+): { values: number[]; display: string; edo: SupportedEdo } {
+  const scale = findScaleDefinition(modeRaw);
+  if (!scale) throw new LanguageError([{ line, message: `unknown scale '${modeRaw}'` }]);
 
   if (rangeStart === null || rangeEnd === null) {
     const rootMidi = midiFromRoot(root);
-    if (rootMidi === null) {
-      throw new LanguageError([{ line, message: `invalid scale root '${root}'` }]);
-    }
-    const values = intervals.map((interval) => midiToFrequency(rootMidi + interval));
-    return { values, display: `${root} ${modeRaw}` };
+    if (rootMidi === null) throw new LanguageError([{ line, message: `invalid scale root '${root}'` }]);
+    const rootHz = midiToFrequency(rootMidi);
+    return {
+      values: scale.degrees.map((degree) => rootHz * 2 ** (degree / scale.edo)),
+      display: `${root} ${scale.id}`,
+      edo: scale.edo,
+    };
   }
 
+  const numericStart = EDO_NOTE.test(rangeStart);
+  const numericEnd = EDO_NOTE.test(rangeEnd);
+  if (numericStart !== numericEnd) {
+    throw new LanguageError([{ line, message: 'scale range cannot mix note names with n<degree>@<octave> notation' }]);
+  }
+
+  if (numericStart && numericEnd) {
+    const start = rangeStart.match(EDO_NOTE)!;
+    const end = rangeEnd.match(EDO_NOTE)!;
+    const startDegree = Number(start[1]);
+    const startOctave = Number(start[2]);
+    const endDegree = Number(end[1]);
+    const endOctave = Number(end[2]);
+    if (startDegree < 1 || startDegree > scale.degrees.length || endDegree < 1 || endDegree > scale.degrees.length) {
+      throw new LanguageError([{ line, message: `scale '${scale.id}' range expects n1..n${scale.degrees.length}` }]);
+    }
+    const startOrdinal = startOctave * scale.degrees.length + (startDegree - 1);
+    const endOrdinal = endOctave * scale.degrees.length + (endDegree - 1);
+    const direction = startOrdinal <= endOrdinal ? 1 : -1;
+    const values: number[] = [];
+    for (let ordinal = startOrdinal; direction > 0 ? ordinal <= endOrdinal : ordinal >= endOrdinal; ordinal += direction) {
+      const octave = Math.floor(ordinal / scale.degrees.length);
+      const degreeIndex = ((ordinal % scale.degrees.length) + scale.degrees.length) % scale.degrees.length;
+      const rootMidi = midiFromRoot(root, octave);
+      if (rootMidi === null) throw new LanguageError([{ line, message: `invalid scale root '${root}'` }]);
+      values.push(midiToFrequency(rootMidi) * 2 ** (scale.degrees[degreeIndex] / scale.edo));
+    }
+    return { values, display: `${root} ${scale.id} ${rangeStart}..${rangeEnd}`, edo: scale.edo };
+  }
+
+  if (scale.edo !== 12) {
+    throw new LanguageError([{
+      line,
+      message: `${scale.edo}-EDO scale '${scale.id}' requires degree ranges such as n1@3 n${scale.degrees.length}@4`,
+    }]);
+  }
+
+  const rootClass = midiFromRoot(root, 0);
+  if (rootClass === null) throw new LanguageError([{ line, message: `invalid scale root '${root}'` }]);
+  const pitchClass = ((rootClass % 12) + 12) % 12;
+  const allowed = new Set(scale.degrees.map((degree) => (pitchClass + degree) % 12));
   const startMidi = midiFromNote(rangeStart);
   const endMidi = midiFromNote(rangeEnd);
-  if (startMidi === null) {
-    throw new LanguageError([{ line, message: `invalid scale range note '${rangeStart}'` }]);
-  }
-  if (endMidi === null) {
-    throw new LanguageError([{ line, message: `invalid scale range note '${rangeEnd}'` }]);
-  }
+  if (startMidi === null) throw new LanguageError([{ line, message: `invalid scale range note '${rangeStart}'` }]);
+  if (endMidi === null) throw new LanguageError([{ line, message: `invalid scale range note '${rangeEnd}'` }]);
 
   const direction = startMidi <= endMidi ? 1 : -1;
   const values: number[] = [];
   for (let midi = startMidi; direction > 0 ? midi <= endMidi : midi >= endMidi; midi += direction) {
     if (allowed.has(((midi % 12) + 12) % 12)) values.push(midiToFrequency(midi));
   }
-
-  if (values.length === 0) {
-    throw new LanguageError([{ line, message: 'scale range contains no notes from the selected scale' }]);
-  }
-
-  return {
-    values,
-    display: `${root} ${modeRaw} ${rangeStart}..${rangeEnd}`,
-  };
+  if (values.length === 0) throw new LanguageError([{ line, message: 'scale range contains no notes from the selected scale' }]);
+  return { values, display: `${root} ${scale.id} ${rangeStart}..${rangeEnd}`, edo: scale.edo };
 }
 
 function parseScaleSpec(
   value: string,
   line: number,
   allowSelection: boolean,
-): { values: number[]; display: string; mode: SelectionMode; amount: number; favor: SequenceFavorEntry[]; view: boolean } | null {
-  const head = value.match(/^([A-Ga-g][#b]?)\s+([A-Za-z][A-Za-z-]*)(?:\s+with\s+(.+))?$/i);
+): { values: number[]; display: string; mode: SelectionMode; amount: number; favor: SequenceFavorEntry[]; view: boolean; edo: SupportedEdo } | null {
+  const head = value.match(/^([A-Ga-g][#b]?)\s+([A-Za-z_][A-Za-z0-9_-]*)(?:\s+with\s+(.+))?$/i);
   if (!head) return null;
-  if (!MODE_INTERVALS[head[2].toLowerCase()]) return null;
+  if (!findScaleDefinition(head[2])) return null;
 
   let rangeStart: string | null = null;
   let rangeEnd: string | null = null;
@@ -521,11 +598,9 @@ function parseScaleSpec(
     .filter(Boolean);
 
   for (const modifier of modifiers) {
-    const range = modifier.match(/^range\s+([A-Ga-g][#b]?-?\d+)\s+([A-Ga-g][#b]?-?\d+)$/i);
+    const range = modifier.match(/^range\s+([A-Ga-g][#b]?-?\d+|n\d+@-?\d+)\s+([A-Ga-g][#b]?-?\d+|n\d+@-?\d+)$/i);
     if (range) {
-      if (rangeStart !== null) {
-        throw new LanguageError([{ line, message: 'scale accepts only one range modifier' }]);
-      }
+      if (rangeStart !== null) throw new LanguageError([{ line, message: 'scale accepts only one range modifier' }]);
       rangeStart = range[1];
       rangeEnd = range[2];
       continue;
@@ -545,9 +620,7 @@ function parseScaleSpec(
         }]);
       }
       if (selection.mode !== 'order' || /^order$/i.test(modifier)) {
-        if (selectionSeen) {
-          throw new LanguageError([{ line, message: 'scale accepts only one sequencing modifier' }]);
-        }
+        if (selectionSeen) throw new LanguageError([{ line, message: 'scale accepts only one sequencing modifier' }]);
         mode = selection.mode;
         amount = selection.amount;
         selectionSeen = true;
@@ -558,8 +631,8 @@ function parseScaleSpec(
   }
 
   validateFavorForMode(favor, mode, line, 'scale');
-  const scale = scaleValues(head[1], head[2], rangeStart, rangeEnd, line);
-  return { ...scale, mode, amount, favor, view };
+  const resolved = scaleValues(head[1], head[2], rangeStart, rangeEnd, line);
+  return { ...resolved, mode, amount, favor, view };
 }
 
 function parseScaleSource(value: string, line: number): { values: number[]; display: string } | null {
@@ -616,7 +689,8 @@ function parseNoteSequenceToken(
   token: string,
   line: number,
 ): { note: string; favor: SequenceFavorEntry | null } {
-  const weighted = token.match(/^([A-Ga-g][#b]?-?\d+)!(\d+(?:\.\d+)?)$/);
+  const notePattern = '([A-Ga-g][#b]?-?\\d+|n\\d+@-?\\d+)';
+  const weighted = token.match(new RegExp(`^${notePattern}!(\\d+(?:\\.\\d+)?)$`, 'i'));
   if (weighted) {
     const amount = numberValue(weighted[2], line, 'note weight');
     if (amount < 0 || amount > 100) {
@@ -625,7 +699,7 @@ function parseNoteSequenceToken(
     return { note: weighted[1], favor: { target: weighted[1], operator: 'weight', amount } };
   }
 
-  const retrig = token.match(/^([A-Ga-g][#b]?-?\d+)\*\*(\d+)$/);
+  const retrig = token.match(new RegExp(`^${notePattern}\\*\\*(\\d+)$`, 'i'));
   if (retrig) {
     const amount = numberValue(retrig[2], line, 'retrig');
     if (!Number.isInteger(amount) || amount < 2) {
@@ -634,7 +708,7 @@ function parseNoteSequenceToken(
     return { note: retrig[1], favor: { target: retrig[1], operator: 'retrig', amount } };
   }
 
-  const repeated = token.match(/^([A-Ga-g][#b]?-?\d+)\*(\d+)$/);
+  const repeated = token.match(new RegExp(`^${notePattern}\\*(\\d+)$`, 'i'));
   if (repeated) {
     const amount = numberValue(repeated[2], line, 'repeat');
     if (!Number.isInteger(amount) || amount < 2) {
@@ -644,6 +718,48 @@ function parseNoteSequenceToken(
   }
 
   return { note: token, favor: null };
+}
+
+
+function parseInlineNoteMaterial(
+  base: string,
+  modifiers: string[],
+  line: number,
+  property: string,
+): {
+  frequencies: number[];
+  favor: SequenceFavorEntry[];
+  modifiers: string[];
+  edo: SupportedEdo;
+  numeric: boolean;
+} {
+  const edoSpec = parseEdoModifier(modifiers, line, property);
+  const tokens = parseList(base, line, property).map((token) => parseNoteSequenceToken(token, line));
+  if (tokens.length === 0) throw new LanguageError([{ line, message: `${property} requires at least one note` }]);
+
+  const numericFlags = tokens.map((token) => EDO_NOTE.test(token.note));
+  const numeric = numericFlags.every(Boolean);
+  const named = numericFlags.every((flag) => !flag);
+  if (!numeric && !named) {
+    throw new LanguageError([{ line, message: `${property} cannot mix named notes with n<step>@<octave> notation` }]);
+  }
+  if (edoSpec.edo !== 12 && !numeric) {
+    throw new LanguageError([{ line, message: `${property} with edo${edoSpec.edo} requires n1@<octave>..n${edoSpec.edo}@<octave> notation` }]);
+  }
+
+  const frequencies = tokens.map((token) => {
+    if (numeric) return edoNoteFrequency(token.note, edoSpec.edo, line, property);
+    const midi = midiFromNote(token.note);
+    if (midi === null) throw new LanguageError([{ line, message: `invalid note '${token.note}'` }]);
+    return midiToFrequency(midi);
+  });
+  return {
+    frequencies,
+    favor: tokens.flatMap((token) => token.favor ? [token.favor] : []),
+    modifiers: edoSpec.modifiers,
+    edo: edoSpec.edo,
+    numeric,
+  };
 }
 
 function mergeFavor(
@@ -1072,20 +1188,21 @@ function compileCompositeTuneDirective(
     const source = IDENTIFIER.test(direct.base) ? sourceDefinitions.get(direct.base) : undefined;
     if (kind === 'notes') {
       let inlineFavor: SequenceFavorEntry[] = [];
+      let noteModifiers: string[];
       if (source) {
         if (source.kind !== 'note' && source.kind !== 'scale') throw new LanguageError([{ line, message: `source '${direct.base}' is ${source.kind}, expected NOTES-compatible source` }]);
+        const edoSpec = parseEdoModifier(direct.modifiers, line, 'tune notes');
+        if (edoSpec.explicit) throw new LanguageError([{ line, message: 'EDO modifiers apply only to inline tune PITCH NOTES material' }]);
+        noteModifiers = edoSpec.modifiers;
         values = source.values;
         if (source.kind === 'note') inlineFavor = source.favor;
       } else {
-        const noteTokens = parseList(direct.base, line, 'tune notes').map((token) => parseNoteSequenceToken(token, line));
-        values = noteTokens.map((token) => {
-          const midi = midiFromNote(token.note);
-          if (midi === null) throw new LanguageError([{ line, message: `invalid note '${token.note}'` }]);
-          return midiToFrequency(midi);
-        });
-        inlineFavor = noteTokens.flatMap((token) => token.favor ? [token.favor] : []);
+        const parsedNotes = parseInlineNoteMaterial(direct.base, direct.modifiers, line, 'tune notes');
+        values = parsedNotes.frequencies;
+        inlineFavor = parsedNotes.favor;
+        noteModifiers = parsedNotes.modifiers;
       }
-      const selection = parseSelectionMode(direct.modifiers, line, 'tune notes');
+      const selection = parseSelectionMode(noteModifiers, line, 'tune notes');
       selectionMode = selection.mode;
       selectionAmount = selection.amount;
       favor = mergeFavor(inlineFavor, selection.favor);
@@ -1103,7 +1220,10 @@ function compileCompositeTuneDirective(
       selectionAmount = selection.amount;
       favor = selection.favor;
     }
-    if (values.length === 1 && direct.modifiers.length > 0) throw new LanguageError([{ line, message: 'tune pitch selection modifiers require more than one value' }]);
+    const effectiveModifiers = kind === 'notes'
+      ? parseEdoModifier(direct.modifiers, line, 'tune notes').modifiers
+      : direct.modifiers;
+    if (values.length === 1 && effectiveModifiers.length > 0) throw new LanguageError([{ line, message: 'tune pitch selection modifiers require more than one value' }]);
   }
 
   if (values.length === 0) throw new LanguageError([{ line, message: 'tune pitch requires at least one pitch value' }]);
@@ -1444,25 +1564,29 @@ function compileVoiceProperty(
       const split = splitEveryClause(value);
       const { base, modifiers } = splitWith(split.base);
       const noteView = live || modifiers.some((modifier) => /^view$/i.test(modifier));
-      const selectionModifiers = modifiers.filter((modifier) => !/^view$/i.test(modifier));
       const directSource = IDENTIFIER.test(base) ? sourceDefinitions.get(base) : undefined;
       let frequencies: number[];
       let inlineFavor: SequenceFavorEntry[] = [];
+      let selectionModifiers: string[];
       if (directSource) {
         if (directSource.kind !== 'note' && directSource.kind !== 'scale') {
           throw new LanguageError([{ line, message: `source '${base}' is ${directSource.kind}, expected note or scale source for note` }]);
         }
+        const edoSpec = parseEdoModifier(modifiers.filter((modifier) => !/^view$/i.test(modifier)), line, 'note');
+        if (edoSpec.explicit) throw new LanguageError([{ line, message: 'EDO modifiers apply only to inline PITCH NOTES material' }]);
+        selectionModifiers = edoSpec.modifiers;
         frequencies = directSource.values;
         if (directSource.kind === 'note') inlineFavor = directSource.favor;
       } else {
-        const noteTokens = parseList(base, line, 'note').map((token) => parseNoteSequenceToken(token, line));
-        const notes = noteTokens.map((token) => token.note);
-        inlineFavor = noteTokens.flatMap((token) => token.favor ? [token.favor] : []);
-        frequencies = notes.map((note) => {
-          const midi = midiFromNote(note);
-          if (midi === null) throw new LanguageError([{ line, message: `invalid note '${note}'` }]);
-          return midiToFrequency(midi);
-        });
+        const parsedNotes = parseInlineNoteMaterial(
+          base,
+          modifiers.filter((modifier) => !/^view$/i.test(modifier)),
+          line,
+          'note',
+        );
+        frequencies = parsedNotes.frequencies;
+        inlineFavor = parsedNotes.favor;
+        selectionModifiers = parsedNotes.modifiers;
       }
       const selection = parseSelectionMode(selectionModifiers, line, 'note');
       const favor = mergeFavor(inlineFavor, selection.favor);
@@ -2112,19 +2236,20 @@ function compileSeqProperty(
     return `__seqchange(${JSON.stringify(seq.name)},${change});`;
   }
   if (effectiveKey === 'notes') {
-    const list = value.match(/^\[([^\]]+)\]$/);
-    if (!list) throw new LanguageError([{ line, message: 'SEQ notes expects a note list such as [C2 Eb2 G2]' }]);
-    const items = list[1].trim().split(/\s+/).filter(Boolean);
-    const parsed = items.map((item) => parseNoteSequenceToken(item, line));
-    if (parsed.length === 0 || parsed.some((item) => midiFromNote(item.note) === null)) throw new LanguageError([{ line, message: 'SEQ notes contains an invalid note' }]);
-    const favors = parsed.flatMap((item) => item.favor ? [item.favor] : []);
+    const direct = splitWith(value);
+    const parsedNotes = parseInlineNoteMaterial(direct.base, direct.modifiers, line, 'SEQ notes');
+    const parsed = parseList(direct.base, line, 'SEQ notes').map((item) => parseNoteSequenceToken(item, line));
+    const favors = parsedNotes.favor;
+    if (parsedNotes.modifiers.length > 0) {
+      throw new LanguageError([{ line, message: `SEQ notes does not support modifier '${parsedNotes.modifiers[0]}'` }]);
+    }
     if (favors.some((entry) => entry.operator !== 'weight')) {
       throw new LanguageError([{ line, message: 'SEQ notes support only ! weights' }]);
     }
     if (seq.modelId !== 'constellation' && favors.length > 0) {
       throw new LanguageError([{ line, message: 'weighted SEQ notes are available only for MODEL constellation' }]);
     }
-    seq.values = parsed.map((item) => midiToFrequency(midiFromNote(item.note)!));
+    seq.values = parsedNotes.frequencies;
     seq.weights = parsed.map((item) => item.favor?.operator === 'weight' ? item.favor.amount : 100);
     seq.material = 'notes';
     const definition = sourceDefinitions.get(seq.name);
@@ -3036,16 +3161,14 @@ function compileFxProperty(
     if (musicalPitchKey === 'note') {
       const parsed = splitWith(split.base);
       pitchView = parsed.modifiers.some((modifier) => /^view$/i.test(modifier));
-      const pitchModifiers = parsed.modifiers.filter((modifier) => !/^view$/i.test(modifier));
-      const noteTokens = parseList(parsed.base, line, 'note').map((token) => parseNoteSequenceToken(token, line));
-      const notes = noteTokens.map((token) => token.note);
-      const inlineFavor = noteTokens.flatMap((token) => token.favor ? [token.favor] : []);
-      pitchValues = notes.map((note) => {
-        const midi = midiFromNote(note);
-        if (midi === null) throw new LanguageError([{ line, message: `invalid note '${note}'` }]);
-        return midi - 60;
-      });
-      { const selection = parseSelectionMode(pitchModifiers, line, 'note'); mode = selection.mode; selectionAmount = selection.amount; pitchFavor = mergeFavor(inlineFavor, selection.favor); validateFavorForMode(pitchFavor, mode, line, 'note'); }
+      const parsedNotes = parseInlineNoteMaterial(
+        parsed.base,
+        parsed.modifiers.filter((modifier) => !/^view$/i.test(modifier)),
+        line,
+        'FX pitch notes',
+      );
+      pitchValues = parsedNotes.frequencies.map(semitonesFromFrequency);
+      { const selection = parseSelectionMode(parsedNotes.modifiers, line, 'note'); mode = selection.mode; selectionAmount = selection.amount; pitchFavor = mergeFavor(parsedNotes.favor, selection.favor); validateFavorForMode(pitchFavor, mode, line, 'note'); }
     } else if (musicalPitchKey === 'freq') {
       const parsed = splitWith(split.base);
       const frequencies = parseList(parsed.base, line, 'freq').map((item) => numberValue(item, line, 'freq'));
@@ -3563,6 +3686,7 @@ function validateLiveFilterProperty(property: string, line: number): void {
 
 export function compileLanguageSource(source: string): string {
   const capabilitySet = parseProgramCapabilities(source);
+  setReferenceTuningHz(capabilitySet.tuningHz);
   const lines = source.replace(/\r\n/g, '\n').split('\n');
 
   // Collapse multiline KIT lists while preserving physical line count.
@@ -3736,7 +3860,7 @@ export function compileLanguageSource(source: string): string {
     }
 
     if (capabilitySet.directiveLine === lineNumber) {
-      output[index] = '';
+      output[index] = `__tuning(${capabilitySet.tuningHz});`;
       continue;
     }
 

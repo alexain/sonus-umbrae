@@ -56,6 +56,16 @@ export function midiFromRoot(value: string, octave = 4): number | null {
   return (octave + 1) * 12 + pitchClass;
 }
 
+let referenceTuningHz = 440;
+
+export function setReferenceTuningHz(value: number): void {
+  referenceTuningHz = value;
+}
+
+export function getReferenceTuningHz(): number {
+  return referenceTuningHz;
+}
+
 export function midiToFrequency(midi: number): number {
-  return 440 * 2 ** ((midi - 69) / 12);
+  return referenceTuningHz * 2 ** ((midi - 69) / 12);
 }

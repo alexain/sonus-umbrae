@@ -646,46 +646,62 @@ PITCH FREQS 220
 A list:
 
 ```text
-PITCH NOTES [C3 G3 Bb3]
+pitch notes [C3 G3 Bb3]
 ```
 
-Selection modifiers:
+Named notes use 12-EDO by default. The same 12-EDO grid can also be addressed numerically:
 
 ```text
-PITCH NOTES [C3 G3 Bb3] with random
-PITCH NOTES [C3 G3 Bb3] with walk
-PITCH NOTES [C3 G3 Bb3] with shuffle
-PITCH NOTES [C3 G3 Bb3] with reverse
+pitch notes [n1@3 n5@3 n8@3]
 ```
 
-Scales are written as:
+`nN@O` means EDO step `N` (one-based) in octave `O`; therefore `n1@3` is the first step of octave 3. A different supported equal division can be selected with an additional `with edoN` modifier:
 
 ```text
-PITCH SCALE C minor
+pitch notes [n1@3 n5@3 n8@3] with edo15
+pitch notes [n1@3 n7@3 n13@3] with edo19
+pitch notes [n1@3 n9@3 n17@3] with edo24
 ```
 
-The root note is normalized automatically to uppercase. Supported scale modes include the diatonic modes plus major and minor-pentatonic scales:
+Supported divisions are `edo12`, `edo15`, `edo19`, `edo22`, and `edo24`. Named notes and `nN@O` notation cannot be mixed in the same list. For EDO values other than 12, `nN@O` notation is required. Other note modifiers remain available:
 
 ```text
-PITCH SCALE C major-pentatonic
-PITCH SCALE A minor-pentatonic
+pitch notes [n1@3 n5@3 n8@3] with edo15, random
+pitch notes [C3 G3 Bb3] with walk
 ```
 
-Pentatonic scales use the same range, selection, sequencing, `SET`, and `SEQ life` machinery as the other scales. For example:
+Scales are resolved from the catalog in `docs/SCALES.md`:
 
 ```text
-SEQ sparks WITH VIEW:
-    MODEL life
-    SIZE 16
-    PITCH SCALE C minor-pentatonic WITH RANGE C2 C5
-    EVOLVE EVERY 8 beat
+pitch scale C minor
+pitch scale C edo19_four_out_of_19
+pitch scale C edo24_triforce_15
 ```
 
-A range and sequencing mode can be combined:
+Each catalog entry carries its own EDO and degree list, so the EDO does not need to be declared separately. The root is an anchor frequency; scale degrees are generated from that root using the selected EDO.
+
+12-EDO scales accept either conventional note-name ranges or numeric scale-degree ranges:
 
 ```text
-PITCH SCALE C minor with range C2 C5, walk
+pitch scale C minor with range C2 C5
+pitch scale C minor with range n1@2 n1@5
 ```
+
+For non-12-EDO scales, ranges must use `nN@O`. In a scale range, `N` is the one-based degree of that scale (not the raw EDO step):
+
+```text
+pitch scale C edo24_triforce_15 with range n1@3 n15@4
+pitch scale C edo19_four_out_of_19 with range n1@3 n4@5
+```
+
+Selection modifiers remain composable with ranges:
+
+```text
+pitch scale C minor with range C2 C5, walk
+pitch scale C edo24_triforce_15 with range n1@3 n15@4, random
+```
+
+All pitch-pool consumers (`SEQ` Life, Constellation, Snake, composite `tune ... pitch`, and normal VOICE/FX pitch readers) receive the resulting frequencies and therefore do not need EDO-specific logic.
 
 ## every
 
@@ -2236,7 +2252,17 @@ Changing a slider updates the active composite DSP immediately and rewrites only
 USE visual, midi
 ```
 
-The currently reserved capability names are `visual`, `midi`, `audioin`, and `osc`. In the 0.2.x runtime they establish the capability lifecycle and restart contract; individual optional backends can be attached to that lifecycle as they are implemented.
+The currently reserved capability names are `visual`, `midi`, `audioin`, and `osc`. `USE` can also set the global equal-temperament reference tuning by supplying an A4 frequency with the `hz` suffix:
+
+```text
+USE 432hz
+USE 423hz, visual
+USE visual, midi, 442hz
+```
+
+The default is `A4 = 440 Hz`. Tuning accepts `400hz..480hz`. Symbolic note material (`notes`, `scale`, note matrices, `tune ... pitch`, and other note-to-frequency conversions) is derived from this reference. Explicit `freqs [...]` values remain absolute and are not retuned.
+
+In the 0.2.x runtime the capability names establish the capability lifecycle and restart contract; individual optional backends can be attached to that lifecycle as they are implemented.
 
 `USE` is structural rather than a live parameter. If its normalized capability set changes while code is running, Sonus does not hot-reconcile the edit. It asks for confirmation because the runtime must be stopped and rebuilt. Cancelling restores the previous `USE` directive in the editor. Accepting performs a runtime restart and rebuilds the program using the new capability set. Reordering the same capabilities does not require a restart.
 
