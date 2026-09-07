@@ -1,6 +1,25 @@
 import { AudioEngine, type AudioProgram, type SignalKind } from '../audio/engine';
 import { evaluateExpression, ExpressionError, type ScalarValue } from './expression';
 import { RuntimeScheduler, parseRuntimePatternSource } from './runtime/scheduler';
+import {
+  drumViewLaneSteps,
+  drumViewPattern,
+  parseLanguageDrumkitDirective,
+  parseLanguageDrumkitMetaDirective,
+  parseLanguageDrumSampleSlotDirective,
+  parseLanguageDrumSlotDirective,
+  type LanguageDrumSlotDefinition,
+} from './runtime/drumkit';
+import {
+  parseLanguageSampleSliceDirective,
+  parseLanguageSampleSlicesDirective,
+  type LanguageSampleSliceDefinition,
+  type LanguageSampleSliceItem,
+} from './runtime/sample';
+import {
+  resolveRouteLine,
+  type RouteDefinition,
+} from './runtime/routing';
 import type { CompositeDefinition, CompositeDomain } from './composite/types';
 import { COMPOSITE_DOMAIN_POLICY } from './composite/types';
 import {
@@ -368,12 +387,6 @@ interface FilterDefinition {
   parameters: Map<string, string>;
 }
 
-interface RouteDefinition {
-  source: string;
-  target: string;
-  amount: number;
-  kind: SignalKind;
-}
 
 interface ClockDefinition {
   disabled: boolean;
@@ -548,28 +561,6 @@ interface LanguageClockConfig {
   drift: number;
 }
 
-type LanguageDrumVoiceId = 'kick' | 'snare' | 'clap' | 'hihat' | 'openhat' | 'lowtom' | 'hightom';
-interface LanguageDrumSlotDefinition {
-  drumkit: string; alias: string; voice: LanguageDrumVoiceId | 'sample'; sampleAlias: string | null;
-  params: { level:number; pan:number; tune:number; decay:number; transient:number; snappy:number; color:number; noise:number; humanize:number };
-  amount:number; unit:'ms'|'sec'|'beat'; chance:number; drift:boolean; loose:boolean; clockSource:string;
-  euclidean: { hits:number; steps:number; rotate:number } | null;
-}
-
-interface LanguageSampleSliceItem { index: number; reverse: boolean; weight: number; }
-interface LanguageSampleSliceDefinition {
-  voice: string;
-  items: LanguageSampleSliceItem[];
-  mode: 'forward' | 'reverse' | 'random' | 'walk' | 'pendulum';
-  amount: number;
-  unit: 'ms' | 'sec' | 'beat';
-  chance: number;
-  drift: boolean;
-  loose: boolean;
-  clockSource: string;
-  line: number;
-}
-
 interface LanguageModMetadata {
   internalName: string;
   displayName: string;
@@ -717,71 +708,6 @@ interface LanguageInlineScalarDefinition {
   property: string;
   line: number;
   expression: string;
-}
-
-function buildEuclideanPattern(hits: number, steps: number, rotate: number): boolean[] {
-  const pattern = Array.from({ length: steps }, () => false);
-  if (hits <= 0 || steps <= 0) return pattern;
-  for (let hit = 0; hit < hits; hit += 1) {
-    const base = Math.floor(hit * steps / hits);
-    const index = ((base + rotate) % steps + steps) % steps;
-    pattern[index] = true;
-  }
-  return pattern;
-}
-
-function drumViewLaneSteps(
-  slot: LanguageDrumSlotDefinition,
-  sourceClockRate: number,
-  fallbackSteps: number,
-): number {
-  const pattern = parseRuntimePatternSource(slot.clockSource);
-  if (pattern) return pattern.spec.steps;
-  if (slot.unit !== 'beat') return Math.max(1, fallbackSteps);
-  const rate = Number.isFinite(sourceClockRate) && sourceClockRate > 0 ? sourceClockRate : 1;
-  // The view spans four master beats. One visual cell corresponds to one
-  // actual tick of the lane clock, so triplets naturally use 12 cells,
-  // sixteenths 16, eighths 8, and so on.
-  return Math.max(1, Math.ceil(4 * rate - 1e-9));
-}
-
-function drumViewPattern(
-  slot: LanguageDrumSlotDefinition,
-  laneSteps: number,
-  masterBeatMs: number,
-): boolean[] {
-  const result = Array.from({ length: laneSteps }, () => false);
-  if (slot.amount <= 0) return result;
-
-  const pattern = parseRuntimePatternSource(slot.clockSource);
-  if (pattern) {
-    for (const event of pattern.spec.events) {
-      const index = event.index - 1;
-      if (index >= 0 && index < result.length) result[index] = true;
-    }
-    return result;
-  }
-
-  if (slot.unit !== 'beat') {
-    const intervalMs = slot.unit === 'sec' ? slot.amount * 1000 : slot.amount;
-    if (!Number.isFinite(masterBeatMs) || masterBeatMs <= 0 || intervalMs <= 0) return result;
-    const intervalBeats = intervalMs / masterBeatMs;
-    for (let beat = 0; beat < 4 - 1e-9; beat += intervalBeats) {
-      const cell = Math.floor((beat / 4) * laneSteps);
-      if (cell >= 0 && cell < laneSteps) result[cell] = true;
-    }
-    return result;
-  }
-
-  const euclidean = slot.euclidean;
-  const euclideanPattern = euclidean ? buildEuclideanPattern(euclidean.hits, euclidean.steps, euclidean.rotate) : null;
-  for (let tick = 0; tick < laneSteps; tick += 1) {
-    const due = euclideanPattern
-      ? euclideanPattern[tick % euclideanPattern.length]
-      : tick % slot.amount === 0;
-    if (due) result[tick] = true;
-  }
-  return result;
 }
 
 export class SonusRuntime {
@@ -2527,136 +2453,38 @@ export class SonusRuntime {
         continue;
       }
 
-      const parsedRoute = parseRouteLine(line);
-      if (parsedRoute) {
-        const { sourceName, sourcePort, amountExpression, targetName, targetPort } = parsedRoute;
-        if (sourceName !== 'Clock'
-          && !clockSources.has(sourceName)
-          && !objectExists(sourceName, gains, voices)
-          && !swells.has(sourceName)
-          && !mists.has(sourceName)
-          && !filters.has(sourceName)
-          && !languageDrumkits.has(sourceName)) {
-          diagnostics.push({ line: lineNumber, message: `unknown source object: ${sourceName}` });
-          continue;
+      const resolvedRoute = resolveRouteLine(
+        line,
+        lineNumber,
+        {
+          sourceExists: (name) => name === 'Clock'
+            || clockSources.has(name)
+            || objectExists(name, gains, voices)
+            || swells.has(name)
+            || mists.has(name)
+            || filters.has(name)
+            || languageDrumkits.has(name),
+          isClockSource: (name) => name === 'Clock' || clockSources.has(name),
+          isVoice: (name) => voices.has(name),
+          isGain: (name) => gains.has(name),
+          voiceEngine: (name) => voices.get(name)?.engine,
+          isSwell: (name) => swells.has(name),
+          isMist: (name) => mists.has(name),
+          isFilter: (name) => filters.has(name),
+          isDrumkit: (name) => languageDrumkits.has(name),
+          hasEmbeddedFilter: (name) => voices.has(name)
+            && [...filters.values()].some((filter) => filter.ownerVoice === name),
+          compositeOutputs: (name) => (languageCompositeOutputs.get(name) ?? []).map((item) => item.name),
+        },
+        evalNumber,
+        new Set(routes.keys()),
+      );
+      if (resolvedRoute) {
+        diagnostics.push(...resolvedRoute.diagnostics);
+        for (const route of resolvedRoute.routes) {
+          routes.set(`${route.source}->${route.target}`, route);
         }
-        const compositeSource = voices.get(sourceName)?.engine === 'composite';
-        const standardSourcePorts = new Set(['out','aux','out_L','out_R','out1','out2','out3','out4','t1','t2','t3','x1','x2','x3','y','lp','hp','bp','np']);
-        if (compositeSource) {
-          const exposed = (languageCompositeOutputs.get(sourceName) ?? []).map((item) => item.name);
-          if (sourcePort !== 'out' && !exposed.includes(sourcePort)) {
-            diagnostics.push({ line: lineNumber, message: `composite '${sourceName}' does not expose output '${sourcePort}'` });
-            continue;
-          }
-        } else if (!standardSourcePorts.has(sourcePort)) {
-          diagnostics.push({ line: lineNumber, message: `unknown output '${sourcePort}' on ${sourceName}` });
-          continue;
-        }
-        if (sourcePort === 'aux' && (!voices.has(sourceName) || voices.get(sourceName)?.engine === 'composite')) {
-          diagnostics.push({ line: lineNumber, message: `aux output is only available on Voice objects: ${sourceName}` });
-          continue;
-        }
-        if (sourcePort === 'lp' || sourcePort === 'hp' || sourcePort === 'bp' || sourcePort === 'np') {
-          const standaloneFilter = filters.has(sourceName);
-          const embeddedFilter = voices.has(sourceName) && [...filters.values()].some((filter) => filter.ownerVoice === sourceName);
-          if (!standaloneFilter && !embeddedFilter) {
-            diagnostics.push({ line: lineNumber, message: `${sourcePort} output requires a FILTER: ${sourceName}` });
-            continue;
-          }
-        }
-        if (/^out[1-4]$/.test(sourcePort) && !swells.has(sourceName)) {
-          diagnostics.push({ line: lineNumber, message: `${sourcePort} is only available on Swell objects: ${sourceName}` });
-          continue;
-        }
-        if ((sourcePort === 'out_L' || sourcePort === 'out_R')
-          && !mists.has(sourceName)
-          && !languageDrumkits.has(sourceName)
-          && voices.get(sourceName)?.engine !== 'sample') {
-          diagnostics.push({ line: lineNumber, message: `${sourcePort} is only available on stereo objects: ${sourceName}` });
-          continue;
-        }
-        if (targetPort === 'trig') {
-          if (!voices.has(targetName) && !swells.has(targetName) && !mists.has(targetName)) { diagnostics.push({ line: lineNumber, message: `trigger input is only available on Voice, Swell or Mist objects: ${targetName}` }); continue; }
-        } else if (targetPort === 'clock') {
-          if (!swells.has(targetName)) { diagnostics.push({ line: lineNumber, message: `clock input is only available on Swell objects: ${targetName}` }); continue; }
-        } else if (targetPort === 'v_oct') {
-          if (!voices.has(targetName) && !swells.has(targetName)) { diagnostics.push({ line: lineNumber, message: `v_oct input is only available on Voice or Swell objects: ${targetName}` }); continue; }
-        } else if (targetPort === 'harmo' || targetPort === 'timbre' || targetPort === 'morph') {
-          if (!voices.has(targetName)) { diagnostics.push({ line: lineNumber, message: `${targetPort} input is only available on Voice objects: ${targetName}` }); continue; }
-        } else if (targetPort === 'out_L' || targetPort === 'out_R') {
-          if (targetName !== 'Audio') {
-            diagnostics.push({ line: lineNumber, message: `${targetPort} is only available on Audio for now: ${targetName}` });
-            continue;
-          }
-        } else if (targetPort === 'inL' || targetPort === 'inR') {
-          if (!mists.has(targetName)) { diagnostics.push({ line: lineNumber, message: `${targetPort} is only available on Mist objects: ${targetName}` }); continue; }
-        } else if (targetPort === 'in' && mists.has(targetName)) {
-          // Mono convenience input feeding both Mist channels.
-        } else if (targetPort === 'in' && filters.has(targetName)) {
-          // Mono FILTER input.
-        } else if (targetPort === 'in' && voices.get(targetName)?.engine === 'resonator') {
-          // Rings/Resonator has one mono external excitation input.
-        } else if ((targetPort === 'in' || targetPort === 'in2') && voices.get(targetName)?.engine === 'matter') {
-          // Elements/Matter exposes its two original mono external excitation inputs.
-        } else if (!(targetName === 'Audio' && targetPort === 'out') && !gains.has(targetName)) {
-          diagnostics.push({ line: lineNumber, message: `unknown or non-input object: ${targetName}` });
-          continue;
-        }
-
-        const amount = amountExpression === null ? 100 : evalNumber(amountExpression, lineNumber, 'route amount');
-        if (amount === undefined) continue;
-        const error = routeAmountError(amount);
-        if (error) {
-          diagnostics.push({ line: lineNumber, message: error });
-          continue;
-        }
-
-        const kind: SignalKind = sourceName === 'Clock' || clockSources.has(sourceName)
-          ? 'trigger'
-          : /^t[1-3]$/.test(sourcePort)
-            ? 'gate'
-            : 'signal';
-
-        const addRoute = (source: string, target: string): void => {
-          const key = `${source}->${target}`;
-          if (routes.has(key)) {
-            diagnostics.push({ line: lineNumber, message: `duplicate audio route: ${source} -> ${target}` });
-            return;
-          }
-          routes.set(key, { source, target, amount, kind });
-        };
-
-        const sourceIsStereoShorthand =
-          (mists.has(sourceName) || languageDrumkits.has(sourceName) || voices.get(sourceName)?.engine === 'sample')
-          && sourcePort === 'out';
-        const targetIsAudioStereo = targetName === 'Audio' && targetPort === 'out';
-
-        if (targetIsAudioStereo) {
-          if (sourceIsStereoShorthand) {
-            addRoute(`${sourceName}.out_L`, 'Audio.out_L');
-            addRoute(`${sourceName}.out_R`, 'Audio.out_R');
-            results.push({ message: `${sourceName}.out stereo -> Audio.out stereo @ ${formatNumber(amount)}%` });
-          } else {
-            const source = `${sourceName}.${sourcePort}`;
-            // Mono -> stereo duplicates to both channels.
-            addRoute(source, 'Audio.out_L');
-            addRoute(source, 'Audio.out_R');
-            results.push({ message: `${source} -> Audio.out stereo @ ${formatNumber(amount)}%` });
-          }
-        } else {
-          if (sourceIsStereoShorthand) {
-            diagnostics.push({
-              line: lineNumber,
-              message: `${sourceName}.out is stereo; select ${sourceName}.out_L or ${sourceName}.out_R for a mono destination`,
-            });
-            continue;
-          }
-
-          const source = `${sourceName}.${sourcePort}`;
-          const target = `${targetName}.${targetPort}`;
-          addRoute(source, target);
-          results.push({ message: `${source} -> ${target} @ ${formatNumber(amount)}%` });
-        }
+        for (const message of resolvedRoute.messages) results.push({ message });
         continue;
       }
 
@@ -5928,37 +5756,6 @@ function parseLanguageGenerativeCycleDirective(
   };
 }
 
-function parseLanguageSampleSlicesDirective(line: string): { voice: string; count: number } | null {
-  const match = line.match(/^__sampleslices\("([A-Za-z_]\w*)",(\d+)\)$/);
-  if (!match) return null;
-  return { voice: match[1], count: Number(match[2]) };
-}
-
-function parseLanguageSampleSliceDirective(line: string): LanguageSampleSliceDefinition | null {
-  const match = line.match(/^__sampleslicedef\("([A-Za-z_]\w*)","((?:[^"\\]|\\.)*)","(forward|reverse|random|walk|pendulum)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([^"]+)",(\d+)\)$/);
-  if (!match) return null;
-  let raw: string;
-  try { raw = JSON.parse(`"${match[2]}"`) as string; } catch { return null; }
-  let items: LanguageSampleSliceItem[];
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return null;
-    items = parsed.map((item) => {
-      if (!item || typeof item !== 'object') throw new Error('invalid slice item');
-      const value = item as { index?: unknown; reverse?: unknown; weight?: unknown };
-      if (!Number.isInteger(value.index) || typeof value.reverse !== 'boolean' || !Number.isFinite(value.weight)) throw new Error('invalid slice item');
-      return { index: Number(value.index), reverse: value.reverse, weight: Number(value.weight) };
-    });
-  } catch { return null; }
-  return {
-    voice: match[1], items,
-    mode: match[3] as LanguageSampleSliceDefinition['mode'],
-    amount: Number(match[4]), unit: match[5] as LanguageSampleSliceDefinition['unit'],
-    chance: Number(match[6]), drift: match[7] === 'true', loose: match[8] === 'true',
-    clockSource: match[9], line: Number(match[10]),
-  };
-}
-
 function parseLanguageParameterCycleDirective(
   line: string,
   lineNumber: number,
@@ -6011,30 +5808,6 @@ function parseLanguageParameterDefaultDirective(
     expression,
     line: lineNumber,
   };
-}
-
-function parseLanguageDrumkitDirective(line: string): { name: string; disabled: boolean; viewSteps: number } | null {
-  const match = line.match(/^__drumkit\("([A-Za-z_]\w*)",(true|false),(\d+)\)$/);
-  return match ? { name: match[1], disabled: match[2] === 'true', viewSteps: Number(match[3]) } : null;
-}
-function parseLanguageDrumkitMetaDirective(line: string): { name:string; kit:string } | null {
-  const match = line.match(/^__drumkitmeta\("([A-Za-z_]\w*)","([A-Za-z_]\w*)"\)$/); return match ? { name:match[1], kit:match[2] } : null;
-}
-function parseLanguageDrumSlotDirective(line: string): LanguageDrumSlotDefinition | null {
-  const match = line.match(/^__drumslot\("([A-Za-z_]\w*)","([A-Za-z_]\w*)","(kick|snare|clap|hihat|openhat|lowtom|hightom)","((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([^"]+)",(\d+),(\d+),(\d+)\)$/);
-  if (!match) return null;
-  let encoded=''; try { encoded = JSON.parse(`"${match[4]}"`) as string; } catch { return null; }
-  let params: LanguageDrumSlotDefinition['params']; try { params = JSON.parse(encoded) as LanguageDrumSlotDefinition['params']; } catch { return null; }
-  const hits = Number(match[11]), steps = Number(match[12]), rotate = Number(match[13]);
-  return { drumkit:match[1], alias:match[2], voice:match[3] as LanguageDrumVoiceId, sampleAlias:null, params, amount:Number(match[5]), unit:match[6] as 'ms'|'sec'|'beat', chance:Number(match[7]), drift:match[8]==='true', loose:match[9]==='true', clockSource:match[10], euclidean: hits > 0 && steps > 0 ? { hits, steps, rotate } : null };
-}
-function parseLanguageDrumSampleSlotDirective(line: string): LanguageDrumSlotDefinition | null {
-  const match = line.match(/^__drumsampleslot\("([A-Za-z_]\w*)","([A-Za-z_]\w*)","([A-Za-z_]\w*)","((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([^"]+)",(\d+),(\d+),(\d+)\)$/);
-  if (!match) return null;
-  let encoded=''; try { encoded = JSON.parse(`"${match[4]}"`) as string; } catch { return null; }
-  let params: LanguageDrumSlotDefinition['params']; try { params = JSON.parse(encoded) as LanguageDrumSlotDefinition['params']; } catch { return null; }
-  const hits = Number(match[11]), steps = Number(match[12]), rotate = Number(match[13]);
-  return { drumkit:match[1], alias:match[2], voice:'sample', sampleAlias:match[3], params, amount:Number(match[5]), unit:match[6] as 'ms'|'sec'|'beat', chance:Number(match[7]), drift:match[8]==='true', loose:match[9]==='true', clockSource:match[10], euclidean: hits > 0 && steps > 0 ? { hits, steps, rotate } : null };
 }
 
 function parseLanguageObjectEveryDirective(
@@ -6244,48 +6017,6 @@ function parseChainedCalls(tail: string): ChainedCall[] | null {
   return calls;
 }
 
-interface ParsedRoute {
-  sourceName: string;
-  sourcePort: string;
-  amountExpression: string | null;
-  targetName: string;
-  targetPort: 'out' | 'out_L' | 'out_R' | 'in' | 'in2' | 'inL' | 'inR' | 'trig' | 'clock' | 'v_oct' | 'harmo' | 'timbre' | 'morph';
-}
-
-function parseRouteLine(line: string): ParsedRoute | null {
-  const arrow = line.indexOf('->');
-  if (arrow < 0 || line.indexOf('->', arrow + 2) >= 0) return null;
-
-  const left = line.slice(0, arrow).trim();
-  const right = line.slice(arrow + 2).trim();
-
-  const target = right.match(
-    /^([A-Za-z_]\w*)\.(out|out_L|out_R|inL|inR|in2|in|trig|clock|v_oct|harmo|timbre|morph)$/,
-  );
-  if (!target) return null;
-
-  const source = left.match(
-    /^([A-Za-z_]\w*)\.([A-Za-z_]\w*)(.*)$/,
-  );
-  if (!source) return null;
-
-  const suffix = source[3].trim();
-  let amountExpression: string | null = null;
-
-  if (suffix) {
-    if (!suffix.startsWith('(') || !suffix.endsWith(')')) return null;
-    amountExpression = suffix.slice(1, -1).trim();
-    if (!amountExpression) return null;
-  }
-
-  return {
-    sourceName: source[1],
-    sourcePort: source[2] as ParsedRoute['sourcePort'],
-    amountExpression,
-    targetName: target[1],
-    targetPort: target[2] as ParsedRoute['targetPort'],
-  };
-}
 
 function identifierReservationError(name: string): string | null {
   if (name.startsWith('__')) {
@@ -6831,11 +6562,6 @@ function gainLevelError(value: number): string | null {
     : null;
 }
 
-function routeAmountError(value: number): string | null {
-  return !Number.isFinite(value) || value < -100 || value > 100
-    ? 'route amount must be between -100 and 100'
-    : null;
-}
 
 function formatScalar(value: ScalarValue): string {
   if (typeof value === 'number') return formatNumber(value);
