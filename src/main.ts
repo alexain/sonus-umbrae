@@ -1,12 +1,21 @@
 import './style.css';
 import { AudioEngine, type AudioLatencyMode } from './audio/engine';
-import { SonusEvaluationError, SonusRuntime, type InlineViewState, type ParameterViewState, type SchemeModel, type SchemeNode } from './language/runtime';
+import { SonusEvaluationError, SonusRuntime, type InlineViewState, type SchemeModel, type SchemeNode } from './language/runtime';
 import { compileLanguageSource, LanguageError, parseProgramCapabilities, type ProgramCapability } from './language/language';
 import { parameterUpdatePolicy, type ParameterUpdatePolicy } from './language/parameter-policy';
 import { expandEditorSnippet } from './editor/snippets';
 import { AssetLibrary } from './editor/assets';
 import { updateSampleWaveformViews as renderSampleWaveformViews } from './ui/sample-waveform';
 import { drawSchemeConnections, layoutScheme } from './ui/scheme-layout';
+import {
+  MonitorPanels,
+  effectiveScopeRange,
+  isDicesSignal,
+  naturalScopeRange,
+  parseModuleViewScales,
+  scopeScaleLabel,
+  type ModuleViewScale,
+} from './ui/monitor-panels';
 import {
   buildConstellationPanel,
   buildDrumkitPanel,
@@ -556,15 +565,12 @@ let activeCapabilities = new Set<ProgramCapability>();
 let activeUseDirective: string | null = null;
 let pendingCapabilityRestart: { source: string; capabilities: Set<ProgramCapability>; tuningHz: number; directive: string | null } | null = null;
 
-const PANEL_STATE_KEY = 'sonus-umbrae.monitor-panels';
-const panelCollapsed = new Map<string, boolean>();
-const panelExplicitState = new Set<string>();
-let panelOrder: string[] = [];
-let draggedPanelId: string | null = null;
 let clockWasActive = false;
 let lastCaretTrailPosition: { left: number; top: number } | null = null;
+const monitorPanels = new MonitorPanels(viewStack, () => {
+  if (scopeFrame === 0) scopeFrame = requestAnimationFrame(drawScopes);
+});
 
-loadPanelState();
 loadAppConfig();
 audioEngine.setPreferredAudioConfiguration({
   sampleRate: appConfig.sampleRate === 0 ? null : appConfig.sampleRate,
@@ -1617,64 +1623,6 @@ function buildInlineSparkline(state: Extract<InlineViewState, { kind: 'scalar' }
   return svg;
 }
 
-type ModuleViewScale =
-  | { mode: 'default' }
-  | { mode: 'volts'; value: number }
-  | { mode: 'zoom'; value: number };
-
-function parseModuleViewScales(source: string): Map<string, ModuleViewScale> {
-  const result = new Map<string, ModuleViewScale>();
-  const scopes: Array<{ kind: 'voice' | 'fx' | 'other'; name: string; indentation: number }> = [];
-
-  for (const rawLine of source.split('\n')) {
-    const commentAt = commentStart(rawLine);
-    const code = commentAt < 0 ? rawLine : rawLine.slice(0, commentAt);
-    const trimmed = code.trim();
-    if (!trimmed) continue;
-    const indentation = code.length - code.trimStart().length;
-    while (scopes.length > 0 && indentation <= scopes[scopes.length - 1].indentation) scopes.pop();
-
-    const owner = trimmed.match(/^_?(VOICE|FX)\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+WITH\s+VIEW(?:\s+\d+(?:\.\d+)?\s*[VX])?)?\s*:/i);
-    if (owner) {
-      scopes.push({ kind: owner[1].toLowerCase() as 'voice' | 'fx', name: owner[2], indentation });
-      continue;
-    }
-
-    const mod = trimmed.match(/^MOD\s+([A-Za-z_][A-Za-z0-9_]*)\s+WITH\s+VIEW(?:\s+(\d+(?:\.\d+)?)\s*([VX]))?\s*:/i);
-    if (!mod) continue;
-    const ownerScope = [...scopes].reverse().find((scope) => scope.kind === 'voice' || scope.kind === 'fx');
-    const internalName = ownerScope ? `__mod_${ownerScope.name}_${mod[1]}` : mod[1];
-    if (mod[2] === undefined) result.set(internalName, { mode: 'default' });
-    else if (mod[3].toLowerCase() === 'v') result.set(internalName, { mode: 'volts', value: Number(mod[2]) });
-    else result.set(internalName, { mode: 'zoom', value: Number(mod[2]) });
-  }
-  return result;
-}
-
-function isDicesSignal(signal: string): boolean {
-  return /\.(?:x1|x2|x3|y)$/i.test(signal);
-}
-
-function naturalScopeRange(signals: readonly string[]): number {
-  return signals.some(isDicesSignal) ? 5 : 1;
-}
-
-function effectiveScopeRange(signals: readonly string[], scale: ModuleViewScale | undefined): number {
-  const natural = naturalScopeRange(signals);
-  if (!scale || scale.mode === 'default') return natural;
-  if (scale.mode === 'volts') return Math.max(0.0001, scale.value);
-  return Math.max(0.0001, natural / scale.value);
-}
-
-function scopeScaleLabel(signals: readonly string[], scale: ModuleViewScale | undefined): string {
-  const range = effectiveScopeRange(signals, scale);
-  if (signals.some(isDicesSignal) || scale?.mode === 'volts') {
-    return `±${Number.isInteger(range) ? range : Number(range.toFixed(2))}V`;
-  }
-  if (scale?.mode === 'zoom') return `${scale.value}X`;
-  return '';
-}
-
 function syncViews(): void {
   const signalViews = new Map(audioEngine.getViewSignals().map((view) => [view.signal, view.kind]));
   const explicitSignals = new Set(runtime.getExplicitSignalViews().map((view) => view.signal));
@@ -1689,21 +1637,21 @@ function syncViews(): void {
   const drumkitViews = runtime.getDrumkitViews();
   const scheme = runtime.getSchemeModel();
   const nodes = new Map(scheme.nodes.map((node) => [node.id, node]));
-  const moduleViewScales = parseModuleViewScales(sourceText());
+  const moduleViewScales = parseModuleViewScales(sourceText(), commentStart);
   const panels: HTMLElement[] = [];
 
-  if (appConfig.showVariables) panels.push(buildVariablesPanel(variables));
-  if (appConfig.showMetrics) panels.push(buildMetricsPanel(scheme, variables.length));
-  if (appConfig.showAssets) panels.push(assetLibrary.buildPanel(createMonitorCard));
-  for (const view of turingViews) panels.push(buildTuringPanel(view, createMonitorCard));
-  for (const view of lifeViews) panels.push(buildLifePanel(view, createMonitorCard));
-  for (const view of constellationViews) panels.push(buildConstellationPanel(view, createMonitorCard));
-  for (const view of snakeViews) panels.push(buildSnakePanel(view, createMonitorCard));
-  for (const view of logicViews) panels.push(buildLogicPanel(view, createMonitorCard));
-  for (const view of drumkitViews) panels.push(buildDrumkitPanel(view, createMonitorCard));
+  if (appConfig.showVariables) panels.push(monitorPanels.buildVariablesPanel(variables));
+  if (appConfig.showMetrics) panels.push(monitorPanels.buildMetricsPanel(scheme, variables.length, audioEngine.snapshot().sampleRate));
+  if (appConfig.showAssets) panels.push(assetLibrary.buildPanel((id, title, collapsed) => monitorPanels.createCard(id, title, collapsed)));
+  for (const view of turingViews) panels.push(buildTuringPanel(view, (id, title, collapsed) => monitorPanels.createCard(id, title, collapsed)));
+  for (const view of lifeViews) panels.push(buildLifePanel(view, (id, title, collapsed) => monitorPanels.createCard(id, title, collapsed)));
+  for (const view of constellationViews) panels.push(buildConstellationPanel(view, (id, title, collapsed) => monitorPanels.createCard(id, title, collapsed)));
+  for (const view of snakeViews) panels.push(buildSnakePanel(view, (id, title, collapsed) => monitorPanels.createCard(id, title, collapsed)));
+  for (const view of logicViews) panels.push(buildLogicPanel(view, (id, title, collapsed) => monitorPanels.createCard(id, title, collapsed)));
+  for (const view of drumkitViews) panels.push(buildDrumkitPanel(view, (id, title, collapsed) => monitorPanels.createCard(id, title, collapsed)));
 
   const audio = nodes.get('Audio');
-  panels.push(buildModuleMonitorPanel({
+  panels.push(monitorPanels.buildModulePanel({
     id: 'Audio',
     title: 'AUDIO OUT',
     parameters: audio?.parameters ?? [],
@@ -1718,10 +1666,10 @@ function syncViews(): void {
     const clock = nodes.get('Clock');
     const clockBpm = audioEngine.getClockStatus().bpm;
     const clockActive = clockBpm > 0;
-    if (clockActive && !clockWasActive && !panelExplicitState.has('Clock')) panelCollapsed.set('Clock', false);
-    if (!clockActive && !panelExplicitState.has('Clock')) panelCollapsed.set('Clock', true);
+    if (clockActive && !clockWasActive && !monitorPanels.hasExplicitState('Clock')) monitorPanels.setCollapsed('Clock', false);
+    if (!clockActive && !monitorPanels.hasExplicitState('Clock')) monitorPanels.setCollapsed('Clock', true);
     clockWasActive = clockActive;
-    panels.push(buildModuleMonitorPanel({
+    panels.push(monitorPanels.buildModulePanel({
       id: 'Clock',
       title: 'CLOCK',
       parameters: clock?.parameters ?? [],
@@ -1766,7 +1714,7 @@ function syncViews(): void {
     // creating or changing a module must not consume monitor space.
     if (signals.length === 0 && details.length === 0 && compositeSignals.length === 0 && !sampleView) continue;
 
-    panels.push(buildModuleMonitorPanel({
+    panels.push(monitorPanels.buildModulePanel({
       id: node.id,
       title: node.label,
       parameters: [],
@@ -1780,326 +1728,12 @@ function syncViews(): void {
   }
 
   viewStack.replaceChildren(...panels);
-  applySavedPanelOrder();
+  monitorPanels.applySavedOrder();
   liveScreen.classList.add('with-views');
   viewPanel.classList.remove('hidden');
 
   if (scopeFrame === 0) scopeFrame = requestAnimationFrame(drawScopes);
   requestAnimationFrame(positionBlockCaret);
-}
-
-
-function buildMetricsPanel(scheme: SchemeModel, variableCount: number): HTMLElement {
-  const card = createMonitorCard('Metrics', 'METRICS', false);
-  const body = card.querySelector<HTMLElement>('.monitor-body');
-  if (!body) return card;
-  const rows = document.createElement('div');
-  rows.className = 'variables-readout';
-  const activeNodes = scheme.nodes.filter((node) => node.id !== 'Audio' && node.id !== 'Clock').length;
-  const routes = scheme.connections.filter((connection) => connection.type !== 'view').length;
-  const values: Array<[string, string]> = [
-    ['OBJECTS', String(activeNodes)],
-    ['ROUTES', String(routes)],
-    ['VARIABLES', String(variableCount)],
-    ['SAMPLE RATE', audioEngine.snapshot().sampleRate ? `${Math.round(audioEngine.snapshot().sampleRate!)} HZ` : '--'],
-  ];
-  for (const [label, value] of values) {
-    const row = document.createElement('div');
-    row.className = 'variable-row';
-    const name = document.createElement('span');
-    name.className = 'variable-name';
-    name.textContent = label;
-    const readout = document.createElement('span');
-    readout.className = 'variable-value';
-    readout.textContent = value;
-    row.append(name, readout);
-    rows.append(row);
-  }
-  body.append(rows);
-  return card;
-}
-
-function buildVariablesPanel(variables: Array<{ name: string; value: string }>): HTMLElement {
-  const card = createMonitorCard('Variables', 'VARIABLES', false);
-  const body = card.querySelector<HTMLElement>('.monitor-body');
-  if (!body) return card;
-
-  const readout = document.createElement('div');
-  readout.className = 'variables-readout';
-  if (variables.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'monitor-empty';
-    empty.textContent = 'NO VARIABLES';
-    readout.append(empty);
-  } else {
-    for (const variable of variables) {
-      const row = document.createElement('div');
-      row.className = 'variable-row';
-      const name = document.createElement('span');
-      name.className = 'variable-name';
-      name.textContent = variable.name;
-      const value = document.createElement('span');
-      value.className = 'variable-value';
-      value.dataset.variableName = variable.name;
-      value.textContent = variable.value;
-      row.append(name, value);
-      readout.append(row);
-    }
-  }
-  body.append(readout);
-  return card;
-}
-
-function buildModuleMonitorPanel(options: {
-  id: string;
-  title: string;
-  parameters: Array<{ name: string; value: string; liveSignal?: string }>;
-  signals: Array<{ signal: string; kind: string; label: string }>;
-  compositeSignals?: string[];
-  stereoLegend?: boolean;
-  parameterDetails?: ParameterViewState[];
-  sampleView?: { owner?: string; sampleAlias?: string; sampleStart?: number; sampleEnd?: number; sampleSlices?: number };
-  viewScale?: ModuleViewScale;
-  defaultCollapsed: boolean;
-}): HTMLElement {
-  const card = createMonitorCard(options.id, options.title, options.defaultCollapsed);
-  const body = card.querySelector<HTMLElement>('.monitor-body');
-  if (!body) return card;
-
-
-  if (options.sampleView) {
-    const section = document.createElement('div');
-    section.className = 'monitor-signal monitor-sample';
-    const label = document.createElement('div');
-    label.className = 'monitor-section-label';
-    const alias = options.sampleView.sampleAlias ?? 'SAMPLE';
-    const start = options.sampleView.sampleStart ?? 0;
-    const end = options.sampleView.sampleEnd ?? 100;
-    label.textContent = `${alias} · ${start}%–${end}%`;
-
-    const canvas = document.createElement('canvas');
-    canvas.className = 'sample-waveform-canvas monitor-sample-waveform';
-    canvas.dataset.sampleAlias = options.sampleView.sampleAlias ?? '';
-    canvas.dataset.sampleOwner = options.sampleView.owner ?? options.id;
-    canvas.dataset.sampleStart = String(start);
-    canvas.dataset.sampleEnd = String(end);
-    canvas.dataset.sampleSlices = String(options.sampleView.sampleSlices ?? 0);
-    canvas.setAttribute('aria-label', `${alias} waveform`);
-    section.append(label, canvas);
-    body.append(section);
-  }
-
-  if ((options.compositeSignals?.length ?? 0) > 0) {
-    const section = document.createElement('div');
-    section.className = 'monitor-signal monitor-composite';
-    const label = document.createElement('div');
-    label.className = 'monitor-section-label';
-    const compositeIsDices = options.compositeSignals!.some(isDicesSignal);
-    const scaleLabel = scopeScaleLabel(options.compositeSignals!, options.viewScale);
-    const compositePortNames = options.compositeSignals!.map((signal) =>
-      signal.slice(signal.lastIndexOf('.') + 1).toUpperCase()
-    );
-    const isGenericMod = / : MOD(?:\s+[A-Z0-9_-]+)?$/i.test(options.title);
-    label.textContent = options.id === 'Audio'
-      ? 'STEREO OUT'
-      : (/: (?:MIST|FX)$/.test(options.title))
-        ? 'OUT L / R'
-        : compositeIsDices
-          ? `X1 / X2 / X3 / Y${scaleLabel ? ` · ${scaleLabel}` : ''}`
-          : isGenericMod
-            ? `${compositePortNames.join(' / ')}${scaleLabel ? ` · ${scaleLabel}` : ''}`
-            : options.compositeSignals!.length === 2
-              ? 'OUT / AUX'
-              : compositePortNames.join(' / ');
-
-    if (options.stereoLegend || (/: (?:MIST|FX)$/.test(options.title) && options.compositeSignals?.length === 2)) {
-      const legend = document.createElement('span');
-      legend.className = 'scope-stereo-legend';
-      legend.innerHTML = '<span class="scope-legend-l">● L</span><span class="scope-legend-r">● R</span>';
-      label.append(legend);
-    } else if (isGenericMod && (options.compositeSignals?.length ?? 0) > 1) {
-      const legend = document.createElement('span');
-      legend.className = 'scope-stereo-legend';
-      legend.innerHTML = compositePortNames.map((name, index) =>
-        `<span style="color:var(--scope-trace-${(index % 4) + 1})">● ${name}</span>`
-      ).join('');
-      label.append(legend);
-    }
-    const canvas = document.createElement('canvas');
-    canvas.className = 'scope-canvas view-signal composite-scope';
-    canvas.dataset.signals = options.compositeSignals!.join(',');
-    canvas.dataset.kind = 'multi-signal';
-    canvas.dataset.scopeRange = String(effectiveScopeRange(options.compositeSignals!, options.viewScale));
-    if (isGenericMod) {
-      canvas.dataset.modScope = 'true';
-      canvas.dataset.modName = options.id;
-    }
-    canvas.setAttribute('aria-label', `${options.title} multi-channel signal monitor`);
-    section.append(label, canvas);
-    body.append(section);
-  }
-
-  for (const signal of options.signals) {
-    const section = document.createElement('div');
-    section.className = 'monitor-signal';
-    const label = document.createElement('div');
-    label.className = 'monitor-section-label';
-    label.textContent = signal.label;
-    const canvas = document.createElement('canvas');
-    canvas.className = `scope-canvas view-${signal.kind}`;
-    canvas.dataset.signal = signal.signal;
-    canvas.dataset.kind = signal.kind;
-    canvas.dataset.scopeRange = String(effectiveScopeRange([signal.signal], options.viewScale));
-    canvas.setAttribute('aria-label', `${signal.signal} ${signal.kind} monitor`);
-    section.append(label, canvas);
-    body.append(section);
-  }
-
-  if (options.parameters.length > 0) {
-    const params = document.createElement('div');
-    params.className = 'monitor-parameters';
-    for (const parameter of options.parameters) {
-      const row = document.createElement('div');
-      row.className = 'monitor-parameter-row';
-      const name = document.createElement('span');
-      name.textContent = parameter.name;
-      const value = document.createElement('span');
-      value.textContent = parameter.value;
-      if (parameter.liveSignal) {
-        value.className = 'scheme-live-value';
-        value.dataset.liveSignal = parameter.liveSignal;
-      }
-      row.append(name, value);
-      params.append(row);
-    }
-    body.append(params);
-  }
-
-  for (const detail of options.parameterDetails ?? []) {
-    const detailBox = document.createElement('div');
-    detailBox.className = 'monitor-parameter-detail';
-    const label = document.createElement('div');
-    label.className = 'monitor-section-label';
-    label.textContent = detail.signal.split('.').at(-1)?.toUpperCase() ?? detail.label;
-    const value = document.createElement('div');
-    value.className = 'parameter-row';
-    value.innerHTML = `<span>VALUE</span><span>${detail.value}</span>`;
-    const base = document.createElement('div');
-    base.className = 'parameter-row parameter-base-row';
-    base.innerHTML = `<span>BASE</span><span>${detail.base}</span>`;
-    detailBox.append(label, value, base);
-    body.append(detailBox);
-  }
-
-  return card;
-}
-
-function createMonitorCard(id: string, titleText: string, defaultCollapsed: boolean): HTMLElement {
-  const card = document.createElement('section');
-  card.className = 'view-card monitor-card';
-  card.dataset.panelId = id;
-
-  const collapsed = panelCollapsed.get(id) ?? defaultCollapsed;
-  panelCollapsed.set(id, collapsed);
-  card.classList.toggle('collapsed', collapsed);
-
-  const header = document.createElement('div');
-  header.className = 'view-title monitor-title';
-  header.draggable = true;
-  header.title = 'Click to collapse; drag to reorder';
-
-  const disclosure = document.createElement('span');
-  disclosure.className = 'monitor-disclosure';
-  disclosure.textContent = collapsed ? '▸' : '▾';
-  const name = document.createElement('span');
-  name.className = 'monitor-title-text';
-  name.textContent = titleText;
-  header.append(disclosure, name);
-
-  const body = document.createElement('div');
-  body.className = 'monitor-body';
-
-  header.addEventListener('click', () => {
-    const next = !card.classList.contains('collapsed');
-    card.classList.toggle('collapsed', next);
-    disclosure.textContent = next ? '▸' : '▾';
-    panelCollapsed.set(id, next);
-    panelExplicitState.add(id);
-    savePanelState();
-    if (!next && scopeFrame === 0) scopeFrame = requestAnimationFrame(drawScopes);
-  });
-
-  header.addEventListener('dragstart', (event) => {
-    draggedPanelId = id;
-    card.classList.add('dragging');
-    event.dataTransfer?.setData('text/plain', id);
-    if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
-  });
-  header.addEventListener('dragend', () => {
-    draggedPanelId = null;
-    card.classList.remove('dragging');
-    savePanelOrderFromDom();
-  });
-
-  card.append(header, body);
-  return card;
-}
-
-viewStack.addEventListener('dragover', (event) => {
-  if (!draggedPanelId) return;
-  event.preventDefault();
-  const dragging = viewStack.querySelector<HTMLElement>(`[data-panel-id="${CSS.escape(draggedPanelId)}"]`);
-  if (!dragging) return;
-  const siblings = [...viewStack.querySelectorAll<HTMLElement>('.monitor-card:not(.dragging)')];
-  const next = siblings.find((card) => event.clientY < card.getBoundingClientRect().top + card.offsetHeight / 2);
-  if (next) viewStack.insertBefore(dragging, next); else viewStack.append(dragging);
-});
-
-viewStack.addEventListener('drop', (event) => {
-  if (!draggedPanelId) return;
-  event.preventDefault();
-  savePanelOrderFromDom();
-});
-
-function loadPanelState(): void {
-  try {
-    const raw = localStorage.getItem(PANEL_STATE_KEY);
-    if (!raw) return;
-    const state = JSON.parse(raw) as { collapsed?: Record<string, boolean>; order?: string[] };
-    for (const [id, collapsed] of Object.entries(state.collapsed ?? {})) {
-      panelCollapsed.set(id, Boolean(collapsed));
-      panelExplicitState.add(id);
-    }
-    panelOrder = Array.isArray(state.order) ? state.order.filter((id): id is string => typeof id === 'string') : [];
-  } catch {
-    // UI preferences are intentionally non-critical.
-  }
-}
-
-function savePanelState(): void {
-  try {
-    localStorage.setItem(PANEL_STATE_KEY, JSON.stringify({
-      collapsed: Object.fromEntries(panelCollapsed),
-      order: panelOrder,
-    }));
-  } catch {
-    // Ignore unavailable or disabled local storage.
-  }
-}
-
-function savePanelOrderFromDom(): void {
-  panelOrder = [...viewStack.querySelectorAll<HTMLElement>('.monitor-card')]
-    .map((card) => card.dataset.panelId)
-    .filter((id): id is string => Boolean(id));
-  savePanelState();
-}
-
-function applySavedPanelOrder(): void {
-  if (panelOrder.length === 0) return;
-  const rank = new Map(panelOrder.map((id, index) => [id, index]));
-  const cards = [...viewStack.querySelectorAll<HTMLElement>('.monitor-card')];
-  cards.sort((a, b) => (rank.get(a.dataset.panelId ?? '') ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.dataset.panelId ?? '') ?? Number.MAX_SAFE_INTEGER));
-  for (const card of cards) viewStack.append(card);
 }
 
 
@@ -2317,7 +1951,7 @@ function renderScheme(): void {
     return true;
   });
   const model: SchemeModel = { nodes, connections: rawModel.connections };
-  const moduleViewScales = parseModuleViewScales(sourceText());
+  const moduleViewScales = parseModuleViewScales(sourceText(), commentStart);
 
   schemeNodes.replaceChildren();
   schemeEdges.replaceChildren();
