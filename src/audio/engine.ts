@@ -112,6 +112,7 @@ export interface AudioProgram {
     diversity: number;
   }>;
   drumkits: Array<{ name: string }>;
+  samples: Array<{ name: string; alias: string; enabled: boolean; level: number; frequency: number; rootFrequency: number; start: number; end: number; loop: boolean; reverse: boolean; }>;
   mists: Array<{
     name: string;
     bypassed: boolean;
@@ -315,6 +316,7 @@ interface DicesVoice {
 
 interface DrumkitVoice { node: AudioWorkletNode; outputSplitter: ChannelSplitterNode; outputL: GainNode; outputR: GainNode; loadedSamples: Set<string> }
 interface DrumSample { alias: string; sampleRate: number; channels: readonly Float32Array[] }
+interface SampleVoiceRuntime { node: AudioWorkletNode; outputSplitter: ChannelSplitterNode; outputL: GainNode; outputR: GainNode; alias: string; level: number; frequency: number; rootFrequency: number; start: number; end: number; loop: boolean; reverse: boolean; progress: number; active: boolean; }
 
 interface MistVoice {
   bypassed: boolean;
@@ -473,6 +475,7 @@ export class AudioEngine {
   private dices = new Map<string, DicesVoice>();
   private drumkits = new Map<string, DrumkitVoice>();
   private drumSamples = new Map<string, DrumSample>();
+  private samples = new Map<string, SampleVoiceRuntime>();
   private mists = new Map<string, MistVoice>();
   private skies = new Map<string, SkyVoice>();
   private delays = new Map<string, DelayVoice>();
@@ -491,6 +494,7 @@ export class AudioEngine {
   private swellWasmBytes: ArrayBuffer | null = null;
   private dicesWasmBytes: ArrayBuffer | null = null;
   private drumkitWasmBytes: ArrayBuffer | null = null;
+  private sampleWasmBytes: ArrayBuffer | null = null;
   private mistWasmBytes: ArrayBuffer | null = null;
   private skyWasmBytes: ArrayBuffer | null = null;
   private delayWasmBytes: ArrayBuffer | null = null;
@@ -503,6 +507,7 @@ export class AudioEngine {
   private swellWorkletLoaded = false;
   private dicesWorkletLoaded = false;
   private drumkitWorkletLoaded = false;
+  private sampleWorkletLoaded = false;
   private mistWorkletLoaded = false;
   private skyWorkletLoaded = false;
   private delayWorkletLoaded = false;
@@ -524,7 +529,7 @@ export class AudioEngine {
           : 'suspended',
       sampleRate: this.context?.sampleRate ?? null,
       testFrequency: this.testOscillator?.frequency.value ?? null,
-      objectCount: this.basicVoices.size + this.composites.size + this.gains.size + this.macros.size + this.matters.size + this.resonators.size + this.swells.size + this.dices.size + this.drumkits.size + this.mists.size + this.skies.size + this.delays.size + this.filters.size + this.clocks.size,
+      objectCount: this.basicVoices.size + this.composites.size + this.gains.size + this.macros.size + this.matters.size + this.resonators.size + this.swells.size + this.dices.size + this.drumkits.size + this.samples.size + this.mists.size + this.skies.size + this.delays.size + this.filters.size + this.clocks.size,
       routeCount: this.routes.size,
     };
   }
@@ -546,6 +551,7 @@ export class AudioEngine {
     await this.ensureSwellRuntime();
     await this.ensureDicesRuntime();
     await this.ensureDrumkitRuntime();
+    await this.ensureSampleRuntime();
     await this.ensureMistRuntime();
     await this.ensureSkyRuntime();
     await this.ensureDelayRuntime();
@@ -641,6 +647,7 @@ export class AudioEngine {
         (program.swells.length > 0 && !this.swellWorkletLoaded) ||
         (program.dices.length > 0 && !this.dicesWorkletLoaded) ||
         (program.drumkits.length > 0 && !this.drumkitWorkletLoaded) ||
+        (program.samples.length > 0 && !this.sampleWorkletLoaded) ||
         (program.mists.length > 0 && !this.mistWorkletLoaded) ||
         (program.skies.length > 0 && !this.skyWorkletLoaded) ||
         (program.delays.length > 0 && !this.delayWorkletLoaded) ||
@@ -665,6 +672,7 @@ export class AudioEngine {
     const desiredSwells = new Map(program.swells.map((definition) => [definition.name, definition]));
     const desiredDices = new Map(program.dices.map((definition) => [definition.name, definition]));
     const desiredDrumkits = new Map(program.drumkits.map((definition) => [definition.name, definition]));
+    const desiredSamples = new Map(program.samples.map((definition) => [definition.name, definition]));
     const desiredMists = new Map(program.mists.map((definition) => [definition.name, definition]));
     const desiredSkies = new Map(program.skies.map((definition) => [definition.name, definition]));
     const desiredDelays = new Map(program.delays.map((definition) => [definition.name, definition]));
@@ -722,6 +730,7 @@ export class AudioEngine {
       if (!desiredDices.has(name)) this.removeDices(name);
     }
     for (const [name] of this.drumkits) { if (!desiredDrumkits.has(name)) this.removeDrumkit(name); }
+    for (const [name] of this.samples) { if (!desiredSamples.has(name)) this.removeSampleVoice(name); }
 
     for (const [name] of this.mists) {
       if (!desiredMists.has(name)) this.removeMist(name);
@@ -779,6 +788,7 @@ export class AudioEngine {
       this.updateDices(definition);
     }
     for (const definition of program.drumkits) this.createDrumkit(definition);
+    for (const definition of program.samples) { this.createSampleVoice(definition); this.updateSampleVoice(definition); }
     this.setModTransport(true);
 
 
@@ -1468,6 +1478,37 @@ export class AudioEngine {
     }, channels.map((channel) => channel.buffer));
   }
 
+  private createSampleVoice(definition: AudioProgram['samples'][number]): void {
+    if (this.samples.has(definition.name)) return;
+    if (!this.sampleWorkletLoaded || !this.sampleWasmBytes) throw new Error('Sample DSP is not ready; run :start after npm run dsp:build');
+    const sample = this.drumSamples.get(definition.alias);
+    if (!sample) throw new Error(`unknown audio sample: ${definition.alias}`);
+    const context = this.ensureContext();
+    const node = new AudioWorkletNode(context, 'sonus-sample', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2], channelCount: 2, channelCountMode: 'explicit', channelInterpretation: 'discrete', processorOptions: { wasmBytes: this.sampleWasmBytes.slice(0) } });
+    const splitter = context.createChannelSplitter(2);
+    const outputL = context.createGain(); const outputR = context.createGain();
+    node.connect(splitter); splitter.connect(outputL, 0); splitter.connect(outputR, 1);
+    const runtime: SampleVoiceRuntime = { node, outputSplitter: splitter, outputL, outputR, alias: definition.alias, level: definition.level, frequency: definition.frequency, rootFrequency: definition.rootFrequency, start: definition.start, end: definition.end, loop: definition.loop, reverse: definition.reverse, progress: definition.start / 100, active: false };
+    node.port.onmessage = (event) => { const m = event.data; if (m?.type === 'progress') { runtime.progress = Number(m.position) || 0; runtime.active = Boolean(m.active); } };
+    this.samples.set(definition.name, runtime);
+    this.sendSampleVoicePcm(node, sample);
+  }
+
+  private updateSampleVoice(definition: AudioProgram['samples'][number]): void {
+    const voice = this.samples.get(definition.name); if (!voice) return;
+    if (voice.alias !== definition.alias) { const sample = this.drumSamples.get(definition.alias); if (!sample) throw new Error(`unknown audio sample: ${definition.alias}`); voice.alias = definition.alias; this.sendSampleVoicePcm(voice.node, sample); }
+    voice.level = definition.level; voice.frequency = definition.frequency; voice.rootFrequency = definition.rootFrequency; voice.start = definition.start; voice.end = definition.end; voice.loop = definition.loop; voice.reverse = definition.reverse;
+    voice.outputL.gain.value = definition.enabled ? 1 : 0; voice.outputR.gain.value = definition.enabled ? 1 : 0;
+    voice.node.port.postMessage({ type: 'params', start: definition.start / 100, end: definition.end / 100, loop: definition.loop, reverse: definition.reverse, level: definition.level / 100, frequency: definition.frequency, rootFrequency: definition.rootFrequency });
+  }
+
+  private sendSampleVoicePcm(node: AudioWorkletNode, sample: DrumSample): void {
+    const channels = sample.channels.map((channel) => channel.slice());
+    node.port.postMessage({ type: 'sample', alias: sample.alias, sampleRate: sample.sampleRate, channels }, channels.map((channel) => channel.buffer));
+  }
+
+  getSampleVoiceProgress(name: string): { position: number; active: boolean } | null { const voice = this.samples.get(name); return voice ? { position: voice.progress, active: voice.active } : null; }
+
   private createMist(definition: AudioProgram['mists'][number]): void {
     if (this.mists.has(definition.name)) return;
     if (!this.mistWorkletLoaded || !this.mistWasmBytes) {
@@ -1884,6 +1925,10 @@ export class AudioEngine {
       const drumkit=this.drumkits.get(drumkitOutput[1])!;
       return { node: drumkitOutput[2] === 'out_R' ? drumkit.outputR : drumkit.outputL, output:0 };
     }
+    if (drumkitOutput && this.samples.has(drumkitOutput[1])) {
+      const sample=this.samples.get(drumkitOutput[1])!;
+      return { node: drumkitOutput[2] === 'out_R' ? sample.outputR : sample.outputL, output:0 };
+    }
 
     const mistOutput = signal.match(/^([A-Za-z_]\w*)\.(out_L|out_R)$/);
     if (mistOutput) {
@@ -1929,6 +1974,8 @@ export class AudioEngine {
     }
     const voice = this.macros.get(name);
     if (voice) return { node: port === 'aux' ? voice.auxGain : voice.outGain, output: 0 };
+    const sampleVoice = this.samples.get(name);
+    if (sampleVoice) { if (port === 'aux') throw new Error(`aux output is not available on sample VOICE ${name}`); return { node: sampleVoice.outputL, output: 0 }; }
     const matter = this.matters.get(name);
     if (matter) return { node: port === 'aux' ? matter.auxGain : matter.mainGain, output: 0 };
     const resonator = this.resonators.get(name);
@@ -2159,6 +2206,8 @@ export class AudioEngine {
   }
 
   triggerVoice(name: string): void {
+    const sampleVoice = this.samples.get(name);
+    if (sampleVoice) { sampleVoice.node.port.postMessage({ type: 'trigger' }); return; }
     const resonator = this.resonators.get(name);
     if (resonator) {
       resonator.node.port.postMessage({ type: 'strum' });
@@ -2176,6 +2225,8 @@ export class AudioEngine {
 
   setVoiceLevel(name: string, level: number): void {
     if (!Number.isFinite(level) || level < 0 || level > 100) throw new RangeError('VOICE level must be 0..100');
+    const sampleVoice = this.samples.get(name);
+    if (sampleVoice) { sampleVoice.level = level; sampleVoice.node.port.postMessage({ type: 'params', level: level / 100 }); return; }
     const resonator = this.resonators.get(name);
     if (resonator) { resonator.level = level; this.applyVoiceVcaGain(name, 'out'); this.applyVoiceVcaGain(name, 'aux'); return; }
     const matter = this.matters.get(name);
@@ -2227,6 +2278,15 @@ export class AudioEngine {
     parameter: 'freq' | 'model' | 'harmo' | 'timbre' | 'morph' | 'width' | 'geometry' | 'structure' | 'brightness' | 'damping' | 'position' | 'space' | 'bow' | 'bowTimbre' | 'blow' | 'blowTimbre' | 'strike' | 'strikeTimbre',
     value: number,
   ): void {
+    const sampleVoice = this.samples.get(name);
+    if (sampleVoice) {
+      if (parameter === 'freq') {
+        sampleVoice.frequency = value;
+        sampleVoice.node.port.postMessage({ type: 'params', frequency: value });
+      }
+      return;
+    }
+
     const resonator = this.resonators.get(name);
     if (resonator) {
       if (parameter === 'freq') {
@@ -2722,6 +2782,7 @@ export class AudioEngine {
       ...this.matters.keys(),
       ...this.resonators.keys(),
       ...this.swells.keys(),
+      ...this.samples.keys(),
       ...[...this.filters.entries()]
         .filter(([, filter]) => Boolean(filter.ownerVoice))
         .map(([name]) => name),
@@ -2729,6 +2790,14 @@ export class AudioEngine {
     for (const [key, route] of [...this.routes.entries()]) {
       const sourceName = route.source.match(/^([A-Za-z_]\w*)\./)?.[1];
       if (sourceName && musicalSources.has(sourceName)) this.removeRoute(key);
+    }
+
+    // A looping sample keeps rendering inside its AudioWorklet even after its
+    // public routes are disconnected. Stop the DSP voice itself so transport
+    // stop is deterministic and a later route rebuild cannot expose an old loop.
+    for (const sample of this.samples.values()) {
+      sample.node.port.postMessage({ type: 'stop' });
+      sample.active = false;
     }
 
     // Composite graphs keep rendering internally even when all declarative
@@ -2838,6 +2907,13 @@ export class AudioEngine {
     const drumkit=this.drumkits.get(name); if(!drumkit) return;
     for(const node of [drumkit.outputSplitter,drumkit.outputL,drumkit.outputR]) { try { node.disconnect(); } catch {} }
     try { drumkit.node.disconnect(); } catch {} drumkit.node.port.close(); this.drumkits.delete(name);
+  }
+
+  private removeSampleVoice(name: string): void {
+    const voice = this.samples.get(name); if (!voice) return;
+    this.removeView(`${name}.out`);
+    for (const node of [voice.outputSplitter, voice.outputL, voice.outputR]) { try { node.disconnect(); } catch {} }
+    try { voice.node.disconnect(); } catch {} voice.node.port.close(); this.samples.delete(name);
   }
 
   private removeDices(name: string): void {
@@ -3016,6 +3092,16 @@ export class AudioEngine {
     this.drumkitWasmBytes=await response.arrayBuffer(); await context.audioWorklet.addModule(publicAssetUrl('/worklets/drumkit-processor.js')); this.drumkitWorkletLoaded=true;
   }
 
+  private async ensureSampleRuntime(): Promise<void> {
+    if (this.sampleWorkletLoaded && this.sampleWasmBytes) return;
+    const context = this.ensureContext();
+    const response = await fetch(publicAssetUrl('/dsp/sample.wasm'));
+    if (!response.ok) throw new Error('Sample DSP missing. Run npm run dsp:build.');
+    this.sampleWasmBytes = await response.arrayBuffer();
+    await context.audioWorklet.addModule(publicAssetUrl('/worklets/sample-processor.js'));
+    this.sampleWorkletLoaded = true;
+  }
+
   private async ensureMistRuntime(): Promise<void> {
     if (this.mistWorkletLoaded && this.mistWasmBytes) return;
     const context = this.ensureContext();
@@ -3142,6 +3228,7 @@ export class AudioEngine {
     for (const name of [...this.swells.keys()]) this.removeSwell(name);
     for (const name of [...this.dices.keys()]) this.removeDices(name);
     for (const name of [...this.drumkits.keys()]) this.removeDrumkit(name);
+    for (const name of [...this.samples.keys()]) this.removeSampleVoice(name);
     for (const name of [...this.resonators.keys()]) this.removeResonator(name);
     for (const name of [...this.matters.keys()]) this.removeMatter(name);
     for (const name of [...this.macros.keys()]) this.removeMacro(name);
@@ -3165,6 +3252,7 @@ export class AudioEngine {
     this.macroWasmBytes = null;
     this.daisyOscillatorsWasmBytes = null;
     this.compositeWasmBytes = null;
+    this.sampleWasmBytes = null;
     this.macroWorkletLoaded = false;
     this.daisyOscillatorsWorkletLoaded = false;
     this.compositeWorkletLoaded = false;
@@ -3172,6 +3260,7 @@ export class AudioEngine {
     this.resonatorWorkletLoaded = false;
     this.swellWorkletLoaded = false;
     this.drumkitWorkletLoaded = false;
+    this.sampleWorkletLoaded = false;
     this.mistWorkletLoaded = false;
     this.skyWorkletLoaded = false;
     this.daisyFiltersWorkletLoaded = false;

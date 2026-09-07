@@ -403,6 +403,7 @@ const SOUND_ENGINE_REGISTRY: Record<string, SoundEngineSchema> = {
   'ramp': { parameters: {}, options: new Set() },
   'square': { parameters: SQUARE_PARAMETERS, options: new Set() },
   'composite': { parameters: {}, options: new Set() },
+  'sample': { parameters: {}, options: new Set() },
 
   'macro.analog': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
   'macro.waves': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
@@ -1278,6 +1279,7 @@ function compileVoiceProperty(
   sourceDefinitions: Map<string, SourceDefinition>,
   modSources: Map<string, ModSourceDefinition>,
   live = false,
+  hasSampleAsset?: (alias: string) => boolean,
 ): string {
   let key = property.toLowerCase();
   let value = rawValue.trim();
@@ -1335,8 +1337,7 @@ function compileVoiceProperty(
     return `__voicevca(${JSON.stringify(voice.name)},${JSON.stringify(target)},${envelopeLiteral(envelope)},${line});`;
   }
 
-  if (key === 'tune') {
-    if (voice.soundId !== 'composite') throw new LanguageError([{ line, message: 'tune is available only for sound composite' }]);
+  if (key === 'tune' && voice.soundId === 'composite') {
     return compileCompositeTuneDirective(voice.name, value, line, sourceDefinitions);
   }
 
@@ -1368,6 +1369,45 @@ function compileVoiceProperty(
   if (key === 'output') {
     if (voice.soundId !== 'composite') throw new LanguageError([{ line, message: 'output is available only for sound composite' }]);
     return compileCompositeOutputDirective(voice.name, value, line);
+  }
+
+  if (key === 'sample') {
+    if (voice.soundId !== 'sample') throw new LanguageError([{ line, message: 'sample is available only for sound sample' }]);
+    const match = value.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+root\s+([A-Ga-g][#b]?-?\d+))?$/i);
+    if (!match) throw new LanguageError([{ line, message: 'sample expects <asset> [with root <note>]' }]);
+    const alias = match[1];
+    if (hasSampleAsset && !hasSampleAsset(alias)) throw new LanguageError([{ line, message: `unknown sample asset '${alias}'` }]);
+    const rootNote = match[2] ?? 'C3';
+    const rootMidi = midiFromNote(rootNote);
+    if (rootMidi === null) throw new LanguageError([{ line, message: `invalid sample root note '${rootNote}'` }]);
+    const rootFrequency = midiToFrequency(rootMidi);
+    return `${voice.name}.sample(${JSON.stringify(alias)}); ${voice.name}.sampleRoot(${rootFrequency});`;
+  }
+
+  if (key === 'region') {
+    if (voice.soundId !== 'sample') throw new LanguageError([{ line, message: 'region is available only for sound sample' }]);
+    const split = value.match(/^(?:(.*?)\s+)?with\s+(.+)$/i);
+    const rangeText = split ? (split[1] ?? '').trim() : value.trim();
+    const range = rangeText ? rangeText.split(/\s+/) : [];
+    if (range.length > 2 || range.some((item) => !/^\d+(?:\.\d+)?$/.test(item))) {
+      throw new LanguageError([{ line, message: 'region expects [<start> [<end>]] [with loop][, reverse]' }]);
+    }
+    const start = range.length >= 1 ? numberValue(range[0], line, 'region start') : 0;
+    const end = range.length >= 2 ? numberValue(range[1], line, 'region end') : 100;
+    if (start < 0 || start > 100 || end < 0 || end > 100) {
+      throw new LanguageError([{ line, message: 'region start/end expect 0..100' }]);
+    }
+    if (end < start) throw new LanguageError([{ line, message: 'region end must be greater than or equal to start' }]);
+
+    let loop = false;
+    let reverse = false;
+    const modifiers = (split?.[2] ?? '').split(',').map((item) => item.trim().toLowerCase()).filter(Boolean);
+    for (const modifier of modifiers) {
+      if (modifier === 'loop') loop = true;
+      else if (modifier === 'reverse') reverse = true;
+      else throw new LanguageError([{ line, message: `region does not support modifier '${modifier}'` }]);
+    }
+    return `${voice.name}.sampleRegion(${start},${end},${loop},${reverse});`;
   }
 
   const soundParameter = voice.soundId ? SOUND_ENGINE_REGISTRY[voice.soundId]?.parameters[key] : undefined;
@@ -3493,9 +3533,14 @@ function compileOut(
     }
 
     if (kind === 'voice') {
-      if (endpoint.channel) throw new LanguageError([{ line, message: 'VOICE outputs are mono ports; .L/.R are not valid' }]);
-      if (endpoint.port === 'in' || endpoint.port === 'in2') throw new LanguageError([{ line, message: `VOICE '${endpoint.name}' does not expose an audio input` }]);
       const sound = voiceSoundIds.get(endpoint.name) ?? '';
+      if (sound !== 'sample' && endpoint.channel) throw new LanguageError([{ line, message: 'VOICE outputs are mono ports; .L/.R are not valid' }]);
+      if (endpoint.port === 'in' || endpoint.port === 'in2') throw new LanguageError([{ line, message: `VOICE '${endpoint.name}' does not expose an audio input` }]);
+      if (sound === 'sample') {
+        if (endpoint.port && endpoint.port !== 'out') throw new LanguageError([{ line, message: `sample VOICE '${endpoint.name}' exposes only OUT` }]);
+        if (endpoint.channel) return { stereo: false, mono: `${endpoint.name}.${endpoint.channel === 'R' ? 'out_R' : 'out_L'}` };
+        return { stereo: true, left: `${endpoint.name}.out_L`, right: `${endpoint.name}.out_R`, primary: `${endpoint.name}.out_L` };
+      }
       if (sound === 'composite') return { stereo: false, mono: `${endpoint.name}.${endpoint.port ?? 'out'}` };
       if (endpoint.port && !['out', 'aux'].includes(endpoint.port)) throw new LanguageError([{ line, message: `VOICE '${endpoint.name}' output must be .out or .aux` }]);
       return { stereo: false, mono: `${endpoint.name}.${endpoint.port ?? 'out'}` };
@@ -3791,7 +3836,7 @@ function validateLiveVoiceProperty(voice: VoiceState, property: string, line: nu
   const soundParameter = voice.soundId ? SOUND_ENGINE_REGISTRY[voice.soundId]?.parameters[key] : undefined;
   if (soundParameter || key === 'level' || key === 'bow' || key === 'blow' || key === 'strike' || key === 'pitch') return;
   if (voice.soundId === 'composite' && (key === 'tune' || key === 'mix' || key === 'output')) return;
-  throw new LanguageError([{ line, message: `LIVE is available only for 0..100 VOICE parameters or PITCH; '${property}' is not eligible` }]);
+  throw new LanguageError([{ line, message: `LIVE is available only for eligible VOICE parameters or PITCH; '${property}' is not eligible` }]);
 }
 
 function validateLiveFxProperty(fx: FxState, property: string, line: number): void {
@@ -4546,7 +4591,7 @@ export function compileLanguageSource(source: string, options: { hasSampleAsset?
             throw new LanguageError([{ line: lineNumber, message: 'LIVE TUNE exposes sliders only for WITH octave/detune/ratio; TUNE PITCH remains a structured pitch expression' }]);
           }
         }
-        output[index] = compileVoiceProperty(currentVoice, statement.property, statement.value, lineNumber, scopedKinds(`voice:${currentVoice.name}`), scopedDefinitions(`voice:${currentVoice.name}`), modSources, statement.live);
+        output[index] = compileVoiceProperty(currentVoice, statement.property, statement.value, lineNumber, scopedKinds(`voice:${currentVoice.name}`), scopedDefinitions(`voice:${currentVoice.name}`), modSources, statement.live, options.hasSampleAsset);
         if (statement.property.toLowerCase() === 'sound') {
           currentVoice.hasSound = true;
           if (currentVoice.soundId) voiceSoundIds.set(currentVoice.name, currentVoice.soundId);

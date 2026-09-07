@@ -2750,3 +2750,32 @@ MAIN LEVEL 70
 ```
 
 `MAIN LEVEL` is part of the musical patch and travels with the source file. `OUTPUT LEVEL` compensates for the playback environment and the desired application-wide hardware level.
+
+### Sample VOICE (experimental)
+
+Imported audio assets can be used as a dedicated `VOICE` source. The sample engine is separate from DRUMKIT and runs in `sample.wasm` through its own AudioWorklet.
+
+```text
+VOICE guitar with view:
+    sound sample
+    sample guitar with root F3
+
+    region 20 60 with loop, reverse
+
+    pitch notes [F3 A3 C4 F4] every 1 beat
+```
+
+`sample <alias>` uses an imported Assets alias. The sample root defaults to `C3`; use `sample <alias> with root <note>` when the source is tuned to a different note. `PITCH` remains the normal VOICE pitch system and changes playback speed by the ratio between target frequency and root frequency.
+
+`region` is the only sample-playback parameter in this first version. Percentages are normalized over the source:
+
+```text
+region 20 60
+region 20
+region 0 60
+region with reverse
+region with loop
+region 20 60 with loop, reverse
+```
+
+One value means start at that percentage and play to the end. With no explicit range, `region with ...` applies to the whole sample. `loop` repeats the selected range; `reverse` reads it backwards. `VOICE ... with view` shows the imported waveform, selected region and live playhead in Scheme.

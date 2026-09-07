@@ -297,3 +297,20 @@ em++ \
   -Wl,--no-entry \
   -o "$DRUMKIT_OUTPUT"
 echo "Built $DRUMKIT_OUTPUT (MIT 606-inspired synth drums)"
+
+SAMPLE_OUTPUT="$ROOT/public/dsp/sample.wasm"
+echo "Building Sonus sample VOICE module..."
+em++ \
+  -std=c++17 \
+  -O3 \
+  "$ROOT/dsp/sample_bridge.cc" \
+  -s STANDALONE_WASM=1 \
+  -s ALLOW_MEMORY_GROWTH=0 \
+  -s INITIAL_MEMORY=67108864 \
+  -s FILESYSTEM=0 \
+  -s EXPORTED_FUNCTIONS='["_malloc","_free","_su_sample_create","_su_sample_destroy","_su_sample_set_sample_rate","_su_sample_load","_su_sample_set_params","_su_sample_trigger","_su_sample_stop","_su_sample_process","_su_sample_out_l","_su_sample_out_r","_su_sample_position","_su_sample_active"]' \
+  -Wl,--export-if-defined=_initialize \
+  -Wl,--export-if-defined=__wasm_call_ctors \
+  -Wl,--no-entry \
+  -o "$SAMPLE_OUTPUT"
+echo "Built $SAMPLE_OUTPUT (Sonus sample VOICE engine)"

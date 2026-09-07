@@ -1738,6 +1738,9 @@ function syncViews(): void {
     }
 
     const details = [...parameterViews.values()].filter((view) => view.signal.startsWith(`${node.id}.`));
+    const sampleView = moduleViews.has(node.id)
+      ? node.views?.find((view) => view.display === 'sample')
+      : undefined;
     const compositeSignals = moduleViews.has(node.id)
       ? node.views?.find((view) => (view.signals?.length ?? 0) > 0)?.signals ?? []
       : [];
@@ -1745,7 +1748,7 @@ function syncViews(): void {
     // User-created modules exist in VARIABLES and SCHEME automatically, but a
     // LIVE monitor panel is created only by an explicit .view(). Merely
     // creating or changing a module must not consume monitor space.
-    if (signals.length === 0 && details.length === 0 && compositeSignals.length === 0) continue;
+    if (signals.length === 0 && details.length === 0 && compositeSignals.length === 0 && !sampleView) continue;
 
     panels.push(buildModuleMonitorPanel({
       id: node.id,
@@ -1754,6 +1757,7 @@ function syncViews(): void {
       signals,
       compositeSignals,
       parameterDetails: details,
+      sampleView,
       viewScale: moduleViewScales.get(node.id),
       defaultCollapsed: false,
     }));
@@ -2479,6 +2483,7 @@ function buildModuleMonitorPanel(options: {
   compositeSignals?: string[];
   stereoLegend?: boolean;
   parameterDetails?: ParameterViewState[];
+  sampleView?: { owner?: string; sampleAlias?: string; sampleStart?: number; sampleEnd?: number };
   viewScale?: ModuleViewScale;
   defaultCollapsed: boolean;
 }): HTMLElement {
@@ -2486,6 +2491,27 @@ function buildModuleMonitorPanel(options: {
   const body = card.querySelector<HTMLElement>('.monitor-body');
   if (!body) return card;
 
+
+  if (options.sampleView) {
+    const section = document.createElement('div');
+    section.className = 'monitor-signal monitor-sample';
+    const label = document.createElement('div');
+    label.className = 'monitor-section-label';
+    const alias = options.sampleView.sampleAlias ?? 'SAMPLE';
+    const start = options.sampleView.sampleStart ?? 0;
+    const end = options.sampleView.sampleEnd ?? 100;
+    label.textContent = `${alias} · ${start}%–${end}%`;
+
+    const canvas = document.createElement('canvas');
+    canvas.className = 'sample-waveform-canvas monitor-sample-waveform';
+    canvas.dataset.sampleAlias = options.sampleView.sampleAlias ?? '';
+    canvas.dataset.sampleOwner = options.sampleView.owner ?? options.id;
+    canvas.dataset.sampleStart = String(start);
+    canvas.dataset.sampleEnd = String(end);
+    canvas.setAttribute('aria-label', `${alias} waveform`);
+    section.append(label, canvas);
+    body.append(section);
+  }
 
   if ((options.compositeSignals?.length ?? 0) > 0) {
     const section = document.createElement('div');
@@ -2868,6 +2894,45 @@ function updateDrumkitViews(): void {
   }
 }
 
+function updateSampleWaveformViews(): void {
+  const phosphor = getComputedStyle(document.documentElement).getPropertyValue('--phosphor-hot').trim() || '#ffe783';
+  for (const canvas of document.querySelectorAll<HTMLCanvasElement>('canvas.sample-waveform-canvas')) {
+    const alias = canvas.dataset.sampleAlias ?? '';
+    const owner = canvas.dataset.sampleOwner ?? '';
+    const asset = alias ? assetLibrary.getByAlias(alias) : undefined;
+    const width = Math.max(1, Math.floor(canvas.clientWidth * window.devicePixelRatio));
+    const height = Math.max(1, Math.floor(canvas.clientHeight * window.devicePixelRatio));
+    if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
+    const ctx = canvas.getContext('2d'); if (!ctx) continue;
+    ctx.clearRect(0, 0, width, height);
+    ctx.strokeStyle = phosphor; ctx.fillStyle = phosphor; ctx.lineWidth = Math.max(1, window.devicePixelRatio);
+    ctx.globalAlpha = 0.18; ctx.beginPath(); ctx.moveTo(0, height / 2); ctx.lineTo(width, height / 2); ctx.stroke(); ctx.globalAlpha = 1;
+    const channel = asset?.pcmChannels[0];
+    if (channel?.length) {
+      const bins = Math.max(1, Math.min(width, Math.floor(width / Math.max(1, window.devicePixelRatio))));
+      const step = channel.length / bins;
+      ctx.beginPath();
+      for (let x = 0; x < bins; x += 1) {
+        const from = Math.floor(x * step), to = Math.max(from + 1, Math.min(channel.length, Math.floor((x + 1) * step)));
+        let lo = 1, hi = -1;
+        for (let i = from; i < to; i += 1) { const v = channel[i]; if (v < lo) lo = v; if (v > hi) hi = v; }
+        const px = x / Math.max(1, bins - 1) * width;
+        ctx.moveTo(px, height * (0.5 - hi * 0.45)); ctx.lineTo(px, height * (0.5 - lo * 0.45));
+      }
+      ctx.stroke();
+    }
+    const start = Math.max(0, Math.min(100, Number(canvas.dataset.sampleStart ?? 0))) / 100;
+    const end = Math.max(0, Math.min(100, Number(canvas.dataset.sampleEnd ?? 100))) / 100;
+    ctx.globalAlpha = 0.25;
+    ctx.fillRect(0, 0, start * width, height); ctx.fillRect(end * width, 0, (1 - end) * width, height);
+    ctx.globalAlpha = 1;
+    const progress = owner ? audioEngine.getSampleVoiceProgress(owner) : null;
+    const position = progress?.position ?? start;
+    ctx.lineWidth = Math.max(1, 2 * window.devicePixelRatio); ctx.beginPath(); ctx.moveTo(position * width, 0); ctx.lineTo(position * width, height); ctx.stroke();
+    if (progress?.active) { ctx.globalAlpha = 0.14; ctx.fillRect(start * width, 0, Math.max(0, (position - start) * width), height); ctx.globalAlpha = 1; }
+  }
+}
+
 function drawScopes(): void {
   scopeFrame = 0;
   updateVariableValues();
@@ -2877,6 +2942,7 @@ function drawScopes(): void {
   updateSnakeViews();
   updateLogicViews();
   updateDrumkitViews();
+  updateSampleWaveformViews();
   updateSchemeLiveValues();
   const canvases = [...document.querySelectorAll<HTMLCanvasElement>('canvas.scope-canvas')];
   const liveValues = document.querySelectorAll<HTMLElement>('.scheme-live-value');
@@ -2885,7 +2951,8 @@ function drawScopes(): void {
   const constellationFields = document.querySelectorAll<SVGSVGElement>('.constellation-field');
   const snakeFields = document.querySelectorAll<HTMLElement>('.snake-field');
   const drumkitPatterns = document.querySelectorAll<HTMLElement>('.drumkit-pattern');
-  if (canvases.length === 0 && liveValues.length === 0 && turingRegisters.length === 0 && lifeGrids.length === 0 && constellationFields.length === 0 && snakeFields.length === 0 && drumkitPatterns.length === 0) return;
+  const sampleWaveforms = document.querySelectorAll<HTMLCanvasElement>('.sample-waveform-canvas');
+  if (canvases.length === 0 && liveValues.length === 0 && turingRegisters.length === 0 && lifeGrids.length === 0 && constellationFields.length === 0 && snakeFields.length === 0 && drumkitPatterns.length === 0 && sampleWaveforms.length === 0) return;
 
   const phosphor = getComputedStyle(document.documentElement).getPropertyValue('--phosphor-hot').trim() || '#ffe783';
 
@@ -3122,26 +3189,37 @@ function buildSchemeNode(node: SchemeNode, viewScale?: ModuleViewScale): HTMLEle
     const viewSignals = view.signals?.length ? view.signals : [view.signal];
     const viewIsDices = viewSignals.some(isDicesSignal);
     const scaleLabel = scopeScaleLabel(viewSignals, viewScale);
-    label.textContent = viewIsDices
-      ? `X1 / X2 / X3 / Y${scaleLabel ? ` · ${scaleLabel}` : ''}`
-      : view.port;
+    label.textContent = view.display === 'sample'
+      ? `${view.sampleAlias ?? 'SAMPLE'} · ${view.sampleStart ?? 0}%–${view.sampleEnd ?? 100}%`
+      : viewIsDices
+        ? `X1 / X2 / X3 / Y${scaleLabel ? ` · ${scaleLabel}` : ''}`
+        : view.port;
 
     const canvas = document.createElement('canvas');
-    canvas.className = `scope-canvas scheme-scope view-${view.signalKind}`;
-    canvas.dataset.signal = view.signal;
-    canvas.dataset.scopeRange = String(effectiveScopeRange(viewSignals, viewScale));
-    if (view.signals?.length) {
-      canvas.dataset.signals = view.signals.join(',');
-      canvas.dataset.kind = 'multi-signal';
-      canvas.classList.add('composite-scope');
-      if (/ : MOD(?:\s+DICES)?$/i.test(node.label) && view.signals.length === 4) {
-        canvas.dataset.modScope = 'true';
-        canvas.dataset.modName = node.id;
-      }
+    if (view.display === 'sample') {
+      canvas.className = 'sample-waveform-canvas scheme-sample-waveform';
+      canvas.dataset.sampleAlias = view.sampleAlias ?? '';
+      canvas.dataset.sampleOwner = view.owner ?? node.id;
+      canvas.dataset.sampleStart = String(view.sampleStart ?? 0);
+      canvas.dataset.sampleEnd = String(view.sampleEnd ?? 100);
+      canvas.setAttribute('aria-label', `${view.sampleAlias ?? 'sample'} waveform`);
     } else {
-      canvas.dataset.kind = view.signalKind;
+      canvas.className = `scope-canvas scheme-scope view-${view.signalKind}`;
+      canvas.dataset.signal = view.signal;
+      canvas.dataset.scopeRange = String(effectiveScopeRange(viewSignals, viewScale));
+      if (view.signals?.length) {
+        canvas.dataset.signals = view.signals.join(',');
+        canvas.dataset.kind = 'multi-signal';
+        canvas.classList.add('composite-scope');
+        if (/ : MOD(?:\s+DICES)?$/i.test(node.label) && view.signals.length === 4) {
+          canvas.dataset.modScope = 'true';
+          canvas.dataset.modName = node.id;
+        }
+      } else {
+        canvas.dataset.kind = view.signalKind;
+      }
+      canvas.setAttribute('aria-label', `${view.signal} ${view.signalKind} monitor`);
     }
-    canvas.setAttribute('aria-label', `${view.signal} ${view.signalKind} monitor`);
     embedded.append(label, canvas);
     element.append(embedded);
   }

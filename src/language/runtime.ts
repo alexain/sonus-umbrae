@@ -232,6 +232,11 @@ export type InlineViewState = InlinePianoViewState | InlineScalarViewState;
 
 export interface SchemeEmbeddedView {
   signal: string;
+  display?: 'scope' | 'sample';
+  owner?: string;
+  sampleAlias?: string;
+  sampleStart?: number;
+  sampleEnd?: number;
   signals?: string[];
   signalKind: SignalKind;
   port: string;
@@ -272,7 +277,7 @@ interface GainDefinition {
   parameters: Map<string, string>;
 }
 
-type VoiceEngineKind = 'macro' | 'matter' | 'resonator' | 'oscillator' | 'composite';
+type VoiceEngineKind = 'macro' | 'matter' | 'resonator' | 'oscillator' | 'composite' | 'sample';
 type VoiceParameterName = 'harmo' | 'timbre' | 'morph' | 'width' | 'geometry' | 'structure' | 'brightness' | 'damping' | 'position' | 'space' | 'bow' | 'bowTimbre' | 'blow' | 'blowTimbre' | 'strike' | 'strikeTimbre';
 
 interface VoiceDefinition {
@@ -301,6 +306,12 @@ interface VoiceDefinition {
   strike: number;
   strikeTimbre: number;
   drive: { kind: string; values: number[] } | null;
+  sampleAlias: string | null;
+  sampleRootFrequency: number;
+  sampleStart: number;
+  sampleEnd: number;
+  sampleLoop: boolean;
+  sampleReverse: boolean;
   parameters: Map<string, string>;
 }
 
@@ -1655,6 +1666,7 @@ export class SonusRuntime {
           strike: 0,
           strikeTimbre: 50,
           drive: null,
+          sampleAlias: null, sampleRootFrequency: 130.8127826502993, sampleStart: 0, sampleEnd: 100, sampleLoop: false, sampleReverse: false,
           parameters: new Map(),
         };
         voices.set(name, definition);
@@ -2298,6 +2310,21 @@ export class SonusRuntime {
         continue;
       }
 
+      match = line.match(/^([A-Za-z_]\w*)\.(sample|sampleRoot|sampleRegion)\((.*)\)\s*$/);
+      if (match && voices.has(match[1])) {
+        const voice = voices.get(match[1])!;
+        const error = applyVoiceCall(
+          match[1],
+          voice,
+          { name: match[2], argument: match[3].trim() },
+          moduleViews,
+          (expression) => evalValue(expression, lineNumber),
+        );
+        if (error) diagnostics.push({ line: lineNumber, message: error });
+        else results.push({ message: `${match[1]}.${match[2]}` });
+        continue;
+      }
+
       match = line.match(/^([A-Za-z_]\w*)\.(harmo|timbre|morph|width|geometry|structure|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)\(\s*(.+)\s*\)\s*$/);
       if (match) {
         const [, name, parameter, rawValue] = match;
@@ -2494,7 +2521,8 @@ export class SonusRuntime {
         }
         if ((sourcePort === 'out_L' || sourcePort === 'out_R')
           && !mists.has(sourceName)
-          && !languageDrumkits.has(sourceName)) {
+          && !languageDrumkits.has(sourceName)
+          && voices.get(sourceName)?.engine !== 'sample') {
           diagnostics.push({ line: lineNumber, message: `${sourcePort} is only available on stereo objects: ${sourceName}` });
           continue;
         }
@@ -2550,7 +2578,7 @@ export class SonusRuntime {
         };
 
         const sourceIsStereoShorthand =
-          (mists.has(sourceName) || languageDrumkits.has(sourceName))
+          (mists.has(sourceName) || languageDrumkits.has(sourceName) || voices.get(sourceName)?.engine === 'sample')
           && sourcePort === 'out';
         const targetIsAudioStereo = targetName === 'Audio' && targetPort === 'out';
 
@@ -2955,12 +2983,17 @@ export class SonusRuntime {
               : 'OUT 1-4',
         });
       } else if (voices.has(name)) {
-        ownerViews.push({
-          signal: `${name}.out`,
-          signals: [`${name}.out`, `${name}.aux`],
-          signalKind: 'signal',
-          port: 'OUT / AUX',
-        });
+        const voice = voices.get(name)!;
+        if (voice.engine === 'sample') {
+          ownerViews.push({ signal: `${name}.out_L`, signalKind: 'signal', port: 'SAMPLE', display: 'sample', owner: name, sampleAlias: voice.sampleAlias ?? '', sampleStart: voice.sampleStart, sampleEnd: voice.sampleEnd });
+        } else {
+          ownerViews.push({
+            signal: `${name}.out`,
+            signals: [`${name}.out`, `${name}.aux`],
+            signalKind: 'signal',
+            port: 'OUT / AUX',
+          });
+        }
       } else if (mists.has(name)) {
         ownerViews.push({
           signal: `${name}.out_L`,
@@ -3271,6 +3304,11 @@ export class SonusRuntime {
       }
     }
 
+    for (const [name, definition] of voices) {
+      if (definition.engine === 'sample' && !definition.sampleAlias) diagnostics.push({ line: 0, message: `sample VOICE '${name}' requires SAMPLE <asset>` });
+    }
+    if (diagnostics.length > 0) throw new SonusEvaluationError(diagnostics);
+
     const program: AudioProgram = {
       clock: { bpm: clockBpm, jitter: masterJitter, drift: masterTimingDrift },
       mainLevel,
@@ -3376,6 +3414,7 @@ export class SonusRuntime {
           range: definition.range,
         })),
       drumkits: [...languageDrumkits.keys()].map((name) => ({ name })),
+      samples: [...voices.entries()].filter(([, definition]) => definition.engine === 'sample').map(([name, definition]) => ({ name, alias: definition.sampleAlias ?? '', enabled: !definition.disabled, level: definition.level, frequency: definition.frequency, rootFrequency: definition.sampleRootFrequency, start: definition.sampleStart, end: definition.sampleEnd, loop: definition.sampleLoop, reverse: definition.sampleReverse })),
       dices: [...swells.entries()]
         .filter(([, definition]) => definition.model === 'dices')
         .map(([name, definition]) => ({
@@ -3464,9 +3503,14 @@ export class SonusRuntime {
             for (const signal of moduleModViewSignals(name)) monitors.set(signal, 'signal');
           } else if (voices.has(name)) {
             const voice = voices.get(name)!;
-            monitors.set(`${name}.out`, 'signal');
-            if (voice.engine !== 'composite') monitors.set(`${name}.aux`, 'signal');
-            else for (const output of languageCompositeOutputs.get(name) ?? []) monitors.set(`${name}.${output.name}`, 'signal');
+            if (voice.engine === 'sample') {
+              // The sample module view renders directly from asset PCM and the
+              // worklet playhead, so it does not need analyser monitor taps.
+            } else {
+              monitors.set(`${name}.out`, 'signal');
+              if (voice.engine !== 'composite') monitors.set(`${name}.aux`, 'signal');
+              else for (const output of languageCompositeOutputs.get(name) ?? []) monitors.set(`${name}.${output.name}`, 'signal');
+            }
           } else if (mists.has(name)) {
             monitors.set(`${name}.out_L`, 'signal');
             monitors.set(`${name}.out_R`, 'signal');
@@ -4076,7 +4120,7 @@ export class SonusRuntime {
     const triggerVoiceEvent = (name: string): void => {
       for (const trigger of envelopeTriggers.get(name) ?? []) trigger();
       const voice = voices.get(name);
-      if (voice && (voice.lpg || voice.engine === 'resonator' || (voice.engine === 'matter' && !languageDriveEvery.has(name)))) this.audio.triggerVoice(name);
+      if (voice && (voice.lpg || voice.engine === 'resonator' || voice.engine === 'sample' || (voice.engine === 'matter' && !languageDriveEvery.has(name)))) this.audio.triggerVoice(name);
     };
 
     if (!hotReload) {
@@ -4790,7 +4834,7 @@ export class SonusRuntime {
           ? sequenceFavorForValue(frequency, sequence.favor, 'frequency')
               .find((entry) => entry.operator === 'retrig')
           : undefined;
-        if ((voice.lpg || voice.engine === 'resonator' || (voice.engine === 'matter' && !languageDriveEvery.has(name))) && retrig && retrig.amount > 1) {
+        if ((voice.lpg || voice.engine === 'sample' || voice.engine === 'resonator' || (voice.engine === 'matter' && !languageDriveEvery.has(name))) && retrig && retrig.amount > 1) {
           const count = Math.round(retrig.amount);
           const stepMs = cycle.unit === 'beat'
             ? Math.max(1, 60000 / Math.max(1, this.audio.getClockStatus().bpm) * cycle.amount)
@@ -6498,6 +6542,33 @@ function applyVoiceCall(
       voice.parameters.set(call.name.toUpperCase(), `${formatNumber(value)}%`);
       return null;
     }
+    case 'sample': {
+      const value = evaluate(call.argument);
+      if (typeof value !== 'string' || !value) return 'sample expects an asset alias';
+      voice.sampleAlias = value; voice.parameters.set('SAMPLE', value); return null;
+    }
+    case 'sampleRoot': {
+      const value = evaluate(call.argument);
+      if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return 'sample root expects a positive frequency';
+      voice.sampleRootFrequency = value;
+      voice.parameters.set('ROOT', `${formatNumber(value)} HZ`);
+      return null;
+    }
+    case 'sampleRegion': {
+      const parts = call.argument.split(',').map((part) => part.trim());
+      if (parts.length !== 4) return 'invalid sample region';
+      const start = Number(parts[0]);
+      const end = Number(parts[1]);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || start > 100 || end < start || end > 100) return 'region expects 0..100 with end >= start';
+      if (!/^(true|false)$/i.test(parts[2]) || !/^(true|false)$/i.test(parts[3])) return 'invalid sample region modifiers';
+      voice.sampleStart = start;
+      voice.sampleEnd = end;
+      voice.sampleLoop = parts[2].toLowerCase() === 'true';
+      voice.sampleReverse = parts[3].toLowerCase() === 'true';
+      const flags = [voice.sampleLoop ? 'LOOP' : '', voice.sampleReverse ? 'REVERSE' : ''].filter(Boolean).join(', ');
+      voice.parameters.set('REGION', `${formatNumber(start)}–${formatNumber(end)}%${flags ? ` · ${flags}` : ''}`);
+      return null;
+    }
     case 'polyphony': {
       const value = evaluate(call.argument);
       if (value === undefined) return null;
@@ -6535,6 +6606,9 @@ function applyVoiceModelValue(voice: VoiceDefinition, value: ScalarValue): strin
       voice.parameters.set('MODEL', 'COMPOSITE');
       return null;
     }
+    if (normalized === 'sample') {
+      voice.engine = 'sample'; voice.soundId = normalized; voice.lpg = false; voice.parameters.set('MODEL', 'SAMPLE'); return null;
+    }
     if (normalized === 'matter') {
       voice.engine = 'matter';
       voice.soundId = normalized;
@@ -6565,7 +6639,7 @@ function applyVoiceModelValue(voice: VoiceDefinition, value: ScalarValue): strin
     }
   }
   const model = parseVoiceModelValue(value);
-  if (model === null) return 'model expects macro.*, matter, resonator.*, sine, triangle, sawtooth, ramp, square, or composite';
+  if (model === null) return 'model expects macro.*, matter, resonator.*, sine, triangle, sawtooth, ramp, square, composite, or sample';
   voice.engine = 'macro';
   voice.model = model;
   voice.soundId = formatVoiceModelId(model);
