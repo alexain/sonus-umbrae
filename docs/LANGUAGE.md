@@ -920,7 +920,7 @@ All jobs remain synchronized to the shared runtime scheduler.
 
 ## DRUMKIT
 
-`DRUMKIT` is a stereo synthesized-drum object. `KIT` is mandatory, like `SOUND` for `VOICE`.
+`DRUMKIT` is a stereo drum object. A `KIT` is optional when the object contains direct sample one-shots; KIT aliases can resolve either synthesized drum voices or imported samples.
 
 ```text
 DRUMKIT drums:
@@ -985,9 +985,37 @@ Precedence is `drum model defaults < KIT defaults < derived/inline KIT overrides
 
 Common `WITH` parameters are `level 0..100`, `pan -100..100`, `tune -24..24`, and `decay 0..100`. Model-specific parameters are `transient` for kick, `snappy`/`color` for snare, and `noise` for clap.
 
-The canonical order is `alias [WITH sound parameters] [EVERY timing]`. If `EVERY` is absent, the alias remains configured but silent. `EVERY` reuses the normal Sonus scheduler, including Euclidean timing and named/derived clocks.
+A sample can be triggered directly, without a KIT:
 
-`DRUMKIT` is stereo; when no explicit `OUT` is declared, its main stereo output is routed to `MAIN` automatically. The first backend is synthesized only; samples and explicit pattern syntax remain future extensions of the same abstraction.
+```text
+DRUMKIT drums:
+    SAMPLE kick909 EVERY 1 beat
+    SAMPLE snare_linn WITH level 80, tune -2 EVERY EUCLIDEAN 5/16
+```
+
+The token after `SAMPLE` is the Sonus asset alias shown in the Assets panel. A reusable KIT can also map imported assets to arbitrary aliases:
+
+```text
+SET mykit: KIT [
+    sample kick909 as kick;
+    sample snareLinn as snare;
+    sample hat01 as hihat
+]
+
+DRUMKIT drums:
+    KIT mykit
+    kick EVERY 1 beat
+    snare EVERY EUCLIDEAN 5/16
+    hihat EVERY 0.5 beat
+```
+
+The same `SET ... KIT [...]` declaration can be global or local to a `DRUMKIT`, following the normal KIT scoping rules. `kick`, `snare`, and `hihat` above are user-defined KIT aliases, not fixed lane names and not restrictions on the sample content.
+
+Sample one-shots support `level`, `pan`, `tune`, `decay`, and `humanize`; synthesized-only controls such as `transient`, `snappy`, `color`, and `noise` are rejected. Sample `decay` defaults to `100`, so the complete asset plays unless an explicit shorter decay is requested. `tune` changes playback rate and therefore also changes duration.
+
+The direct sample form is `SAMPLE asset [WITH sample parameters] [EVERY timing]`. The KIT form remains `alias [WITH sound parameters] [EVERY timing]`, with the alias resolving to either a synthesized source or a sample source. If `EVERY` is absent, the slot remains configured but silent. `EVERY` reuses the normal Sonus scheduler, including Euclidean timing and named/derived clocks.
+
+`DRUMKIT` is stereo; when no explicit `OUT` is declared, its main stereo output is routed to `MAIN` automatically. Imported samples are currently one-shot only: there is no slicing, loop, reverse, start/end control, or independent time stretching yet.
 
 ## MOD
 
