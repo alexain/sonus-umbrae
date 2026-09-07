@@ -1,4 +1,6 @@
 import type { CompositeDefinition, CompositeDomain } from '../language/composite/types';
+import { SampleDrumRuntime, type DrumSample } from './voices/sample-drum';
+import { loadWasmWorklet, loadWorkletModule } from './worklets/loader';
 
 export type AudioEngineState = 'idle' | 'running' | 'suspended';
 
@@ -12,20 +14,12 @@ export interface AudioEngineSnapshot {
 
 export type SignalKind = 'signal' | 'gate' | 'trigger';
 
-function publicAssetUrl(path: string): string {
-  const base = import.meta.env.BASE_URL || '/';
-  const cleanBase = base.endsWith('/') ? base : `${base}/`;
-  const cleanPath = path.replace(/^\/+/, '');
-  return `${cleanBase}${cleanPath}`;
-}
-
 const DEFAULT_HARDWARE_OUTPUT_GAIN = 0.18;
 const DEFAULT_HARDWARE_OUTPUT_LEVEL = 100;
 
 // Backend calibration trims. These compensate for the native output level of
 // different DSP engines without changing the public LEVEL/AT semantics.
 const RESONATOR_OUTPUT_TRIM = 3.0;
-const DRUMKIT_OUTPUT_TRIM = 6.0;
 
 
 export interface AudioProgram {
@@ -314,10 +308,6 @@ interface DicesVoice {
 }
 
 
-interface DrumkitVoice { node: AudioWorkletNode; outputSplitter: ChannelSplitterNode; outputL: GainNode; outputR: GainNode; loadedSamples: Set<string> }
-interface DrumSample { alias: string; sampleRate: number; channels: readonly Float32Array[] }
-interface SampleVoiceRuntime { node: AudioWorkletNode; outputSplitter: ChannelSplitterNode; outputL: GainNode; outputR: GainNode; alias: string; level: number; frequency: number; rootFrequency: number; start: number; end: number; loop: boolean; reverse: boolean; slices: number; activeSlice: number; sliceReverse: boolean; progress: number; active: boolean; }
-
 interface MistVoice {
   bypassed: boolean;
   node: AudioWorkletNode;
@@ -473,9 +463,7 @@ export class AudioEngine {
   private resonators = new Map<string, ResonatorVoice>();
   private swells = new Map<string, SwellVoice>();
   private dices = new Map<string, DicesVoice>();
-  private drumkits = new Map<string, DrumkitVoice>();
-  private drumSamples = new Map<string, DrumSample>();
-  private samples = new Map<string, SampleVoiceRuntime>();
+  private sampleDrum = new SampleDrumRuntime();
   private mists = new Map<string, MistVoice>();
   private skies = new Map<string, SkyVoice>();
   private delays = new Map<string, DelayVoice>();
@@ -529,7 +517,7 @@ export class AudioEngine {
           : 'suspended',
       sampleRate: this.context?.sampleRate ?? null,
       testFrequency: this.testOscillator?.frequency.value ?? null,
-      objectCount: this.basicVoices.size + this.composites.size + this.gains.size + this.macros.size + this.matters.size + this.resonators.size + this.swells.size + this.dices.size + this.drumkits.size + this.samples.size + this.mists.size + this.skies.size + this.delays.size + this.filters.size + this.clocks.size,
+      objectCount: this.basicVoices.size + this.composites.size + this.gains.size + this.macros.size + this.matters.size + this.resonators.size + this.swells.size + this.dices.size + this.sampleDrum.drumkits.size + this.sampleDrum.samples.size + this.mists.size + this.skies.size + this.delays.size + this.filters.size + this.clocks.size,
       routeCount: this.routes.size,
     };
   }
@@ -729,8 +717,8 @@ export class AudioEngine {
     for (const [name] of this.dices) {
       if (!desiredDices.has(name)) this.removeDices(name);
     }
-    for (const [name] of this.drumkits) { if (!desiredDrumkits.has(name)) this.removeDrumkit(name); }
-    for (const [name] of this.samples) { if (!desiredSamples.has(name)) this.removeSampleVoice(name); }
+    for (const [name] of this.sampleDrum.drumkits) { if (!desiredDrumkits.has(name)) this.removeDrumkit(name); }
+    for (const [name] of this.sampleDrum.samples) { if (!desiredSamples.has(name)) this.removeSampleVoice(name); }
 
     for (const [name] of this.mists) {
       if (!desiredMists.has(name)) this.removeMist(name);
@@ -1401,121 +1389,48 @@ export class AudioEngine {
 
 
   private createDrumkit(definition: AudioProgram['drumkits'][number]): void {
-    if (this.drumkits.has(definition.name)) return;
+    if (this.sampleDrum.drumkits.has(definition.name)) return;
     if (!this.drumkitWorkletLoaded || !this.drumkitWasmBytes) throw new Error('Drumkit DSP is not ready; run :start after building the DSP');
-    const context = this.ensureContext();
-    const node = new AudioWorkletNode(context, 'sonus-drumkit', { numberOfInputs:0, numberOfOutputs:1, outputChannelCount:[2], channelCount:2, channelCountMode:'explicit', channelInterpretation:'discrete', processorOptions:{ wasmBytes:this.drumkitWasmBytes.slice(0) } });
-    const outputSplitter=context.createChannelSplitter(2), outputL=context.createGain(), outputR=context.createGain();
-    outputL.gain.value = DRUMKIT_OUTPUT_TRIM;
-    outputR.gain.value = DRUMKIT_OUTPUT_TRIM;
-    node.connect(outputSplitter); outputSplitter.connect(outputL,0,0); outputSplitter.connect(outputR,1,0);
-    this.drumkits.set(definition.name,{node,outputSplitter,outputL,outputR,loadedSamples:new Set()});
+    this.sampleDrum.createDrumkit(this.ensureContext(), this.drumkitWasmBytes, definition);
   }
 
-  triggerDrumkit(name:string, voice:'kick'|'snare'|'clap'|'hihat'|'openhat'|'lowtom'|'hightom', params:{level:number;pan:number;tune:number;decay:number;transient:number;snappy:number;color:number;noise:number}): void {
-    const drumkit=this.drumkits.get(name); if(!drumkit) throw new Error(`unknown DRUMKIT object: ${name}`);
-    drumkit.node.port.postMessage({ type:'trigger', voice,
-      level:Math.max(0,Math.min(1,params.level/100)), pan:Math.max(-1,Math.min(1,params.pan/100)), tune:params.tune,
-      decay:Math.max(0,Math.min(1,params.decay/100)), transient:Math.max(0,Math.min(1,params.transient/100)),
-      snappy:Math.max(0,Math.min(1,params.snappy/100)), color:2 ** ((params.color-50)/25), noise:Math.max(0,Math.min(1,params.noise/100)) });
+  triggerDrumkit(name: string, voice: 'kick' | 'snare' | 'clap' | 'hihat' | 'openhat' | 'lowtom' | 'hightom', params: { level: number; pan: number; tune: number; decay: number; transient: number; snappy: number; color: number; noise: number }): void {
+    this.sampleDrum.triggerDrumkit(name, voice, params);
   }
 
   hasDrumSample(alias: string): boolean {
-    return this.drumSamples.has(alias);
+    return this.sampleDrum.hasDrumSample(alias);
   }
 
   registerDrumSample(sample: DrumSample): void {
-    this.drumSamples.set(sample.alias, {
-      alias: sample.alias,
-      sampleRate: sample.sampleRate,
-      channels: sample.channels,
-    });
+    this.sampleDrum.registerDrumSample(sample);
   }
 
   unregisterDrumSample(alias: string): void {
-    if (!this.drumSamples.delete(alias)) return;
-    for (const drumkit of this.drumkits.values()) {
-      if (!drumkit.loadedSamples.delete(alias)) continue;
-      drumkit.node.port.postMessage({ type: 'remove-sample', alias });
-    }
+    this.sampleDrum.unregisterDrumSample(alias);
   }
 
   prepareDrumkitSample(name: string, alias: string): void {
-    const drumkit = this.drumkits.get(name);
-    if (!drumkit) throw new Error(`unknown DRUMKIT object: ${name}`);
-    const sample = this.drumSamples.get(alias);
-    if (!sample) throw new Error(`unknown audio sample: ${alias}`);
-    if (drumkit.loadedSamples.has(alias)) return;
-    this.sendDrumSample(drumkit.node, sample);
-    drumkit.loadedSamples.add(alias);
+    this.sampleDrum.prepareDrumkitSample(name, alias);
   }
 
   triggerDrumkitSample(name: string, alias: string, params: { level: number; pan: number; tune: number; decay: number }): void {
-    const drumkit = this.drumkits.get(name);
-    if (!drumkit) throw new Error(`unknown DRUMKIT object: ${name}`);
-    this.prepareDrumkitSample(name, alias);
-    drumkit.node.port.postMessage({
-      type: 'trigger-sample',
-      alias,
-      level: Math.max(0, Math.min(1, params.level / 100)),
-      pan: Math.max(-1, Math.min(1, params.pan / 100)),
-      tune: params.tune,
-      decay: Math.max(0, Math.min(1, params.decay / 100)),
-    });
-  }
-
-  private sendDrumSample(node: AudioWorkletNode, sample: DrumSample): void {
-    // Send dedicated PCM copies to the AudioWorklet and transfer ownership of
-    // those copies. The AssetLibrary keeps its canonical PCM, so the same
-    // sample can still be loaded by other DRUMKIT instances without sharing
-    // or detaching the source buffers.
-    const channels = sample.channels.map((channel) => channel.slice());
-    node.port.postMessage({
-      type: 'sample',
-      alias: sample.alias,
-      sampleRate: sample.sampleRate,
-      channels,
-    }, channels.map((channel) => channel.buffer));
+    this.sampleDrum.triggerDrumkitSample(name, alias, params);
   }
 
   private createSampleVoice(definition: AudioProgram['samples'][number]): void {
-    if (this.samples.has(definition.name)) return;
+    if (this.sampleDrum.samples.has(definition.name)) return;
     if (!this.sampleWorkletLoaded || !this.sampleWasmBytes) throw new Error('Sample DSP is not ready; run :start after npm run dsp:build');
-    const sample = this.drumSamples.get(definition.alias);
-    if (!sample) throw new Error(`unknown audio sample: ${definition.alias}`);
-    const context = this.ensureContext();
-    const node = new AudioWorkletNode(context, 'sonus-sample', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2], channelCount: 2, channelCountMode: 'explicit', channelInterpretation: 'discrete', processorOptions: { wasmBytes: this.sampleWasmBytes.slice(0) } });
-    const splitter = context.createChannelSplitter(2);
-    const outputL = context.createGain(); const outputR = context.createGain();
-    node.connect(splitter); splitter.connect(outputL, 0); splitter.connect(outputR, 1);
-    const runtime: SampleVoiceRuntime = { node, outputSplitter: splitter, outputL, outputR, alias: definition.alias, level: definition.level, frequency: definition.frequency, rootFrequency: definition.rootFrequency, start: definition.start, end: definition.end, loop: definition.loop, reverse: definition.reverse, slices: definition.slices, activeSlice: 0, sliceReverse: false, progress: definition.start / 100, active: false };
-    node.port.onmessage = (event) => { const m = event.data; if (m?.type === 'progress') { runtime.progress = Number(m.position) || 0; runtime.active = Boolean(m.active); } };
-    this.samples.set(definition.name, runtime);
-    this.sendSampleVoicePcm(node, sample);
+    this.sampleDrum.createSampleVoice(this.ensureContext(), this.sampleWasmBytes, definition);
   }
 
   private updateSampleVoice(definition: AudioProgram['samples'][number]): void {
-    const voice = this.samples.get(definition.name); if (!voice) return;
-    if (voice.alias !== definition.alias) { const sample = this.drumSamples.get(definition.alias); if (!sample) throw new Error(`unknown audio sample: ${definition.alias}`); voice.alias = definition.alias; this.sendSampleVoicePcm(voice.node, sample); }
-    voice.level = definition.level; voice.frequency = definition.frequency; voice.rootFrequency = definition.rootFrequency; voice.start = definition.start; voice.end = definition.end; voice.loop = definition.loop; voice.reverse = definition.reverse; voice.slices = definition.slices; voice.activeSlice = 0; voice.sliceReverse = false;
-    voice.outputL.gain.value = definition.enabled ? 1 : 0; voice.outputR.gain.value = definition.enabled ? 1 : 0;
-    let playbackStart = definition.start; let playbackEnd = definition.end; let playbackReverse = definition.reverse;
-    if (definition.slices > 0 && definition.initialSlice > 0) {
-      const span = (definition.end - definition.start) / definition.slices;
-      playbackStart = definition.start + span * (definition.initialSlice - 1);
-      playbackEnd = definition.start + span * definition.initialSlice;
-      playbackReverse = definition.initialSliceReverse;
-      voice.activeSlice = definition.initialSlice; voice.sliceReverse = definition.initialSliceReverse;
-    }
-    voice.node.port.postMessage({ type: 'params', start: playbackStart / 100, end: playbackEnd / 100, loop: definition.slices > 0 ? false : definition.loop, reverse: playbackReverse, level: definition.level / 100, frequency: definition.frequency, rootFrequency: definition.rootFrequency });
+    this.sampleDrum.updateSampleVoice(definition);
   }
 
-  private sendSampleVoicePcm(node: AudioWorkletNode, sample: DrumSample): void {
-    const channels = sample.channels.map((channel) => channel.slice());
-    node.port.postMessage({ type: 'sample', alias: sample.alias, sampleRate: sample.sampleRate, channels }, channels.map((channel) => channel.buffer));
+  getSampleVoiceProgress(name: string): { position: number; active: boolean; slices: number; activeSlice: number; sliceReverse: boolean } | null {
+    return this.sampleDrum.getSampleVoiceProgress(name);
   }
-
-  getSampleVoiceProgress(name: string): { position: number; active: boolean; slices: number; activeSlice: number; sliceReverse: boolean } | null { const voice = this.samples.get(name); return voice ? { position: voice.progress, active: voice.active, slices: voice.slices, activeSlice: voice.activeSlice, sliceReverse: voice.sliceReverse } : null; }
 
   private createMist(definition: AudioProgram['mists'][number]): void {
     if (this.mists.has(definition.name)) return;
@@ -1929,12 +1844,12 @@ export class AudioEngine {
 
 
     const drumkitOutput = signal.match(/^([A-Za-z_]\w*)\.(out_L|out_R)$/);
-    if (drumkitOutput && this.drumkits.has(drumkitOutput[1])) {
-      const drumkit=this.drumkits.get(drumkitOutput[1])!;
+    if (drumkitOutput && this.sampleDrum.drumkits.has(drumkitOutput[1])) {
+      const drumkit=this.sampleDrum.drumkits.get(drumkitOutput[1])!;
       return { node: drumkitOutput[2] === 'out_R' ? drumkit.outputR : drumkit.outputL, output:0 };
     }
-    if (drumkitOutput && this.samples.has(drumkitOutput[1])) {
-      const sample=this.samples.get(drumkitOutput[1])!;
+    if (drumkitOutput && this.sampleDrum.samples.has(drumkitOutput[1])) {
+      const sample=this.sampleDrum.samples.get(drumkitOutput[1])!;
       return { node: drumkitOutput[2] === 'out_R' ? sample.outputR : sample.outputL, output:0 };
     }
 
@@ -1982,7 +1897,7 @@ export class AudioEngine {
     }
     const voice = this.macros.get(name);
     if (voice) return { node: port === 'aux' ? voice.auxGain : voice.outGain, output: 0 };
-    const sampleVoice = this.samples.get(name);
+    const sampleVoice = this.sampleDrum.samples.get(name);
     if (sampleVoice) { if (port === 'aux') throw new Error(`aux output is not available on sample VOICE ${name}`); return { node: sampleVoice.outputL, output: 0 }; }
     const matter = this.matters.get(name);
     if (matter) return { node: port === 'aux' ? matter.auxGain : matter.mainGain, output: 0 };
@@ -2214,25 +2129,15 @@ export class AudioEngine {
   }
 
   setSampleSlice(name: string, index: number, count: number, regionStart: number, regionEnd: number, reverse: boolean): void {
-    const voice = this.samples.get(name);
-    if (!voice || count < 1 || index < 1 || index > count) return;
-    const start = Math.max(0, Math.min(100, regionStart));
-    const end = Math.max(start, Math.min(100, regionEnd));
-    const span = (end - start) / count;
-    const sliceStart = start + span * (index - 1);
-    const sliceEnd = start + span * index;
-    voice.slices = count; voice.activeSlice = index; voice.sliceReverse = reverse;
-    voice.node.port.postMessage({ type: 'params', start: sliceStart / 100, end: sliceEnd / 100, loop: false, reverse });
+    this.sampleDrum.setSampleSlice(name, index, count, regionStart, regionEnd, reverse);
   }
 
   triggerSampleSlice(name: string, index: number, count: number, regionStart: number, regionEnd: number, reverse: boolean): void {
-    this.setSampleSlice(name, index, count, regionStart, regionEnd, reverse);
-    const voice = this.samples.get(name);
-    if (voice) voice.node.port.postMessage({ type: 'trigger' });
+    this.sampleDrum.triggerSampleSlice(name, index, count, regionStart, regionEnd, reverse);
   }
 
   triggerVoice(name: string): void {
-    const sampleVoice = this.samples.get(name);
+    const sampleVoice = this.sampleDrum.samples.get(name);
     if (sampleVoice) { sampleVoice.node.port.postMessage({ type: 'trigger' }); return; }
     const resonator = this.resonators.get(name);
     if (resonator) {
@@ -2251,7 +2156,7 @@ export class AudioEngine {
 
   setVoiceLevel(name: string, level: number): void {
     if (!Number.isFinite(level) || level < 0 || level > 100) throw new RangeError('VOICE level must be 0..100');
-    const sampleVoice = this.samples.get(name);
+    const sampleVoice = this.sampleDrum.samples.get(name);
     if (sampleVoice) { sampleVoice.level = level; sampleVoice.node.port.postMessage({ type: 'params', level: level / 100 }); return; }
     const resonator = this.resonators.get(name);
     if (resonator) { resonator.level = level; this.applyVoiceVcaGain(name, 'out'); this.applyVoiceVcaGain(name, 'aux'); return; }
@@ -2304,7 +2209,7 @@ export class AudioEngine {
     parameter: 'freq' | 'model' | 'harmo' | 'timbre' | 'morph' | 'width' | 'geometry' | 'structure' | 'brightness' | 'damping' | 'position' | 'space' | 'bow' | 'bowTimbre' | 'blow' | 'blowTimbre' | 'strike' | 'strikeTimbre',
     value: number,
   ): void {
-    const sampleVoice = this.samples.get(name);
+    const sampleVoice = this.sampleDrum.samples.get(name);
     if (sampleVoice) {
       if (parameter === 'freq') {
         sampleVoice.frequency = value;
@@ -2808,7 +2713,7 @@ export class AudioEngine {
       ...this.matters.keys(),
       ...this.resonators.keys(),
       ...this.swells.keys(),
-      ...this.samples.keys(),
+      ...this.sampleDrum.samples.keys(),
       ...[...this.filters.entries()]
         .filter(([, filter]) => Boolean(filter.ownerVoice))
         .map(([name]) => name),
@@ -2821,7 +2726,7 @@ export class AudioEngine {
     // A looping sample keeps rendering inside its AudioWorklet even after its
     // public routes are disconnected. Stop the DSP voice itself so transport
     // stop is deterministic and a later route rebuild cannot expose an old loop.
-    for (const sample of this.samples.values()) {
+    for (const sample of this.sampleDrum.samples.values()) {
       sample.node.port.postMessage({ type: 'stop' });
       sample.active = false;
     }
@@ -2929,17 +2834,14 @@ export class AudioEngine {
   }
 
 
-  private removeDrumkit(name:string): void {
-    const drumkit=this.drumkits.get(name); if(!drumkit) return;
-    for(const node of [drumkit.outputSplitter,drumkit.outputL,drumkit.outputR]) { try { node.disconnect(); } catch {} }
-    try { drumkit.node.disconnect(); } catch {} drumkit.node.port.close(); this.drumkits.delete(name);
+  private removeDrumkit(name: string): void {
+    this.sampleDrum.removeDrumkit(name);
   }
 
   private removeSampleVoice(name: string): void {
-    const voice = this.samples.get(name); if (!voice) return;
+    if (!this.sampleDrum.samples.has(name)) return;
     this.removeView(`${name}.out`);
-    for (const node of [voice.outputSplitter, voice.outputL, voice.outputR]) { try { node.disconnect(); } catch {} }
-    try { voice.node.disconnect(); } catch {} voice.node.port.close(); this.samples.delete(name);
+    this.sampleDrum.removeSampleVoice(name);
   }
 
   private removeDices(name: string): void {
@@ -3088,148 +2990,150 @@ export class AudioEngine {
 
   private async ensureSwellRuntime(): Promise<void> {
     if (this.swellWorkletLoaded && this.swellWasmBytes) return;
-    const context = this.ensureContext();
-    const response = await fetch(publicAssetUrl('/dsp/swell.wasm'));
-    if (!response.ok) {
-      throw new Error('Swell DSP missing. Run npm run dsp:setup and npm run dsp:build.');
-    }
-    this.swellWasmBytes = await response.arrayBuffer();
-    await context.audioWorklet.addModule(publicAssetUrl('/worklets/swell-processor.js'));
+    this.swellWasmBytes = await loadWasmWorklet(
+      this.ensureContext(),
+      '/dsp/swell.wasm',
+      '/worklets/swell-processor.js',
+      'Swell DSP missing. Run npm run dsp:setup and npm run dsp:build.',
+    );
     this.swellWorkletLoaded = true;
   }
 
-
   private async ensureDicesRuntime(): Promise<void> {
     if (this.dicesWorkletLoaded && this.dicesWasmBytes) return;
-    const context = this.ensureContext();
-    const response = await fetch(publicAssetUrl('/dsp/dices.wasm'));
-    if (!response.ok) {
-      throw new Error('Dices DSP missing. Run npm run dsp:setup and npm run dsp:build.');
-    }
-    this.dicesWasmBytes = await response.arrayBuffer();
-    await context.audioWorklet.addModule(publicAssetUrl('/worklets/dices-processor.js'));
+    this.dicesWasmBytes = await loadWasmWorklet(
+      this.ensureContext(),
+      '/dsp/dices.wasm',
+      '/worklets/dices-processor.js',
+      'Dices DSP missing. Run npm run dsp:setup and npm run dsp:build.',
+    );
     this.dicesWorkletLoaded = true;
   }
 
   private async ensureDrumkitRuntime(): Promise<void> {
     if (this.drumkitWorkletLoaded && this.drumkitWasmBytes) return;
-    const context=this.ensureContext(); const response=await fetch(publicAssetUrl('/dsp/drumkit.wasm'));
-    if(!response.ok) throw new Error('Drumkit DSP missing. Run npm run dsp:setup and npm run dsp:build.');
-    this.drumkitWasmBytes=await response.arrayBuffer(); await context.audioWorklet.addModule(publicAssetUrl('/worklets/drumkit-processor.js')); this.drumkitWorkletLoaded=true;
+    this.drumkitWasmBytes = await loadWasmWorklet(
+      this.ensureContext(),
+      '/dsp/drumkit.wasm',
+      '/worklets/drumkit-processor.js',
+      'Drumkit DSP missing. Run npm run dsp:setup and npm run dsp:build.',
+    );
+    this.drumkitWorkletLoaded = true;
   }
 
   private async ensureSampleRuntime(): Promise<void> {
     if (this.sampleWorkletLoaded && this.sampleWasmBytes) return;
-    const context = this.ensureContext();
-    const response = await fetch(publicAssetUrl('/dsp/sample.wasm'));
-    if (!response.ok) throw new Error('Sample DSP missing. Run npm run dsp:build.');
-    this.sampleWasmBytes = await response.arrayBuffer();
-    await context.audioWorklet.addModule(publicAssetUrl('/worklets/sample-processor.js'));
+    this.sampleWasmBytes = await loadWasmWorklet(
+      this.ensureContext(),
+      '/dsp/sample.wasm',
+      '/worklets/sample-processor.js',
+      'Sample DSP missing. Run npm run dsp:build.',
+    );
     this.sampleWorkletLoaded = true;
   }
 
   private async ensureMistRuntime(): Promise<void> {
     if (this.mistWorkletLoaded && this.mistWasmBytes) return;
-    const context = this.ensureContext();
-    const response = await fetch(publicAssetUrl('/dsp/mist.wasm'));
-    if (!response.ok) {
-      throw new Error('Mist DSP missing. Run npm run dsp:setup and npm run dsp:build.');
-    }
-    this.mistWasmBytes = await response.arrayBuffer();
-    await context.audioWorklet.addModule(publicAssetUrl('/worklets/mist-processor.js'));
+    this.mistWasmBytes = await loadWasmWorklet(
+      this.ensureContext(),
+      '/dsp/mist.wasm',
+      '/worklets/mist-processor.js',
+      'Mist DSP missing. Run npm run dsp:setup and npm run dsp:build.',
+    );
     this.mistWorkletLoaded = true;
   }
 
   private async ensureSkyRuntime(): Promise<void> {
     if (this.skyWorkletLoaded && this.skyWasmBytes) return;
-    const context=this.ensureContext();
-    const response=await fetch(publicAssetUrl('/dsp/sky.wasm'));
-    if (!response.ok) throw new Error('Sky DSP missing. Run npm run dsp:setup and npm run dsp:build.');
-    this.skyWasmBytes=await response.arrayBuffer();
-    await context.audioWorklet.addModule(publicAssetUrl('/worklets/sky-processor.js'));
-    this.skyWorkletLoaded=true;
+    this.skyWasmBytes = await loadWasmWorklet(
+      this.ensureContext(),
+      '/dsp/sky.wasm',
+      '/worklets/sky-processor.js',
+      'Sky DSP missing. Run npm run dsp:setup and npm run dsp:build.',
+    );
+    this.skyWorkletLoaded = true;
   }
 
   private async ensureDelayRuntime(): Promise<void> {
     if (this.delayWorkletLoaded && this.delayWasmBytes) return;
-    const context=this.ensureContext(); const response=await fetch(publicAssetUrl('/dsp/delay.wasm'));
-    if (!response.ok) throw new Error('Delay DSP missing. Run npm run dsp:setup and npm run dsp:build.');
-    this.delayWasmBytes=await response.arrayBuffer(); await context.audioWorklet.addModule(publicAssetUrl('/worklets/delay-processor.js')); this.delayWorkletLoaded=true;
+    this.delayWasmBytes = await loadWasmWorklet(
+      this.ensureContext(),
+      '/dsp/delay.wasm',
+      '/worklets/delay-processor.js',
+      'Delay DSP missing. Run npm run dsp:setup and npm run dsp:build.',
+    );
+    this.delayWorkletLoaded = true;
   }
 
   private async ensureDaisyFiltersRuntime(): Promise<void> {
     if (this.daisyFiltersWorkletLoaded && this.daisyFiltersWasmBytes) return;
-    const context = this.ensureContext();
-    const response = await fetch(publicAssetUrl('/dsp/daisy-filters.wasm'));
-    if (!response.ok) throw new Error('DaisySP filter DSP missing. Run npm run dsp:setup and npm run dsp:build.');
-    this.daisyFiltersWasmBytes = await response.arrayBuffer();
-    await context.audioWorklet.addModule(publicAssetUrl('/worklets/daisy-filters-processor.js'));
+    this.daisyFiltersWasmBytes = await loadWasmWorklet(
+      this.ensureContext(),
+      '/dsp/daisy-filters.wasm',
+      '/worklets/daisy-filters-processor.js',
+      'DaisySP filter DSP missing. Run npm run dsp:setup and npm run dsp:build.',
+    );
     this.daisyFiltersWorkletLoaded = true;
   }
 
   private async ensureClockRuntime(): Promise<void> {
     if (this.clockWorkletLoaded) return;
-    const context = this.ensureContext();
-    await context.audioWorklet.addModule(publicAssetUrl('/worklets/clock-processor.js'));
+    await loadWorkletModule(this.ensureContext(), '/worklets/clock-processor.js');
     this.clockWorkletLoaded = true;
   }
 
   private async ensureMatterRuntime(): Promise<void> {
     if (this.matterWorkletLoaded && this.matterWasmBytes) return;
-    const context = this.ensureContext();
-    const response = await fetch(publicAssetUrl('/dsp/matter.wasm'));
-    if (!response.ok) {
-      throw new Error('Matter DSP missing. Run npm run dsp:setup and npm run dsp:build.');
-    }
-    this.matterWasmBytes = await response.arrayBuffer();
-    await context.audioWorklet.addModule(publicAssetUrl('/worklets/matter-processor.js'));
+    this.matterWasmBytes = await loadWasmWorklet(
+      this.ensureContext(),
+      '/dsp/matter.wasm',
+      '/worklets/matter-processor.js',
+      'Matter DSP missing. Run npm run dsp:setup and npm run dsp:build.',
+    );
     this.matterWorkletLoaded = true;
   }
 
   private async ensureResonatorRuntime(): Promise<void> {
     if (this.resonatorWorkletLoaded && this.resonatorWasmBytes) return;
-    const context = this.ensureContext();
-    const response = await fetch(publicAssetUrl('/dsp/resonator.wasm'));
-    if (!response.ok) {
-      throw new Error('Resonator DSP missing. Run npm run dsp:setup and npm run dsp:build.');
-    }
-    this.resonatorWasmBytes = await response.arrayBuffer();
-    await context.audioWorklet.addModule(publicAssetUrl('/worklets/resonator-processor.js'));
+    this.resonatorWasmBytes = await loadWasmWorklet(
+      this.ensureContext(),
+      '/dsp/resonator.wasm',
+      '/worklets/resonator-processor.js',
+      'Resonator DSP missing. Run npm run dsp:setup and npm run dsp:build.',
+    );
     this.resonatorWorkletLoaded = true;
   }
 
   private async ensureCompositeRuntime(): Promise<void> {
     if (this.compositeWorkletLoaded && this.compositeWasmBytes) return;
-    const context = this.ensureContext();
-    const response = await fetch(publicAssetUrl('/dsp/composite.wasm'));
-    if (!response.ok) throw new Error(`failed to load composite DSP: ${response.status}`);
-    this.compositeWasmBytes = await response.arrayBuffer();
-    await context.audioWorklet.addModule(publicAssetUrl('/worklets/composite-processor.js'));
+    this.compositeWasmBytes = await loadWasmWorklet(
+      this.ensureContext(),
+      '/dsp/composite.wasm',
+      '/worklets/composite-processor.js',
+      (response) => `failed to load composite DSP: ${response.status}`,
+    );
     this.compositeWorkletLoaded = true;
   }
 
   private async ensureDaisyOscillatorsRuntime(): Promise<void> {
     if (this.daisyOscillatorsWorkletLoaded && this.daisyOscillatorsWasmBytes) return;
-    const context = this.ensureContext();
-    const response = await fetch(publicAssetUrl('/dsp/daisy-oscillators.wasm'));
-    if (!response.ok) {
-      throw new Error('DaisySP oscillator DSP missing. Run npm run dsp:setup and npm run dsp:build.');
-    }
-    this.daisyOscillatorsWasmBytes = await response.arrayBuffer();
-    await context.audioWorklet.addModule(publicAssetUrl('/worklets/daisy-oscillator-processor.js'));
+    this.daisyOscillatorsWasmBytes = await loadWasmWorklet(
+      this.ensureContext(),
+      '/dsp/daisy-oscillators.wasm',
+      '/worklets/daisy-oscillator-processor.js',
+      'DaisySP oscillator DSP missing. Run npm run dsp:setup and npm run dsp:build.',
+    );
     this.daisyOscillatorsWorkletLoaded = true;
   }
 
   private async ensureMacroRuntime(): Promise<void> {
     if (this.macroWorkletLoaded && this.macroWasmBytes) return;
-
-    const context = this.ensureContext();
-    const response = await fetch(publicAssetUrl('/dsp/macro.wasm'));
-    if (!response.ok) {
-      throw new Error('Macro DSP missing. Run npm run dsp:setup and npm run dsp:build.');
-    }
-    this.macroWasmBytes = await response.arrayBuffer();
-    await context.audioWorklet.addModule(publicAssetUrl('/worklets/macro-processor.js'));
+    this.macroWasmBytes = await loadWasmWorklet(
+      this.ensureContext(),
+      '/dsp/macro.wasm',
+      '/worklets/macro-processor.js',
+      'Macro DSP missing. Run npm run dsp:setup and npm run dsp:build.',
+    );
     this.macroWorkletLoaded = true;
   }
 
@@ -3253,8 +3157,8 @@ export class AudioEngine {
     for (const name of [...this.mists.keys()]) this.removeMist(name);
     for (const name of [...this.swells.keys()]) this.removeSwell(name);
     for (const name of [...this.dices.keys()]) this.removeDices(name);
-    for (const name of [...this.drumkits.keys()]) this.removeDrumkit(name);
-    for (const name of [...this.samples.keys()]) this.removeSampleVoice(name);
+    for (const name of [...this.sampleDrum.drumkits.keys()]) this.removeDrumkit(name);
+    for (const name of [...this.sampleDrum.samples.keys()]) this.removeSampleVoice(name);
     for (const name of [...this.resonators.keys()]) this.removeResonator(name);
     for (const name of [...this.matters.keys()]) this.removeMatter(name);
     for (const name of [...this.macros.keys()]) this.removeMacro(name);
