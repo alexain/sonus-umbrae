@@ -14,7 +14,8 @@ Sonus Umbrae is not built around one synthesizer family or one upstream hardware
 - Stateful `SEQ` sources, including a Turing-style generative sequencer.
 - Stereo-aware declarative audio routing with serial and parallel signal paths, named ports, per-route levels, and automatic routing of unrouted audio sources to the main output.
 - AudioWorklet processing with C/C++ DSP compiled to independent WebAssembly modules.
-- Synthesized `DRUMKIT` instruments with reusable/customizable kits, Euclidean triggering, per-voice controls and performance humanization.
+- Synthesized and sample-backed `DRUMKIT` instruments with reusable/customizable kits, Euclidean triggering, per-voice controls and performance humanization.
+- Sample `VOICE` playback with musical root tuning, regions, loop/reverse, slicing, sequencing and waveform monitoring.
 - DaisySP basic oscillator VOICE backends plus a shared `composite` graph core used by `VOICE ... sound composite` and `MOD ... model composite`. Composite graphs own private node instances, inherit engine/model parameters live, support audio-rate FM/PM/AM/ring/sync, per-instance `tune` (relative or independent pitch), multi-parameter LIVE controls, and domain-specific output policies; VOICE composites additionally expose named internal mixer buses and a mixed master output.
 - Macro synthesis engines derived from permissively licensed Mutable Instruments Plaits DSP.
 - `matter` physical modelling derived from Mutable Instruments Elements DSP.
@@ -48,15 +49,11 @@ The live environment includes dedicated Configuration, Help, Scheme, and About s
 The configuration screen can select the browser audio output when supported, request a sample rate, choose a Web Audio latency mode, and display the effective sample rate and reported latency. Audio-structural changes restart the audio engine after confirmation.
 
 
-### Registers
+### Runtime and language
 
-`REGISTER` provides stateful pitch storage. `model shift` consumes a `SEQ` source on `write every ...` and exposes stages such as `canon.1`, `canon.2`, etc. Life pools can be consumed with readers such as `with random` or `with walk`.
+The language combines declarative object definitions, reusable typed values, musical scheduling, stateful generative sources and explicit routing. `REGISTER` provides persistent pitch storage, while sample, synthesis, modulation, filtering and effects share the same runtime lifecycle and hot-reload model.
 
-### Creative delay
-
-`FX ... model delay` is a WASM creative multi-line delay. It supports 1..8 lines, musical or absolute delay times, stereo/time spread, feedback, probabilistic true reverse capture, probabilistic discrete-window pitch shifting, ping-pong stereo motion, tape-coloured feedback, diffusion, and wet/dry mix. Reverse decisions apply only to newly captured windows and remain attached to those tails through feedback.
-
-Delay `spread` can be loosened without exposing per-line timing: `spread 60 with loose 40`. `loose 0` is regular but unquantized; the default is `25` for more independent line spacing.
+The implementation is intentionally modular: browser orchestration, scheduling and views are kept separate from DSP backends, which are built as independent WebAssembly modules where practical. The public language abstracts those backends so sessions are not tied to any one upstream DSP project.
 
 
 ## Try it online
