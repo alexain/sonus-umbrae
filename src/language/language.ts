@@ -6,6 +6,7 @@ import {
   setReferenceTuningHz,
 } from './parser/pitch';
 import { findScaleDefinition, type SupportedEdo } from './scales';
+import { IDENTIFIER_PATTERN, invalidIdentifierMessage, isValidIdentifier } from './identifier';
 
 export type LanguageDiagnostic = {
   line: number;
@@ -348,7 +349,7 @@ type TimingModifiers = {
   loose: boolean;
 };
 
-const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const IDENTIFIER = IDENTIFIER_PATTERN;
 
 type SoundParameterSchema = { min: number; max: number; modulatable: boolean };
 type SoundEngineSchema = {
@@ -3799,7 +3800,23 @@ function validateLiveFilterProperty(property: string, line: number): void {
   throw new LanguageError([{ line, message: `LIVE is available only for CUTOFF, RESONANCE, or DRIVE on FILTER` }]);
 }
 
+function validateDeclaredIdentifiers(source: string): void {
+  const lines = source.replace(/\r\n/g, '\n').split('\n');
+  const declaration = /^(?:_)?(?:VOICE|FX|FILTER|MOD|SEQ|REGISTER|LOGIC|DRUMKIT)\s+([^\s:]+)|^SET\s+([^\s:]+)\s*:|^CLOCK\s+(?!set\b)([^\s:]+)/i;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const trimmed = stripComment(lines[index]).trim();
+    if (!trimmed) continue;
+    const match = trimmed.match(declaration);
+    const name = match?.[1] ?? match?.[2] ?? match?.[3];
+    if (name && !isValidIdentifier(name)) {
+      throw new LanguageError([{ line: index + 1, message: invalidIdentifierMessage(name) }]);
+    }
+  }
+}
+
 export function compileLanguageSource(source: string): string {
+  validateDeclaredIdentifiers(source);
   const capabilitySet = parseProgramCapabilities(source);
   setReferenceTuningHz(capabilitySet.tuningHz);
   const lines = source.replace(/\r\n/g, '\n').split('\n');

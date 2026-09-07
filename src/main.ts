@@ -3,6 +3,7 @@ import { AudioEngine, type AudioLatencyMode } from './audio/engine';
 import { SonusEvaluationError, SonusRuntime, type DrumkitViewState, type InlineViewState, type LifeViewState, type ConstellationViewState, type SnakeViewState, type LogicViewState, type ParameterViewState, type TuringViewState, type SchemeConnection, type SchemeModel, type SchemeNode } from './language/runtime';
 import { compileLanguageSource, LanguageError, parseProgramCapabilities, type ProgramCapability } from './language/language';
 import { parameterUpdatePolicy, type ParameterUpdatePolicy } from './language/parameter-policy';
+import { expandEditorSnippet } from './editor/snippets';
 
 type Screen = 'live' | 'config' | 'help' | 'about' | 'scheme';
 
@@ -4928,6 +4929,39 @@ editor.addEventListener('keydown', (event) => {
 
     const start = editor.selectionStart;
     const end = editor.selectionEnd;
+
+    // Emmet-style editor snippets. They are editor-only shorthand: the @ line
+    // is replaced by normal Sonus source before the compiler/runtime sees it.
+    if (!event.shiftKey && start === end) {
+      const value = editor.value;
+      const lineStart = value.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
+      const lineEndAt = value.indexOf('\n', start);
+      const lineEnd = lineEndAt < 0 ? value.length : lineEndAt;
+      const line = value.slice(lineStart, lineEnd);
+      const indentation = line.match(/^\s*/)?.[0] ?? '';
+      const snippetSource = line.trim();
+      const expansion = expandEditorSnippet(snippetSource);
+      if (expansion) {
+        const replacement = expansion.text
+          .split('\n')
+          .map((item) => `${indentation}${item}`)
+          .join('\n');
+        editor.setRangeText(replacement, lineStart, lineEnd, 'end');
+        refreshInlineViewEditingPreview();
+        renderSyntaxLayer();
+        renderLineGutter();
+        scheduleStoppedPreview();
+        notify(`expanded ${expansion.label}`);
+        requestAnimationFrame(positionBlockCaret);
+        return;
+      }
+      if (snippetSource.startsWith('@')) {
+        notify(`unknown snippet: ${snippetSource}`);
+        requestAnimationFrame(positionBlockCaret);
+        return;
+      }
+    }
+
     const direction = editor.selectionDirection ?? 'none';
     const value = editor.value;
     const firstLineStart = value.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
