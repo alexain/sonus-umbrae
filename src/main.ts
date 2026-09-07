@@ -11,10 +11,14 @@ import {
   type AudioConfigChoice,
 } from './config/app-config';
 import { ConfigScreenNavigator } from './ui/config-screen';
+import { AppShell } from './ui/app-shell';
+import { runAppCommand } from './app/commands';
 import { SonusEvaluationError, SonusRuntime, type InlineViewState } from './language/runtime';
 import { compileLanguageSource, LanguageError, parseProgramCapabilities, type ProgramCapability } from './language/language';
 import { parameterUpdatePolicy, type ParameterUpdatePolicy } from './language/parameter-policy';
-import { expandEditorSnippet } from './editor/snippets';
+import { installEditorKeyboardBindings } from './editor/keyboard';
+import { EditorFolding } from './editor/folding';
+import { EditorVisualLayer } from './editor/visual-layer';
 import { AssetLibrary } from './editor/assets';
 import { updateSampleWaveformViews as renderSampleWaveformViews } from './ui/sample-waveform';
 import { SchemeRenderer } from './ui/scheme';
@@ -37,8 +41,6 @@ import {
   updateSnakeViews,
   updateTuringViews,
 } from './ui/sequence-monitors';
-
-type Screen = 'live' | 'config' | 'help' | 'about' | 'scheme';
 
 const VERSION = '0.6.0';
 
@@ -519,8 +521,6 @@ function compileSource(source: string): string {
   });
 }
 
-let screen: Screen = 'live';
-let commandMode = false;
 let messageTimer = 0;
 let previewTimer = 0;
 let scopeFrame = 0;
@@ -530,13 +530,13 @@ let liveControlRefreshMs = 16;
 let liveControlCommitTimer = 0;
 let liveControlRuntimeTimer = 0;
 let pendingLiveControlRuntimeUpdate: { kind: string; name: string; property: string; value: number } | null = null;
-let savedEditorSelection: { start: number; end: number; direction: 'forward' | 'backward' | 'none' } | null = null;
 let audioAutoStartPending = true;
 let codeRunning = false;
 let editingInlineViews: InlineViewState[] | null = null;
 let pendingLiveUpdate: { compiled: string; hasMasterClock: boolean } | null = null;
 let pendingLiveUpdateUnsubscribe: (() => void) | null = null;
 let diagnosticLines = new Set<number>();
+const INLINE_VIEW_ROW_HEIGHT = 38;
 let appConfig: AppConfig = createDefaultAppConfig();
 let pendingAudioConfig: AudioConfigChoice | null = null;
 let activeTuningHz = 440;
@@ -545,7 +545,6 @@ let activeUseDirective: string | null = null;
 let pendingCapabilityRestart: { source: string; capabilities: Set<ProgramCapability>; tuningHz: number; directive: string | null } | null = null;
 
 let clockWasActive = false;
-let lastCaretTrailPosition: { left: number; top: number } | null = null;
 const monitorPanels = new MonitorPanels(viewStack, () => {
   if (scopeFrame === 0) scopeFrame = requestAnimationFrame(drawScopes);
 });
@@ -561,6 +560,46 @@ const schemeRenderer = new SchemeRenderer({
 });
 const scopeRenderer = new ScopeRenderer(audioEngine);
 const configNavigator = new ConfigScreenNavigator(configScreen);
+const editorFolding = new EditorFolding({
+  editor,
+  lineGutterContent,
+  inlineViewRowHeight: INLINE_VIEW_ROW_HEIGHT,
+  commentStart,
+  statementLabels,
+  inlineViewCountAtLine: (physicalLine) => activeInlineViewsByLine().get(physicalLine)?.length ?? 0,
+  diagnosticLines: () => diagnosticLines,
+  liveDisableHeader,
+  toggleObjectDisabledAtPhysicalLine,
+  afterMutation: afterEditorMutation,
+});
+let editorVisual!: EditorVisualLayer;
+const shell = new AppShell(
+  {
+    editor,
+    commandbar,
+    command,
+    liveScreen,
+    configScreen,
+    helpScreen,
+    aboutScreen,
+    schemeScreen,
+    quickMenuOverlay,
+  },
+  {
+    clearDiagnostic,
+    renderScheme,
+    resetConfigNavigation: () => configNavigator.reset(),
+    refreshAudioConfig: () => { void refreshAudioConfigUi(); },
+    positionBlockCaret,
+  },
+);
+editorVisual = new EditorVisualLayer({
+  editor,
+  blockCaret,
+  phosphorLayer,
+  isCaretVisible: () => shell.screen === 'live' && !shell.commandMode,
+  inlineSpacerBeforePhysicalLine,
+});
 
 appConfig = readAppConfig();
 audioEngine.setPreferredAudioConfiguration({
@@ -719,22 +758,11 @@ async function applyAudioConfigRestart(): Promise<void> {
   }
 }
 
-function openQuickMenu(): void {
-  if (screen !== 'live' || commandMode) return;
-  quickMenuOverlay.classList.remove('hidden');
-}
-
-function closeQuickMenu(): void {
-  quickMenuOverlay.classList.add('hidden');
-  editor.focus();
-  requestAnimationFrame(positionBlockCaret);
-}
-
 async function runQuickMenuAction(key: string): Promise<void> {
-  closeQuickMenu();
+  shell.closeQuickMenu();
   switch (key.toLowerCase()) {
-    case 'c': showScreen('config'); await refreshAudioConfigUi(); return;
-    case 'a': showScreen('about'); return;
+    case 'c': shell.showScreen('config'); await refreshAudioConfigUi(); return;
+    case 'a': shell.showScreen('about'); return;
     case 's': await saveSource(); return;
     case 'l': await loadSource(); return;
     case 'r':
@@ -742,13 +770,7 @@ async function runQuickMenuAction(key: string): Promise<void> {
       catch (error) { notify(error instanceof Error ? error.message : 'audio restart failed'); }
       return;
     case 'n':
-      setSourceText('');
-      runtime.evaluate('');
-      setCodeRunning(false);
-      activeCapabilities = new Set();
-      activeTuningHz = 440;
-      activeUseDirective = null;
-      syncViews();
+      resetSourceProject();
       notify('new project');
       return;
   }
@@ -920,68 +942,6 @@ function must<T extends Element>(id: string): T {
   return el as unknown as T;
 }
 
-function showScreen(next: Screen): void {
-  if (next !== 'live') clearDiagnostic();
-  screen = next;
-  liveScreen.classList.toggle('hidden', next !== 'live');
-  configScreen.classList.toggle('hidden', next !== 'config');
-  helpScreen.classList.toggle('hidden', next !== 'help');
-  aboutScreen.classList.toggle('hidden', next !== 'about');
-  schemeScreen.classList.toggle('hidden', next !== 'scheme');
-  liveScreen.setAttribute('aria-hidden', String(next !== 'live'));
-  configScreen.setAttribute('aria-hidden', String(next !== 'config'));
-  helpScreen.setAttribute('aria-hidden', String(next !== 'help'));
-  aboutScreen.setAttribute('aria-hidden', String(next !== 'about'));
-  schemeScreen.setAttribute('aria-hidden', String(next !== 'scheme'));
-  if (next === 'scheme') renderScheme();
-  if (next === 'config') { configNavigator.reset(); void refreshAudioConfigUi(); }
-  if (next === 'live') editor.focus();
-  requestAnimationFrame(positionBlockCaret);
-}
-
-function enterCommandMode(): void {
-  if (screen !== 'live') return;
-  saveEditorSelection();
-  commandMode = true;
-  commandbar.classList.remove('hidden');
-  command.value = '';
-  command.focus();
-  positionBlockCaret();
-}
-
-function leaveCommandMode(): void {
-  commandMode = false;
-  commandbar.classList.add('hidden');
-  command.value = '';
-  restoreEditorSelection();
-  requestAnimationFrame(positionBlockCaret);
-}
-
-function saveEditorSelection(): void {
-  savedEditorSelection = {
-    start: editor.selectionStart,
-    end: editor.selectionEnd,
-    direction: editor.selectionDirection ?? 'none',
-  };
-}
-
-function restoreEditorSelection(): void {
-  editor.focus();
-
-  if (savedEditorSelection) {
-    const max = editor.value.length;
-    editor.setSelectionRange(
-      Math.min(savedEditorSelection.start, max),
-      Math.min(savedEditorSelection.end, max),
-      savedEditorSelection.direction,
-    );
-  } else {
-    placeCaretAtEnd(editor);
-  }
-
-  savedEditorSelection = null;
-}
-
 function notify(text: string): void {
   window.clearTimeout(messageTimer);
   message.textContent = text.toUpperCase();
@@ -1029,112 +989,8 @@ function normalizeLanguageCommandCase(): void {
   editor.setSelectionRange(start, end, direction);
 }
 
-type CollapsedEditorBlock = { body: string };
-
-const collapsedEditorBlocks = new Map<string, CollapsedEditorBlock>();
-let nextCollapsedEditorBlockId = 1;
-
-function foldMarkerId(line: string): string | null {
-  const match = line.match(/^\s*\/\/~F(\d+)\s*$/);
-  return match?.[1] ?? null;
-}
-
-type FoldMarkerRange = {
-  start: number;
-  end: number;
-  headerEnd: number;
-  nextLineStart: number | null;
-};
-
-function foldMarkerRanges(value = editor.value): FoldMarkerRange[] {
-  const lines = value.split('\n');
-  const ranges: FoldMarkerRange[] = [];
-  let offset = 0;
-  let previousLineStart = 0;
-  let previousLineLength = 0;
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (foldMarkerId(line)) {
-      const end = offset + line.length;
-      ranges.push({
-        start: offset,
-        end,
-        headerEnd: index > 0 ? previousLineStart + previousLineLength : offset,
-        nextLineStart: index < lines.length - 1 ? end + 1 : null,
-      });
-    }
-    previousLineStart = offset;
-    previousLineLength = line.length;
-    offset += line.length + 1;
-  }
-  return ranges;
-}
-
-function keepCaretOutOfFoldMarker(): boolean {
-  if (document.activeElement !== editor || editor.selectionStart !== editor.selectionEnd) return false;
-  const caret = editor.selectionStart;
-  const marker = foldMarkerRanges().find((range) => caret >= range.start && caret <= range.end);
-  if (!marker) return false;
-  editor.setSelectionRange(marker.headerEnd, marker.headerEnd);
-  return true;
-}
-
-function skipFoldMarkerWithArrow(direction: 'up' | 'down'): boolean {
-  if (editor.selectionStart !== editor.selectionEnd) return false;
-  const caret = editor.selectionStart;
-  for (const marker of foldMarkerRanges()) {
-    if (direction === 'down' && caret <= marker.headerEnd && caret >= editor.value.lastIndexOf('\n', Math.max(0, marker.headerEnd - 1)) + 1) {
-      if (marker.nextLineStart === null) return true;
-      editor.setSelectionRange(marker.nextLineStart, marker.nextLineStart);
-      return true;
-    }
-    if (direction === 'up' && marker.nextLineStart !== null) {
-      const nextLineEndAt = editor.value.indexOf('\n', marker.nextLineStart);
-      const nextLineEnd = nextLineEndAt < 0 ? editor.value.length : nextLineEndAt;
-      if (caret >= marker.nextLineStart && caret <= nextLineEnd) {
-        editor.setSelectionRange(marker.headerEnd, marker.headerEnd);
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-function protectFoldMarkerBoundary(key: 'Backspace' | 'Delete'): boolean {
-  if (editor.selectionStart !== editor.selectionEnd) return false;
-  const caret = editor.selectionStart;
-  for (const marker of foldMarkerRanges()) {
-    if (key === 'Delete' && caret === marker.headerEnd) return true;
-    if (key === 'Backspace' && marker.nextLineStart !== null && caret === marker.nextLineStart) return true;
-  }
-  return false;
-}
-
-function expandFoldMarkers(value: string): string {
-  let expanded = value;
-  for (let pass = 0; pass < 64; pass += 1) {
-    let changed = false;
-    const lines = expanded.split('\n');
-    const rebuilt: string[] = [];
-    for (const line of lines) {
-      const id = foldMarkerId(line);
-      const block = id ? collapsedEditorBlocks.get(id) : undefined;
-      if (!block) {
-        rebuilt.push(line);
-        continue;
-      }
-      changed = true;
-      const body = block.body.endsWith('\n') ? block.body.slice(0, -1) : block.body;
-      rebuilt.push(...body.split('\n'));
-    }
-    expanded = rebuilt.join('\n');
-    if (!changed) break;
-  }
-  return expanded;
-}
-
 function sourceText(): string {
-  return expandFoldMarkers(editor.value.replace(/\r\n/g, '\n'));
+  return editorFolding.expandMarkers(editor.value.replace(/\r\n/g, '\n'));
 }
 
 function setCodeRunning(running: boolean): void {
@@ -1337,7 +1193,7 @@ function startInlineViewLoop(): void {
 }
 
 function renderInlineViews(): void {
-  if (!codeRunning || screen !== 'live') return;
+  if (!codeRunning || shell.screen !== 'live') return;
 
   const states = new Map(runtime.getInlineViews().map((view) => [view.id, view]));
   const slots = syntaxLayer.querySelectorAll<HTMLElement>('.syntax-inline-slot[data-inline-view-id]');
@@ -1733,58 +1589,9 @@ function showDiagnostics(items: Array<{ line: number; message: string }>): void 
 }
 
 function lineRect(lineNumber: number): DOMRect | null {
-  const lines = editor.value.split('\n');
-  if (lineNumber < 1 || lineNumber > lines.length) return null;
-
-  let offset = 0;
-  for (let index = 0; index < lineNumber - 1; index += 1) offset += lines[index].length + 1;
-
-  const editorRect = editor.getBoundingClientRect();
-  const style = getComputedStyle(editor);
-  const mirror = document.createElement('div');
-  mirror.setAttribute('aria-hidden', 'true');
-  mirror.style.position = 'fixed';
-  mirror.style.visibility = 'hidden';
-  mirror.style.pointerEvents = 'none';
-  mirror.style.left = `${editorRect.left}px`;
-  mirror.style.top = `${editorRect.top}px`;
-  mirror.style.width = `${editor.clientWidth}px`;
-  mirror.style.margin = '0';
-  mirror.style.padding = style.padding;
-  mirror.style.border = style.border;
-  mirror.style.boxSizing = style.boxSizing;
-  mirror.style.whiteSpace = 'pre-wrap';
-  mirror.style.overflowWrap = style.overflowWrap;
-  mirror.style.wordBreak = style.wordBreak;
-  mirror.style.fontFamily = style.fontFamily;
-  mirror.style.fontSize = style.fontSize;
-  mirror.style.fontWeight = style.fontWeight;
-  mirror.style.fontStyle = style.fontStyle;
-  mirror.style.fontVariant = style.fontVariant;
-  mirror.style.lineHeight = style.lineHeight;
-  mirror.style.letterSpacing = style.letterSpacing;
-
-  mirror.append(document.createTextNode(editor.value.slice(0, offset)));
-  const marker = document.createElement('span');
-  marker.style.display = 'inline-block';
-  marker.style.height = style.lineHeight;
-  marker.textContent = lines[lineNumber - 1] || '\u200b';
-  mirror.append(marker);
-  document.body.append(mirror);
-
-  const markerRect = marker.getBoundingClientRect();
-  mirror.remove();
-
-  return new DOMRect(
-    markerRect.left - editor.scrollLeft,
-    markerRect.top - editor.scrollTop,
-    markerRect.width,
-    markerRect.height || Number.parseFloat(style.lineHeight) || 24,
-  );
+  return editorVisual.lineRect(lineNumber);
 }
 
-
-const INLINE_VIEW_ROW_HEIGHT = 38;
 
 function activeInlineViewsByLine(): Map<number, InlineViewState[]> {
   const grouped = new Map<number, InlineViewState[]>();
@@ -1866,189 +1673,11 @@ function toggleObjectDisabledAtPhysicalLine(physicalLine: number): void {
 }
 
 function collapsibleObjectHeader(line: string): { indentation: string } | null {
-  const commentAt = commentStart(line);
-  const code = commentAt < 0 ? line : line.slice(0, commentAt);
-  const match = code.match(/^(\s*)_?(VOICE|DRUMKIT|FX|FILTER|MOD|SEQ|REGISTER|LOGIC)\s+[A-Za-z_][A-Za-z0-9_]*\b[^:]*:\s*$/i);
-  if (!match) return null;
-  return { indentation: match[1] };
-}
-
-function foldedMarkerAfterLine(lines: string[], index: number): string | null {
-  if (index + 1 >= lines.length) return null;
-  return foldMarkerId(lines[index + 1]);
-}
-
-function toggleCollapsedObjectAtPhysicalLine(physicalLine: number): void {
-  const lines = editor.value.split('\n');
-  const index = physicalLine - 1;
-  if (index < 0 || index >= lines.length) return;
-  const header = collapsibleObjectHeader(lines[index]);
-  if (!header) return;
-
-  const lineStarts: number[] = [];
-  let offset = 0;
-  for (const line of lines) {
-    lineStarts.push(offset);
-    offset += line.length + 1;
-  }
-
-  const existingId = foldedMarkerAfterLine(lines, index);
-  if (existingId) {
-    const block = collapsedEditorBlocks.get(existingId);
-    if (!block) return;
-    const markerStart = lineStarts[index + 1];
-    const markerEnd = markerStart + lines[index + 1].length + (index + 1 < lines.length - 1 ? 1 : 0);
-    const restoredBody = block.body.endsWith('\n\n')
-      ? block.body
-      : block.body.endsWith('\n')
-        ? `${block.body}\n`
-        : `${block.body}\n\n`;
-    editor.setRangeText(restoredBody, markerStart, markerEnd, 'preserve');
-    collapsedEditorBlocks.delete(existingId);
-    afterEditorMutation();
-    return;
-  }
-
-  const headerIndent = header.indentation.length;
-  let endLine = index + 1;
-  while (endLine < lines.length) {
-    const line = lines[endLine];
-    if (!line.trim()) {
-      endLine += 1;
-      continue;
-    }
-    const commentAt = commentStart(line);
-    const code = commentAt < 0 ? line : line.slice(0, commentAt);
-    const indentation = code.length - code.trimStart().length;
-    if (indentation <= headerIndent) break;
-    endLine += 1;
-  }
-
-  if (endLine === index + 1) return;
-  const bodyStart = lineStarts[index + 1];
-  const bodyEnd = endLine < lines.length ? lineStarts[endLine] : editor.value.length;
-  const body = editor.value.slice(bodyStart, bodyEnd);
-  if (!body.trim()) return;
-
-  const selectionStart = editor.selectionStart;
-  const selectionEnd = editor.selectionEnd;
-  const selectionInsideBody = selectionStart < bodyEnd && selectionEnd >= bodyStart;
-  const headerCaret = lineStarts[index] + lines[index].length;
-
-  const id = String(nextCollapsedEditorBlockId++);
-  collapsedEditorBlocks.set(id, { body });
-  const marker = `${header.indentation}    //~F${id}${body.endsWith('\n') ? '\n' : ''}`;
-  editor.setRangeText(marker, bodyStart, bodyEnd, 'preserve');
-  if (selectionInsideBody) editor.setSelectionRange(headerCaret, headerCaret);
-  afterEditorMutation();
+  return editorFolding.collapsibleHeader(line);
 }
 
 function renderLineGutter(): void {
-  const lines = editor.value.split('\n');
-  const style = getComputedStyle(editor);
-  const mirror = document.createElement('div');
-  mirror.setAttribute('aria-hidden', 'true');
-  mirror.style.position = 'fixed';
-  mirror.style.visibility = 'hidden';
-  mirror.style.pointerEvents = 'none';
-  mirror.style.width = `${editor.clientWidth}px`;
-  mirror.style.margin = '0';
-  mirror.style.padding = '0';
-  mirror.style.border = '0';
-  mirror.style.boxSizing = 'border-box';
-  mirror.style.whiteSpace = 'pre-wrap';
-  mirror.style.overflowWrap = style.overflowWrap;
-  mirror.style.wordBreak = style.wordBreak;
-  mirror.style.fontFamily = style.fontFamily;
-  mirror.style.fontSize = style.fontSize;
-  mirror.style.fontWeight = style.fontWeight;
-  mirror.style.fontStyle = style.fontStyle;
-  mirror.style.fontVariant = style.fontVariant;
-  mirror.style.lineHeight = style.lineHeight;
-  mirror.style.letterSpacing = style.letterSpacing;
-
-  const measured: HTMLElement[] = [];
-  for (const text of lines) {
-    const row = document.createElement('div');
-    row.style.minHeight = style.lineHeight;
-    row.textContent = text || '\u200b';
-    mirror.append(row);
-    measured.push(row);
-  }
-  document.body.append(mirror);
-
-  const labels = statementLabels(editor.value);
-  const inlineByLine = activeInlineViewsByLine();
-  lineGutterContent.replaceChildren();
-  lines.forEach((_, index) => {
-    const physicalLine = index + 1;
-    const row = document.createElement('div');
-    row.className = diagnosticLines.has(physicalLine) ? 'line-number error' : 'line-number';
-    row.style.height = `${measured[index].getBoundingClientRect().height}px`;
-    const marker = document.createElement('span');
-    marker.className = 'line-number-marker';
-    marker.textContent = diagnosticLines.has(physicalLine) ? '!' : '';
-    const label = document.createElement('span');
-    label.className = 'line-number-label';
-    label.textContent = labels[index] ?? '';
-
-    const collapsible = collapsibleObjectHeader(lines[index]);
-    if (collapsible) {
-      const collapsed = Boolean(foldedMarkerAfterLine(lines, index));
-      row.classList.add('collapsible');
-      row.title = collapsed ? 'Expand object' : 'Collapse object';
-      const arrow = document.createElement('span');
-      arrow.className = 'object-fold-arrow';
-      arrow.textContent = collapsed ? '▴' : '▾';
-      label.append(arrow);
-      row.addEventListener('pointerdown', (event) => {
-        const target = event.target as Element;
-        if (target.closest('.object-toggle-led')) return;
-        event.preventDefault();
-      });
-      row.addEventListener('click', (event) => {
-        const target = event.target as Element;
-        if (target.closest('.object-toggle-led')) return;
-        event.preventDefault();
-        event.stopPropagation();
-        toggleCollapsedObjectAtPhysicalLine(physicalLine);
-        editor.focus();
-      });
-    }
-
-    const objectState = liveDisableHeader(lines[index]);
-    if (objectState) {
-      const toggle = document.createElement('button');
-      toggle.type = 'button';
-      toggle.className = `object-toggle-led${objectState.disabled ? ' disabled' : ''}`;
-      toggle.setAttribute('aria-label', `${objectState.disabled ? 'Enable' : 'Disable'} object on line ${physicalLine}`);
-      toggle.title = objectState.disabled ? 'Enable object' : 'Disable object';
-      toggle.addEventListener('pointerdown', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-      });
-      toggle.addEventListener('click', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        toggleObjectDisabledAtPhysicalLine(physicalLine);
-        editor.focus();
-      });
-      row.append(toggle);
-    }
-
-    row.append(marker, label);
-    lineGutterContent.append(row);
-
-    const views = inlineByLine.get(physicalLine) ?? [];
-    for (let viewIndex = 0; viewIndex < views.length; viewIndex += 1) {
-      const spacer = document.createElement('div');
-      spacer.className = 'line-number-inline-spacer';
-      spacer.style.height = `${INLINE_VIEW_ROW_HEIGHT}px`;
-      lineGutterContent.append(spacer);
-    }
-  });
-  mirror.remove();
-  syncLineGutter();
+  editorFolding.renderGutter();
 }
 
 function statementLabels(source: string): string[] {
@@ -2541,7 +2170,7 @@ function renderSyntaxLayer(): void {
     const physicalLine = index + 1;
     const row = document.createElement('div');
     row.className = 'syntax-line';
-    if (foldMarkerId(line)) {
+    if (editorFolding.markerId(line)) {
       row.classList.add('syntax-fold-placeholder');
       row.textContent = '⋯';
       syntaxLayer.append(row);
@@ -2611,14 +2240,13 @@ function syncSyntaxLayer(): void {
 }
 
 function syncLineGutter(): void {
-  lineGutterContent.style.transform = `translateY(${-editor.scrollTop}px)`;
+  editorFolding.syncGutter();
 }
 
 function setSourceText(text: string): void {
   clearDiagnostic();
-  savedEditorSelection = null;
-  collapsedEditorBlocks.clear();
-  nextCollapsedEditorBlockId = 1;
+  shell.resetSavedEditorSelection();
+  editorFolding.clear();
   editor.value = text.replace(/\r\n/g, '\n');
   renderSyntaxLayer();
   renderLineGutter();
@@ -2631,133 +2259,30 @@ function placeCaretAtEnd(element: HTMLTextAreaElement): void {
   element.setSelectionRange(end, end);
 }
 
-function editorCaretOffset(): number {
-  return editor.selectionStart;
-}
-
 function editorOffsetRect(offset: number): DOMRect | null {
-  const safeOffset = Math.max(0, Math.min(editor.value.length, offset));
-  const editorRect = editor.getBoundingClientRect();
-  const style = getComputedStyle(editor);
-  const mirror = document.createElement('div');
-  mirror.setAttribute('aria-hidden', 'true');
-  mirror.style.position = 'fixed';
-  mirror.style.visibility = 'hidden';
-  mirror.style.pointerEvents = 'none';
-  mirror.style.left = `${editorRect.left}px`;
-  mirror.style.top = `${editorRect.top}px`;
-  mirror.style.width = `${editor.clientWidth}px`;
-  mirror.style.height = 'auto';
-  mirror.style.margin = '0';
-  mirror.style.padding = style.padding;
-  mirror.style.border = style.border;
-  mirror.style.boxSizing = style.boxSizing;
-  mirror.style.whiteSpace = 'pre-wrap';
-  mirror.style.overflowWrap = style.overflowWrap;
-  mirror.style.wordBreak = style.wordBreak;
-  mirror.style.fontFamily = style.fontFamily;
-  mirror.style.fontSize = style.fontSize;
-  mirror.style.fontWeight = style.fontWeight;
-  mirror.style.fontStyle = style.fontStyle;
-  mirror.style.fontVariant = style.fontVariant;
-  mirror.style.lineHeight = style.lineHeight;
-  mirror.style.letterSpacing = style.letterSpacing;
-  mirror.style.textTransform = style.textTransform;
-  mirror.style.tabSize = style.tabSize;
-
-  mirror.append(document.createTextNode(editor.value.slice(0, safeOffset)));
-  const marker = document.createElement('span');
-  marker.style.display = 'inline-block';
-  marker.style.width = '0';
-  marker.style.height = '1em';
-  marker.style.verticalAlign = 'top';
-  marker.textContent = '\u200b';
-  mirror.append(marker);
-  document.body.append(mirror);
-
-  const markerRect = marker.getBoundingClientRect();
-  mirror.remove();
-
-  const left = markerRect.left - editor.scrollLeft;
-  const physicalLine = editor.value.slice(0, safeOffset).split('\n').length;
-  const top = markerRect.top - editor.scrollTop + inlineSpacerBeforePhysicalLine(physicalLine);
-  return new DOMRect(left, top, 0, markerRect.height || Number.parseFloat(style.lineHeight) || 24);
-}
-
-function caretRect(): DOMRect | null {
-  return editorOffsetRect(editorCaretOffset());
-}
-
-function leaveBlockCaretTrail(): void {
-  if (screen !== 'live' || commandMode || document.activeElement !== editor) return;
-  if (blockCaret.classList.contains('hidden')) return;
-
-  const left = blockCaret.style.left;
-  const top = blockCaret.style.top;
-  if (!left || !top) return;
-
-  const trail = document.createElement('span');
-  trail.className = 'block-caret-trail';
-  trail.style.fontSize = blockCaret.style.fontSize;
-  trail.style.left = left;
-  trail.style.top = top;
-  phosphorLayer.append(trail);
-  window.setTimeout(() => trail.remove(), 360);
+  return editorVisual.offsetRect(offset);
 }
 
 function positionBlockCaret(): void {
-  if (screen !== 'live' || commandMode || document.activeElement !== editor) {
-    blockCaret.classList.add('hidden');
-    lastCaretTrailPosition = null;
-    return;
-  }
+  editorVisual.positionCaret();
+}
 
-  const rect = caretRect();
-  if (!rect) {
-    blockCaret.classList.add('hidden');
-    lastCaretTrailPosition = null;
-    return;
-  }
-
-  const host = phosphorLayer.getBoundingClientRect();
-  const editorStyle = getComputedStyle(editor);
-  const fontSize = Number.parseFloat(editorStyle.fontSize) || 20;
-  const left = rect.left - host.left;
-  const caretHeight = fontSize * 0.92;
-  const top = rect.top - host.top + Math.max(0, (rect.height - caretHeight) * 0.5);
-
-  if (lastCaretTrailPosition && (Math.abs(lastCaretTrailPosition.left - left) > 0.5 || Math.abs(lastCaretTrailPosition.top - top) > 0.5)) {
-    const trail = document.createElement('span');
-    trail.className = 'block-caret-trail';
-    trail.style.fontSize = `${fontSize}px`;
-    trail.style.left = `${lastCaretTrailPosition.left}px`;
-    trail.style.top = `${lastCaretTrailPosition.top}px`;
-    phosphorLayer.append(trail);
-    window.setTimeout(() => trail.remove(), 360);
-  }
-
-  lastCaretTrailPosition = { left, top };
-  blockCaret.style.fontSize = `${fontSize}px`;
-  blockCaret.style.left = `${left}px`;
-  blockCaret.style.top = `${top}px`;
-  blockCaret.classList.remove('hidden');
+function leaveBlockCaretTrail(): void {
+  editorVisual.leaveCaretTrail();
 }
 
 function flashAtCaret(text: string): void {
-  if (!text || text === '\n') return;
-  const rect = caretRect();
-  if (!rect) return;
+  editorVisual.flashAtCaret(text);
+}
 
-  const host = phosphorLayer.getBoundingClientRect();
-  const editorStyle = getComputedStyle(editor);
-  const fontSize = Number.parseFloat(editorStyle.fontSize) || 20;
-  const pulse = document.createElement('span');
-  pulse.className = 'phosphor-pulse';
-  pulse.style.fontSize = `${fontSize}px`;
-  pulse.style.left = `${rect.left - host.left}px`;
-  pulse.style.top = `${rect.top - host.top + Math.max(0, (rect.height - fontSize * 0.82) * 0.5)}px`;
-  phosphorLayer.appendChild(pulse);
-  window.setTimeout(() => pulse.remove(), 320);
+function resetSourceProject(): void {
+  setSourceText('');
+  runtime.evaluate('');
+  setCodeRunning(false);
+  activeCapabilities = new Set();
+  activeTuningHz = 440;
+  activeUseDirective = null;
+  syncViews();
 }
 
 function stopLiveCode(): void {
@@ -2770,136 +2295,24 @@ function stopLiveCode(): void {
 }
 
 async function runCommand(raw: string): Promise<void> {
-  const [name = '', ...args] = raw.trim().toLowerCase().split(/\s+/);
-
-  switch (name) {
-    case '':
-      leaveCommandMode();
-      return;
-    case 'config':
-      leaveCommandMode();
-      showScreen('config');
-      return;
-    case 'help':
-      leaveCommandMode();
-      showScreen('help');
-      return;
-    case 'about':
-      leaveCommandMode();
-      showScreen('about');
-      return;
-    case 'scheme':
-      leaveCommandMode();
-      showScreen('scheme');
-      return;
-    case 'new':
-    case 'clear':
-      setSourceText('');
-      runtime.evaluate('');
-      setCodeRunning(false);
-      activeCapabilities = new Set();
-      activeTuningHz = 440;
-      activeUseDirective = null;
-      syncViews();
-      leaveCommandMode();
-      notify('source cleared');
-      return;
-    case 'save':
-      leaveCommandMode();
-      await saveSource(args[0]);
-      return;
-    case 'load':
-      leaveCommandMode();
-      await loadSource();
-      return;
-    case 'run': {
-      leaveCommandMode();
-      const action = args[0]?.toLowerCase();
-      if (action === 'stop') {
-        stopLiveCode();
-        return;
-      }
-      if (action !== undefined) {
-        notify('usage: :run | :run stop');
-        return;
-      }
-      const applied = codeRunning ? recompileLiveCode() : evaluateLiveSource();
-      if (applied) {
-        setCodeRunning(true);
-        notify('live code running');
-      }
-      return;
-    }
-    case 'start':
-      leaveCommandMode();
-      try {
-        await audioEngine.start();
-        audioAutoStartPending = false;
-    if (!sourceText().trim()) runtime.evaluate('');
-    syncViews();
-        notify('audio engine running');
-      } catch (error) {
-        notify(error instanceof Error ? error.message : 'audio start failed');
-      }
-      return;
-    case 'stop':
-      leaveCommandMode();
-      try {
-        await audioEngine.stop();
-        notify('audio engine stopped');
-      } catch {
-        notify('audio stop failed');
-      }
-      return;
-    case 'test': {
-      leaveCommandMode();
-      if (args[0] === 'stop') {
-        audioEngine.stopTestTone();
-        notify('test tone stopped');
-        return;
-      }
-
-      const frequency = args[0] === undefined ? 440 : Number(args[0]);
-      try {
-        await audioEngine.testTone(frequency);
-        notify(`test tone ${Math.round(frequency)} hz`);
-      } catch (error) {
-        notify(error instanceof RangeError ? error.message : 'test tone failed');
-      }
-      return;
-    }
-    case 'clock': {
-      const action = args[0]?.toLowerCase();
-      if (action === 'start') { audioEngine.setClockTransport(true); notify('clock started'); }
-      else if (action === 'stop') { audioEngine.setClockTransport(false); notify('clock stopped'); }
-      else notify('usage: :clock start | :clock stop');
-      leaveCommandMode();
-      return;
-    }
-    case 'life': {
-      const action = args[0]?.toLowerCase();
-      if (action !== 'reset' || args.length > 2) {
-        notify('usage: :life reset [name]');
-        leaveCommandMode();
-        return;
-      }
-      const target = args[1];
-      const reset = runtime.resetLife(target);
-      syncViews();
-      leaveCommandMode();
-      if (reset.length === 0) notify(target ? `unknown SEQ life: ${target}` : 'no active SEQ life');
-      else notify(target ? `life ${target} reset` : `reset ${reset.length} life sequence${reset.length === 1 ? '' : 's'}`);
-      return;
-    }
-    case 'panic':
-      leaveCommandMode();
-      audioEngine.panic();
-      notify('panic');
-      return;
-    default:
-      leaveCommandMode();
-      notify(`unknown command: ${name}`);
-  }
+  await runAppCommand(raw, {
+    audioEngine,
+    runtime,
+    leaveCommandMode: () => shell.leaveCommandMode(),
+    showScreen: (next) => shell.showScreen(next),
+    clearSource: resetSourceProject,
+    saveSource,
+    loadSource,
+    stopLiveCode,
+    isCodeRunning: () => codeRunning,
+    evaluateLiveSource,
+    recompileLiveCode,
+    setCodeRunning,
+    sourceText,
+    setAudioAutoStartPending: (pending) => { audioAutoStartPending = pending; },
+    syncViews,
+    notify,
+  });
 }
 
 async function saveSource(fileName?: string): Promise<void> {
@@ -3047,81 +2460,6 @@ function afterEditorMutation(): void {
   requestAnimationFrame(positionBlockCaret);
 }
 
-function toggleLineComments(): void {
-  const value = editor.value;
-  const start = editor.selectionStart;
-  const end = editor.selectionEnd;
-  const direction = editor.selectionDirection ?? 'none';
-  const firstLineStart = value.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
-  const effectiveEnd = end > start && value[end - 1] === '\n' ? end - 1 : end;
-  const nextNewline = value.indexOf('\n', effectiveEnd);
-  const lastLineEnd = nextNewline < 0 ? value.length : nextNewline;
-  const block = value.slice(firstLineStart, lastLineEnd);
-  const lines = block.split('\n');
-  const nonBlank = lines.filter((line) => line.length > 0);
-  const uncomment = nonBlank.length > 0 && nonBlank.every((line) => line.startsWith('//'));
-  const transformed = lines.map((line) => {
-    if (!line) return line;
-    if (uncomment) return line.startsWith('// ') ? line.slice(3) : line.startsWith('//') ? line.slice(2) : line;
-    return `// ${line}`;
-  });
-  const replacement = transformed.join('\n');
-  const firstDelta = transformed[0].length - lines[0].length;
-  const totalDelta = replacement.length - block.length;
-
-  editor.setRangeText(replacement, firstLineStart, lastLineEnd, 'preserve');
-  if (start === end) {
-    const caret = Math.max(firstLineStart, start + firstDelta);
-    editor.setSelectionRange(caret, caret, direction);
-  } else {
-    const nextStart = Math.max(firstLineStart, start + firstDelta);
-    const nextEnd = Math.max(nextStart, end + totalDelta);
-    editor.setSelectionRange(nextStart, nextEnd, direction);
-  }
-  afterEditorMutation();
-}
-
-function objectHeaderOffsets(source: string): number[] {
-  const offsets: number[] = [];
-  const lines = source.split('\n');
-  let offset = 0;
-  for (const line of lines) {
-    const commentAt = commentStart(line);
-    const code = commentAt < 0 ? line : line.slice(0, commentAt);
-    if (/^\s*_?(VOICE|DRUMKIT|FX|FILTER|MOD|SEQ|REGISTER|LOGIC|CLOCK)\b/i.test(code)) {
-      offsets.push(offset + (line.match(/^\s*/)?.[0].length ?? 0));
-    }
-    offset += line.length + 1;
-  }
-  return offsets;
-}
-
-function navigateObject(direction: -1 | 1): void {
-  const headers = objectHeaderOffsets(editor.value);
-  if (headers.length === 0) {
-    notify('no objects');
-    return;
-  }
-
-  const caret = editor.selectionStart;
-  let target: number | undefined;
-  if (direction > 0) {
-    target = headers.find((offset) => offset > caret);
-  } else {
-    const currentOrPrevious = headers.filter((offset) => offset < caret);
-    target = currentOrPrevious.at(-1);
-  }
-
-  if (target === undefined) {
-    notify(direction > 0 ? 'last object' : 'first object');
-    return;
-  }
-
-  editor.focus();
-  editor.setSelectionRange(target, target);
-  requestAnimationFrame(positionBlockCaret);
-}
-
 function toggleCurrentObjectDisabled(): void {
   const value = editor.value;
   const caret = editor.selectionStart;
@@ -3163,7 +2501,7 @@ function toggleCurrentObjectDisabled(): void {
 }
 
 document.addEventListener('selectionchange', () => {
-  keepCaretOutOfFoldMarker();
+  editorFolding.keepCaretOutOfMarker();
   requestAnimationFrame(positionBlockCaret);
 });
 editor.addEventListener('input', () => {
@@ -3180,7 +2518,7 @@ editor.addEventListener('keyup', () => requestAnimationFrame(positionBlockCaret)
 editor.addEventListener('pointerdown', () => leaveBlockCaretTrail());
 editor.addEventListener('pointerup', () => requestAnimationFrame(() => {
   moveCaretAcrossLiveControlGap('nearest');
-  keepCaretOutOfFoldMarker();
+  editorFolding.keepCaretOutOfMarker();
   positionBlockCaret();
 }));
 liveScreen.addEventListener('scroll', () => {
@@ -3201,244 +2539,33 @@ window.addEventListener('resize', () => {
 editor.addEventListener('beforeinput', (event) => {
   const input = event as InputEvent;
   if (input.inputType.startsWith('insert') && editor.selectionStart === editor.selectionEnd) {
-    keepCaretOutOfFoldMarker();
+    editorFolding.keepCaretOutOfMarker();
     moveCaretAcrossLiveControlGap('forward');
   }
   if (input.inputType === 'insertText' && input.data) flashAtCaret(input.data);
 });
 
-editor.addEventListener('keydown', (event) => {
-  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) {
-    leaveBlockCaretTrail();
-  }
-
-  if (event.key === 'ArrowDown' && skipFoldMarkerWithArrow('down')) {
-    event.preventDefault();
-    requestAnimationFrame(positionBlockCaret);
-    return;
-  }
-  if (event.key === 'ArrowUp' && skipFoldMarkerWithArrow('up')) {
-    event.preventDefault();
-    requestAnimationFrame(positionBlockCaret);
-    return;
-  }
-  if ((event.key === 'Backspace' || event.key === 'Delete') && protectFoldMarkerBoundary(event.key)) {
-    event.preventDefault();
-    return;
-  }
-
-  if (event.key === 'ArrowRight' && editor.selectionStart === editor.selectionEnd) {
-    const caret = editor.selectionStart;
-    const gap = liveControlGapRanges(editor.value).find((candidate) => candidate.start === caret);
-    if (gap) { event.preventDefault(); editor.setSelectionRange(gap.end, gap.end); requestAnimationFrame(positionBlockCaret); return; }
-  }
-  if (event.key === 'ArrowLeft' && editor.selectionStart === editor.selectionEnd) {
-    const caret = editor.selectionStart;
-    const gap = liveControlGapRanges(editor.value).find((candidate) => candidate.end === caret);
-    if (gap) { event.preventDefault(); editor.setSelectionRange(gap.start, gap.start); requestAnimationFrame(positionBlockCaret); return; }
-  }
-  if (event.key === 'Backspace' && editor.selectionStart === editor.selectionEnd) {
-    const caret = editor.selectionStart;
-    const gap = liveControlGapRanges(editor.value).find((candidate) => candidate.end === caret);
-    if (gap) editor.setSelectionRange(gap.start, gap.start);
-  }
-
-  if (event.key === 'Escape') {
-    event.preventDefault();
-    openQuickMenu();
-    return;
-  }
-
-  if (event.key === '>' && !event.metaKey && !event.ctrlKey && !event.altKey) {
-    event.preventDefault();
-    enterCommandMode();
-    return;
-  }
-
-  if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && (event.metaKey || event.ctrlKey) && !event.altKey) {
-    event.preventDefault();
-    event.stopPropagation();
-    navigateObject(event.key === 'ArrowUp' ? -1 : 1);
-    return;
-  }
-
-  if (event.key === '/' && (event.metaKey || event.ctrlKey) && !event.altKey) {
-    event.preventDefault();
-    event.stopPropagation();
-    toggleLineComments();
-    return;
-  }
-
-  if (event.key === 'Backspace' && (event.metaKey || event.ctrlKey)) {
-    event.preventDefault();
-    event.stopPropagation();
-    stopLiveCode();
-    requestAnimationFrame(positionBlockCaret);
-    return;
-  }
-
-  if (event.key.toLowerCase() === 'k' && (event.metaKey || event.ctrlKey)) {
-    event.preventDefault();
-    event.stopPropagation();
-
-    const value = editor.value;
-    const caret = editor.selectionStart;
-    const lineStart = value.lastIndexOf('\n', Math.max(0, caret - 1)) + 1;
-    const nextNewline = value.indexOf('\n', caret);
-    const hasFollowingLine = nextNewline !== -1;
-    const deleteEnd = hasFollowingLine ? nextNewline + 1 : value.length;
-    const deleteStart = hasFollowingLine || lineStart === 0 ? lineStart : lineStart - 1;
-    const nextCaret = hasFollowingLine ? lineStart : Math.max(0, deleteStart);
-
-    editor.setRangeText('', deleteStart, deleteEnd, 'start');
-    editor.setSelectionRange(nextCaret, nextCaret);
-
-    renderSyntaxLayer();
-    renderLineGutter();
-    scheduleStoppedPreview();
-    requestAnimationFrame(positionBlockCaret);
-    return;
-  }
-
-  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-    event.preventDefault();
-    normalizeLanguageCommandCase();
-    recompileLiveCode();
-    requestAnimationFrame(positionBlockCaret);
-    return;
-  }
-
-  if (event.key === 'Enter') {
-    event.preventDefault();
-
-    normalizeLanguageCommandCase();
-
-    const start = editor.selectionStart;
-    const end = editor.selectionEnd;
-    const before = editor.value.slice(0, start);
-    const currentLineStart = before.lastIndexOf('\n') + 1;
-    const currentLineEndAt = editor.value.indexOf('\n', start);
-    const currentLineEnd = currentLineEndAt < 0 ? editor.value.length : currentLineEndAt;
-    const currentLine = editor.value.slice(currentLineStart, currentLineEnd);
-    const trimmed = currentLine.trim();
-    const currentIndent = currentLine.match(/^\s*/)?.[0] ?? '';
-
-    // A collapsed block is editor-atomic. Enter on its header creates a new
-    // peer line after the fold placeholder instead of reopening/editing its body.
-    if (start === end && collapsibleObjectHeader(currentLine)) {
-      const markerStart = currentLineEndAt < 0 ? -1 : currentLineEndAt + 1;
-      if (markerStart >= 0) {
-        const markerLineEndAt = editor.value.indexOf('\n', markerStart);
-        const markerLineEnd = markerLineEndAt < 0 ? editor.value.length : markerLineEndAt;
-        const markerLine = editor.value.slice(markerStart, markerLineEnd);
-        if (foldMarkerId(markerLine)) {
-          editor.setRangeText('\n', markerLineEnd, markerLineEnd, 'end');
-          refreshInlineViewEditingPreview();
-          renderSyntaxLayer();
-          renderLineGutter();
-          scheduleStoppedPreview();
-          requestAnimationFrame(positionBlockCaret);
-          return;
-        }
-      }
-    }
-
-    let indentation = currentIndent;
-    if (!trimmed) indentation = currentIndent.length >= 4 ? currentIndent.slice(0, -4) : '';
-    else if (/^_?(VOICE|DRUMKIT|FX|FILTER|MOD|SEQ|LOGIC|CLOCK)\b.*:\s*$/i.test(trimmed)) indentation = `${currentIndent}    `;
-
-    editor.setRangeText(`\n${indentation}`, start, end, 'end');
-
-    renderSyntaxLayer();
-    renderLineGutter();
-    scheduleStoppedPreview();
-
-    requestAnimationFrame(positionBlockCaret);
-    return;
-  }
-
-  if (event.key === 'Tab') {
-    event.preventDefault();
-
-    const start = editor.selectionStart;
-    const end = editor.selectionEnd;
-
-    // Emmet-style editor snippets. They are editor-only shorthand: the @ line
-    // is replaced by normal Sonus source before the compiler/runtime sees it.
-    if (!event.shiftKey && start === end) {
-      const value = editor.value;
-      const lineStart = value.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
-      const lineEndAt = value.indexOf('\n', start);
-      const lineEnd = lineEndAt < 0 ? value.length : lineEndAt;
-      const line = value.slice(lineStart, lineEnd);
-      const indentation = line.match(/^\s*/)?.[0] ?? '';
-      const snippetSource = line.trim();
-      const expansion = expandEditorSnippet(snippetSource);
-      if (expansion) {
-        const replacement = expansion.text
-          .split('\n')
-          .map((item) => `${indentation}${item}`)
-          .join('\n');
-        editor.setRangeText(replacement, lineStart, lineEnd, 'end');
-        refreshInlineViewEditingPreview();
-        renderSyntaxLayer();
-        renderLineGutter();
-        scheduleStoppedPreview();
-        notify(`expanded ${expansion.label}`);
-        requestAnimationFrame(positionBlockCaret);
-        return;
-      }
-      if (snippetSource.startsWith('@')) {
-        notify(`unknown snippet: ${snippetSource}`);
-        requestAnimationFrame(positionBlockCaret);
-        return;
-      }
-    }
-
-    const direction = editor.selectionDirection ?? 'none';
-    const value = editor.value;
-    const firstLineStart = value.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
-    const lastLineEndAt = value.indexOf('\n', end);
-    const lastLineEnd = lastLineEndAt < 0 ? value.length : lastLineEndAt;
-    const spansMultipleLines = value.slice(start, end).includes('\n');
-
-    if (!event.shiftKey && start === end) {
-      editor.setRangeText('    ', start, end, 'end');
-    } else {
-      const block = value.slice(firstLineStart, lastLineEnd);
-      const lines = block.split('\n');
-      const transformed = event.shiftKey
-        ? lines.map((line) => line.startsWith('    ') ? line.slice(4) : line.replace(/^ {1,3}/, ''))
-        : lines.map((line) => `    ${line}`);
-      const replacement = transformed.join('\n');
-
-      let nextStart = start;
-      let nextEnd = end;
-      if (event.shiftKey) {
-        const removedFirst = lines[0].length - transformed[0].length;
-        const removedTotal = block.length - replacement.length;
-        nextStart = Math.max(firstLineStart, start - removedFirst);
-        nextEnd = Math.max(nextStart, end - removedTotal);
-      } else {
-        nextStart = start + 4;
-        nextEnd = end + 4 * lines.length;
-      }
-
-      editor.setRangeText(replacement, firstLineStart, lastLineEnd, 'preserve');
-      if (start === end && !spansMultipleLines) {
-        editor.setSelectionRange(nextStart, nextStart, direction);
-      } else {
-        editor.setSelectionRange(nextStart, nextEnd, direction);
-      }
-    }
-
-    refreshInlineViewEditingPreview();
-    renderSyntaxLayer();
-    renderLineGutter();
-    scheduleStoppedPreview();
-    requestAnimationFrame(positionBlockCaret);
-    return;
-  }
+installEditorKeyboardBindings({
+  editor,
+  leaveBlockCaretTrail,
+  positionBlockCaret,
+  skipFoldMarkerWithArrow: (direction) => editorFolding.skipMarkerWithArrow(direction),
+  protectFoldMarkerBoundary: (key) => editorFolding.protectMarkerBoundary(key),
+  liveControlGapRanges,
+  openQuickMenu: () => shell.openQuickMenu(),
+  enterCommandMode: () => shell.enterCommandMode(),
+  stopLiveCode,
+  normalizeLanguageCommandCase,
+  recompileLiveCode,
+  collapsibleObjectHeader,
+  foldMarkerId: (line) => editorFolding.markerId(line),
+  refreshInlineViewEditingPreview,
+  renderSyntaxLayer,
+  renderLineGutter,
+  scheduleStoppedPreview,
+  notify,
+  afterEditorMutation,
+  commentStart,
 });
 
 
@@ -3506,7 +2633,7 @@ capabilityApply.addEventListener('click', () => { void applyCapabilityRestart();
 command.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
     event.preventDefault();
-    leaveCommandMode();
+    shell.leaveCommandMode();
     return;
   }
 
@@ -3523,11 +2650,11 @@ document.addEventListener('keydown', (event) => {
     return;
   }
 
-  if (!quickMenuOverlay.classList.contains('hidden')) {
+  if (shell.isQuickMenuOpen()) {
     event.preventDefault();
     event.stopImmediatePropagation();
-    if (event.key === 'Escape') closeQuickMenu();
-    else if (event.key === '>') { closeQuickMenu(); enterCommandMode(); }
+    if (event.key === 'Escape') shell.closeQuickMenu();
+    else if (event.key === '>') { shell.closeQuickMenu(); shell.enterCommandMode(); }
     else if (/^[caslrn]$/i.test(event.key)) void runQuickMenuAction(event.key);
     return;
   }
@@ -3550,14 +2677,14 @@ document.addEventListener('keydown', (event) => {
     return;
   }
 
-  if (screen === 'config') {
+  if (shell.screen === 'config') {
     const activeTextInput = document.activeElement === configObjectShortcut || document.activeElement === configSchemeShortcut;
     if (activeTextInput) {
       if (event.key === 'Escape') { event.preventDefault(); (document.activeElement as HTMLInputElement).blur(); return; }
       if (event.key === 'Enter') { event.preventDefault(); (document.activeElement as HTMLInputElement).blur(); return; }
       return;
     }
-    if (event.key === 'Escape') { event.preventDefault(); showScreen('live'); return; }
+    if (event.key === 'Escape') { event.preventDefault(); shell.showScreen('live'); return; }
     if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
       event.preventDefault();
       configNavigator.moveSelection(event.key === 'ArrowDown' ? 1 : -1);
@@ -3575,43 +2702,43 @@ document.addEventListener('keydown', (event) => {
     }
   }
 
-  if (commandMode) return;
+  if (shell.commandMode) return;
 
-  if (screen === 'live' && event.key === '>' && document.activeElement !== command) {
+  if (shell.screen === 'live' && event.key === '>' && document.activeElement !== command) {
     event.preventDefault();
     event.stopImmediatePropagation();
-    enterCommandMode();
+    shell.enterCommandMode();
     return;
   }
 
   const commandModifier = event.metaKey || event.ctrlKey;
-  if (commandModifier && !event.altKey && screen === 'live' && document.activeElement === editor && shortcutMatches(event, appConfig.objectToggleKey)) {
+  if (commandModifier && !event.altKey && shell.screen === 'live' && document.activeElement === editor && shortcutMatches(event, appConfig.objectToggleKey)) {
     event.preventDefault();
     event.stopImmediatePropagation();
     toggleCurrentObjectDisabled();
     return;
   }
 
-  if (commandModifier && !event.altKey && (screen === 'live' || screen === 'scheme') && shortcutMatches(event, appConfig.schemeToggleKey)) {
+  if (commandModifier && !event.altKey && (shell.screen === 'live' || shell.screen === 'scheme') && shortcutMatches(event, appConfig.schemeToggleKey)) {
     event.preventDefault();
     event.stopImmediatePropagation();
-    showScreen(screen === 'live' ? 'scheme' : 'live');
+    shell.showScreen(shell.screen === 'live' ? 'scheme' : 'live');
     return;
   }
 
-  if (event.key === 'Escape' && screen === 'live') {
+  if (event.key === 'Escape' && shell.screen === 'live') {
     event.preventDefault();
-    openQuickMenu();
+    shell.openQuickMenu();
     return;
   }
-  if (event.key === 'Escape' && (screen === 'help' || screen === 'about' || screen === 'scheme')) {
+  if (event.key === 'Escape' && (shell.screen === 'help' || shell.screen === 'about' || shell.screen === 'scheme')) {
     event.preventDefault();
-    showScreen('live');
+    shell.showScreen('live');
   }
 }, { capture: true });
 
 window.addEventListener('pointerdown', (event) => {
-  if (screen !== 'live' || commandMode) return;
+  if (shell.screen !== 'live' || shell.commandMode) return;
   if (event.target === editor || editor.contains(event.target as Node)) return;
   editor.focus();
   requestAnimationFrame(positionBlockCaret);
