@@ -50,6 +50,8 @@ app.innerHTML = `
           <label class="config-row" data-config-key="metrics"><span>METRICS PANEL</span><input id="config-metrics" type="checkbox" /></label>
           <label class="config-row" data-config-key="dsp"><span>DSP STATUS</span><input id="config-dsp" type="checkbox" /></label>
           <label class="config-row" data-config-key="liveRate"><span>LIVE CONTROL RATE</span><select id="config-live-rate"><option value="60">60 HZ</option><option value="30">30 HZ</option><option value="20">20 HZ</option><option value="15">15 HZ</option></select></label>
+          <label class="config-row" data-config-key="objectShortcut"><span>OBJECT TOGGLE KEY</span><input id="config-object-shortcut" type="text" maxlength="1" size="2" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Object toggle shortcut key" /></label>
+          <label class="config-row" data-config-key="schemeShortcut"><span>SCHEME TOGGLE KEY</span><input id="config-scheme-shortcut" type="text" maxlength="1" size="2" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Scheme toggle shortcut key" /></label>
         </div>
         <div class="system-copy muted">↑ ↓ SELECT &nbsp; ← → CHANGE &nbsp; ENTER TOGGLE / SELECT</div>
         <div class="system-copy muted">OUTPUT LEVEL APPLIES IMMEDIATELY · DEVICE, SAMPLE RATE OR LATENCY MODE CHANGES REQUIRE ENGINE RESTART</div>
@@ -82,7 +84,10 @@ app.innerHTML = `
           <span>&gt;SCHEME</span><span>SHOW READ-ONLY SIGNAL SCHEME</span>
           <span>ESC</span><span>OPEN QUICK MENU</span>
           <span>&gt;</span><span>OPEN COMMAND PROMPT</span>
-          <span>TAB</span><span>TOGGLE LIVE / SCHEME</span>
+          <span>TAB / SHIFT+TAB</span><span>INDENT / DEDENT</span>
+          <span id="help-object-shortcut">CMD/CTRL+\\</span><span>TOGGLE CURRENT OBJECT</span>
+          <span id="help-scheme-shortcut">CMD/CTRL+1</span><span>TOGGLE LIVE / SCHEME</span>
+          <span>CMD/CTRL+/</span><span>COMMENT / UNCOMMENT LINE(S)</span>
           <span>&gt;SAVE</span><span>SAVE SOURCE FILE</span>
           <span>&gt;LOAD</span><span>LOAD SOURCE FILE</span>
           <span>&gt;NEW</span><span>CLEAR SOURCE</span>
@@ -111,7 +116,7 @@ app.innerHTML = `
             <div id="scheme-nodes" class="scheme-nodes"></div>
           </div>
         </div>
-        <div class="scheme-hints">ESC / TAB&nbsp;&nbsp;LIVE</div>
+        <div id="scheme-hints" class="scheme-hints">ESC / CMD/CTRL+1&nbsp;&nbsp;LIVE</div>
       </div>
 
       <div id="audio-start-overlay" class="audio-start-overlay" role="dialog" aria-modal="true" aria-label="Start audio engine">
@@ -345,6 +350,7 @@ const schemeViewport = must<HTMLElement>('scheme-viewport');
 const schemeWorld = must<HTMLElement>('scheme-world');
 const schemeEdges = must<SVGSVGElement>('scheme-edges');
 const schemeNodes = must<HTMLElement>('scheme-nodes');
+const schemeHints = must<HTMLElement>('scheme-hints');
 const audioStartOverlay = must<HTMLElement>('audio-start-overlay');
 const audioStartButton = must<HTMLButtonElement>('audio-start-button');
 const audioStartStatus = must<HTMLElement>('audio-start-status');
@@ -363,6 +369,10 @@ const configVars = must<HTMLInputElement>('config-vars');
 const configMetrics = must<HTMLInputElement>('config-metrics');
 const configDsp = must<HTMLInputElement>('config-dsp');
 const configLiveRate = must<HTMLSelectElement>('config-live-rate');
+const configObjectShortcut = must<HTMLInputElement>('config-object-shortcut');
+const configSchemeShortcut = must<HTMLInputElement>('config-scheme-shortcut');
+const helpObjectShortcut = must<HTMLElement>('help-object-shortcut');
+const helpSchemeShortcut = must<HTMLElement>('help-scheme-shortcut');
 const configOutput = must<HTMLSelectElement>('config-output');
 const configSampleRate = must<HTMLSelectElement>('config-sample-rate');
 const configLatencyMode = must<HTMLSelectElement>('config-latency-mode');
@@ -414,9 +424,11 @@ type AppConfig = {
   outputDeviceId: string;
   latencyMode: AudioLatencyMode;
   outputLevel: number;
+  objectToggleKey: string;
+  schemeToggleKey: string;
 };
 let appConfig: AppConfig = {
-  showVariables: true,
+  showVariables: false,
   showMetrics: false,
   showDspStatus: true,
   liveControlHz: 60,
@@ -424,6 +436,8 @@ let appConfig: AppConfig = {
   outputDeviceId: '',
   latencyMode: 'interactive',
   outputLevel: 100,
+  objectToggleKey: '\\',
+  schemeToggleKey: '1',
 };
 let configSelectionIndex = 0;
 let pendingAudioConfig: { sampleRate: SampleRateChoice; outputDeviceId: string; latencyMode: AudioLatencyMode } | null = null;
@@ -451,6 +465,20 @@ audioEngine.setHardwareOutputLevel(appConfig.outputLevel);
 applyAppConfig();
 
 
+function normalizeShortcutKey(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') return fallback;
+  const characters = Array.from(value.trim());
+  if (characters.length !== 1 || characters[0] === '/') return fallback;
+  const key = characters[0];
+  return /^[A-Z]$/i.test(key) ? key.toLowerCase() : key;
+}
+
+function shortcutMatches(event: KeyboardEvent, configuredKey: string): boolean {
+  const eventKey = /^[A-Z]$/i.test(event.key) ? event.key.toLowerCase() : event.key;
+  const targetKey = /^[A-Z]$/i.test(configuredKey) ? configuredKey.toLowerCase() : configuredKey;
+  return eventKey === targetKey;
+}
+
 function loadAppConfig(): void {
   try {
     const raw = localStorage.getItem(CONFIG_STATE_KEY);
@@ -458,7 +486,7 @@ function loadAppConfig(): void {
     const parsed = JSON.parse(raw) as Partial<AppConfig>;
     const hz = parsed.liveControlHz;
     appConfig = {
-      showVariables: parsed.showVariables ?? true,
+      showVariables: parsed.showVariables ?? false,
       showMetrics: parsed.showMetrics ?? false,
       showDspStatus: parsed.showDspStatus ?? true,
       liveControlHz: hz === 30 || hz === 20 || hz === 15 ? hz : 60,
@@ -468,9 +496,13 @@ function loadAppConfig(): void {
       outputLevel: Number.isFinite(parsed.outputLevel)
         ? Math.max(0, Math.min(200, Number(parsed.outputLevel)))
         : 100,
+      objectToggleKey: normalizeShortcutKey(parsed.objectToggleKey, '\\'),
+      // v2 briefly shipped '|' as the Scheme default. Migrate that default
+      // because modifier handling varies across keyboard layouts/browsers.
+      schemeToggleKey: normalizeShortcutKey(parsed.schemeToggleKey === '|' ? undefined : parsed.schemeToggleKey, '1'),
     };
   } catch {
-    appConfig = { showVariables: true, showMetrics: false, showDspStatus: true, liveControlHz: 60, sampleRate: 0, outputDeviceId: '', latencyMode: 'interactive', outputLevel: 100 };
+    appConfig = { showVariables: false, showMetrics: false, showDspStatus: true, liveControlHz: 60, sampleRate: 0, outputDeviceId: '', latencyMode: 'interactive', outputLevel: 100, objectToggleKey: '\\', schemeToggleKey: '1' };
   }
 }
 
@@ -483,6 +515,11 @@ function applyAppConfig(): void {
   configMetrics.checked = appConfig.showMetrics;
   configDsp.checked = appConfig.showDspStatus;
   configLiveRate.value = String(appConfig.liveControlHz);
+  configObjectShortcut.value = appConfig.objectToggleKey;
+  configSchemeShortcut.value = appConfig.schemeToggleKey;
+  helpObjectShortcut.textContent = `CMD/CTRL+${appConfig.objectToggleKey}`;
+  helpSchemeShortcut.textContent = `CMD/CTRL+${appConfig.schemeToggleKey}`;
+  schemeHints.textContent = `ESC / CMD/CTRL+${appConfig.schemeToggleKey}  LIVE`;
   configSampleRate.value = String(appConfig.sampleRate);
   configOutput.value = appConfig.outputDeviceId;
   configLatencyMode.value = appConfig.latencyMode;
@@ -492,6 +529,29 @@ function applyAppConfig(): void {
   dspStatus.closest('.status-item')?.classList.toggle('hidden', !appConfig.showDspStatus);
   liveControlRefreshMs = Math.round(1000 / appConfig.liveControlHz);
   syncViews();
+}
+
+function commitShortcutKey(kind: 'object' | 'scheme', rawValue: string): void {
+  const fallback = kind === 'object' ? appConfig.objectToggleKey : appConfig.schemeToggleKey;
+  const input = kind === 'object' ? configObjectShortcut : configSchemeShortcut;
+  const rawCharacters = Array.from(rawValue.trim());
+  if (rawCharacters.length !== 1 || rawCharacters[0] === '/') {
+    input.value = fallback;
+    notify(rawCharacters[0] === '/' ? 'cmd/ctrl+/ is reserved for comments' : 'shortcut key must be one character');
+    return;
+  }
+  const normalized = normalizeShortcutKey(rawCharacters[0], fallback);
+  const other = kind === 'object' ? appConfig.schemeToggleKey : appConfig.objectToggleKey;
+  if (normalized === other) {
+    input.value = fallback;
+    notify('shortcut conflict');
+    return;
+  }
+  if (kind === 'object') appConfig.objectToggleKey = normalized;
+  else appConfig.schemeToggleKey = normalized;
+  input.value = normalized;
+  saveAppConfig();
+  applyAppConfig();
 }
 
 function configRows(): HTMLElement[] {
@@ -522,6 +582,8 @@ function activateConfigRow(direction: -1 | 0 | 1): void {
   if (control instanceof HTMLInputElement && control.type === 'checkbox') {
     control.checked = direction === 0 ? !control.checked : direction > 0;
     control.dispatchEvent(new Event('change', { bubbles: true }));
+  } else if (control instanceof HTMLInputElement && control.type === 'text') {
+    if (direction === 0) { control.focus(); control.select(); }
   } else if (control instanceof HTMLInputElement && control.type === 'range') {
     if (direction === 0) return;
     const step = Number(control.step || '1') || 1;
@@ -1434,19 +1496,24 @@ function syncViews(): void {
     defaultCollapsed: false,
   }));
 
-  const clock = nodes.get('Clock');
-  const clockBpm = audioEngine.getClockStatus().bpm;
-  const clockActive = clockBpm > 0;
-  if (clockActive && !clockWasActive && !panelExplicitState.has('Clock')) panelCollapsed.set('Clock', false);
-  if (!clockActive && !panelExplicitState.has('Clock')) panelCollapsed.set('Clock', true);
-  clockWasActive = clockActive;
-  panels.push(buildModuleMonitorPanel({
-    id: 'Clock',
-    title: 'CLOCK',
-    parameters: clock?.parameters ?? [],
-    signals: signalViews.has('Clock.out') ? [{ signal: 'Clock.out', kind: 'trigger', label: 'OUT' }] : [],
-    defaultCollapsed: !clockActive,
-  }));
+  const clockViewEnabled = /^\s*_?CLOCK\s+SET\b[^\n]*\bWITH\s+VIEW\b/im.test(sourceText());
+  if (clockViewEnabled) {
+    const clock = nodes.get('Clock');
+    const clockBpm = audioEngine.getClockStatus().bpm;
+    const clockActive = clockBpm > 0;
+    if (clockActive && !clockWasActive && !panelExplicitState.has('Clock')) panelCollapsed.set('Clock', false);
+    if (!clockActive && !panelExplicitState.has('Clock')) panelCollapsed.set('Clock', true);
+    clockWasActive = clockActive;
+    panels.push(buildModuleMonitorPanel({
+      id: 'Clock',
+      title: 'CLOCK',
+      parameters: clock?.parameters ?? [],
+      signals: signalViews.has('Clock.out') ? [{ signal: 'Clock.out', kind: 'trigger', label: 'OUT' }] : [],
+      defaultCollapsed: !clockActive,
+    }));
+  } else {
+    clockWasActive = false;
+  }
 
   for (const node of scheme.nodes) {
     if (node.id === 'Audio' || node.id === 'Clock') continue;
@@ -4196,6 +4263,90 @@ function applyImmediateLiveDisableEdits(): void {
   liveDisableSnapshot = nextSnapshot;
 }
 
+function afterEditorMutation(): void {
+  normalizeLanguageCommandCase();
+  applyImmediateLiveDisableEdits();
+  refreshInlineViewEditingPreview();
+  renderSyntaxLayer();
+  renderLineGutter();
+  scheduleStoppedPreview();
+  requestAnimationFrame(positionBlockCaret);
+}
+
+function toggleLineComments(): void {
+  const value = editor.value;
+  const start = editor.selectionStart;
+  const end = editor.selectionEnd;
+  const direction = editor.selectionDirection ?? 'none';
+  const firstLineStart = value.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
+  const effectiveEnd = end > start && value[end - 1] === '\n' ? end - 1 : end;
+  const nextNewline = value.indexOf('\n', effectiveEnd);
+  const lastLineEnd = nextNewline < 0 ? value.length : nextNewline;
+  const block = value.slice(firstLineStart, lastLineEnd);
+  const lines = block.split('\n');
+  const nonBlank = lines.filter((line) => line.length > 0);
+  const uncomment = nonBlank.length > 0 && nonBlank.every((line) => line.startsWith('//'));
+  const transformed = lines.map((line) => {
+    if (!line) return line;
+    if (uncomment) return line.startsWith('// ') ? line.slice(3) : line.startsWith('//') ? line.slice(2) : line;
+    return `// ${line}`;
+  });
+  const replacement = transformed.join('\n');
+  const firstDelta = transformed[0].length - lines[0].length;
+  const totalDelta = replacement.length - block.length;
+
+  editor.setRangeText(replacement, firstLineStart, lastLineEnd, 'preserve');
+  if (start === end) {
+    const caret = Math.max(firstLineStart, start + firstDelta);
+    editor.setSelectionRange(caret, caret, direction);
+  } else {
+    const nextStart = Math.max(firstLineStart, start + firstDelta);
+    const nextEnd = Math.max(nextStart, end + totalDelta);
+    editor.setSelectionRange(nextStart, nextEnd, direction);
+  }
+  afterEditorMutation();
+}
+
+function toggleCurrentObjectDisabled(): void {
+  const value = editor.value;
+  const caret = editor.selectionStart;
+  const lineEnd = value.indexOf('\n', caret);
+  const throughCurrentLine = value.slice(0, lineEnd < 0 ? value.length : lineEnd);
+  const lines = throughCurrentLine.split('\n');
+  let targetStart = -1;
+  let targetLine = '';
+
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index];
+    if (/^\s*_?(VOICE|DRUMKIT|FX|FILTER|MOD|SEQ|REGISTER|LOGIC|CLOCK)\b/i.test(line)) {
+      targetStart = lines.slice(0, index).reduce((total, item) => total + item.length + 1, 0);
+      targetLine = line;
+      break;
+    }
+  }
+
+  if (targetStart < 0) {
+    notify('no object at cursor');
+    return;
+  }
+
+  const match = targetLine.match(/^(\s*)(_?)/);
+  const indentation = match?.[1] ?? '';
+  const disabled = match?.[2] === '_';
+  const markerStart = targetStart + indentation.length;
+  const originalStart = editor.selectionStart;
+  const originalEnd = editor.selectionEnd;
+  const direction = editor.selectionDirection ?? 'none';
+  if (disabled) editor.setRangeText('', markerStart, markerStart + 1, 'preserve');
+  else editor.setRangeText('_', markerStart, markerStart, 'preserve');
+
+  const delta = disabled ? -1 : 1;
+  const selectionStart = Math.max(0, originalStart + (originalStart > markerStart ? delta : 0));
+  const selectionEnd = Math.max(selectionStart, originalEnd + (originalEnd > markerStart ? delta : 0));
+  editor.setSelectionRange(selectionStart, selectionEnd, direction);
+  afterEditorMutation();
+}
+
 document.addEventListener('selectionchange', () => requestAnimationFrame(positionBlockCaret));
 editor.addEventListener('input', () => {
   normalizeLanguageCommandCase();
@@ -4264,6 +4415,13 @@ editor.addEventListener('keydown', (event) => {
     return;
   }
 
+  if (event.key === '/' && (event.metaKey || event.ctrlKey) && !event.altKey) {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleLineComments();
+    return;
+  }
+
   if (event.key === 'Backspace' && (event.metaKey || event.ctrlKey)) {
     event.preventDefault();
     event.stopPropagation();
@@ -4329,13 +4487,54 @@ editor.addEventListener('keydown', (event) => {
     return;
   }
 
-  if (event.key === 'Tab' && event.shiftKey) {
+  if (event.key === 'Tab') {
     event.preventDefault();
+
     const start = editor.selectionStart;
     const end = editor.selectionEnd;
-    editor.setRangeText('  ', start, end, 'end');
+    const direction = editor.selectionDirection ?? 'none';
+    const value = editor.value;
+    const firstLineStart = value.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
+    const lastLineEndAt = value.indexOf('\n', end);
+    const lastLineEnd = lastLineEndAt < 0 ? value.length : lastLineEndAt;
+    const spansMultipleLines = value.slice(start, end).includes('\n');
+
+    if (!event.shiftKey && start === end) {
+      editor.setRangeText('    ', start, end, 'end');
+    } else {
+      const block = value.slice(firstLineStart, lastLineEnd);
+      const lines = block.split('\n');
+      const transformed = event.shiftKey
+        ? lines.map((line) => line.startsWith('    ') ? line.slice(4) : line.replace(/^ {1,3}/, ''))
+        : lines.map((line) => `    ${line}`);
+      const replacement = transformed.join('\n');
+
+      let nextStart = start;
+      let nextEnd = end;
+      if (event.shiftKey) {
+        const removedFirst = lines[0].length - transformed[0].length;
+        const removedTotal = block.length - replacement.length;
+        nextStart = Math.max(firstLineStart, start - removedFirst);
+        nextEnd = Math.max(nextStart, end - removedTotal);
+      } else {
+        nextStart = start + 4;
+        nextEnd = end + 4 * lines.length;
+      }
+
+      editor.setRangeText(replacement, firstLineStart, lastLineEnd, 'preserve');
+      if (start === end && !spansMultipleLines) {
+        editor.setSelectionRange(nextStart, nextStart, direction);
+      } else {
+        editor.setSelectionRange(nextStart, nextEnd, direction);
+      }
+    }
+
+    refreshInlineViewEditingPreview();
+    renderSyntaxLayer();
+    renderLineGutter();
     scheduleStoppedPreview();
     requestAnimationFrame(positionBlockCaret);
+    return;
   }
 });
 
@@ -4360,6 +4559,14 @@ configLiveRate.addEventListener('change', () => {
   appConfig.liveControlHz = hz === 30 || hz === 20 || hz === 15 ? hz : 60;
   saveAppConfig();
   applyAppConfig();
+});
+configObjectShortcut.addEventListener('change', () => commitShortcutKey('object', configObjectShortcut.value));
+configSchemeShortcut.addEventListener('change', () => commitShortcutKey('scheme', configSchemeShortcut.value));
+configObjectShortcut.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') { event.preventDefault(); configObjectShortcut.blur(); }
+});
+configSchemeShortcut.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') { event.preventDefault(); configSchemeShortcut.blur(); }
 });
 configOutputLevel.addEventListener('input', () => {
   const level = Math.max(0, Math.min(200, Number(configOutputLevel.value)));
@@ -4439,6 +4646,12 @@ document.addEventListener('keydown', (event) => {
   }
 
   if (screen === 'config') {
+    const activeTextInput = document.activeElement === configObjectShortcut || document.activeElement === configSchemeShortcut;
+    if (activeTextInput) {
+      if (event.key === 'Escape') { event.preventDefault(); (document.activeElement as HTMLInputElement).blur(); return; }
+      if (event.key === 'Enter') { event.preventDefault(); (document.activeElement as HTMLInputElement).blur(); return; }
+      return;
+    }
     if (event.key === 'Escape') { event.preventDefault(); showScreen('live'); return; }
     if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
       event.preventDefault();
@@ -4468,13 +4681,19 @@ document.addEventListener('keydown', (event) => {
     return;
   }
 
-  if (event.key === 'Tab' && !event.shiftKey) {
-    if (screen === 'live' || screen === 'scheme') {
-      event.preventDefault();
-      event.stopPropagation();
-      showScreen(screen === 'live' ? 'scheme' : 'live');
-      return;
-    }
+  const commandModifier = event.metaKey || event.ctrlKey;
+  if (commandModifier && !event.altKey && screen === 'live' && document.activeElement === editor && shortcutMatches(event, appConfig.objectToggleKey)) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    toggleCurrentObjectDisabled();
+    return;
+  }
+
+  if (commandModifier && !event.altKey && (screen === 'live' || screen === 'scheme') && shortcutMatches(event, appConfig.schemeToggleKey)) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    showScreen(screen === 'live' ? 'scheme' : 'live');
+    return;
   }
 
   if (event.key === 'Escape' && screen === 'live') {

@@ -2760,7 +2760,7 @@ function compileClockProperty(
 
 function compileClock(lineText: string, line: number): string {
   const match = lineText.match(/^(_)?CLOCK\s+set\s+(.+?)\s+bpm(?:\s+with\s+(.+))?$/i);
-  if (!match) throw new LanguageError([{ line, message: 'CLOCK expects: CLOCK set <expression> bpm [with jitter <0..100>, drifter <0..100>]' }]);
+  if (!match) throw new LanguageError([{ line, message: 'CLOCK expects: CLOCK set <expression> bpm [with view, jitter <0..100>, drifter <0..100>]' }]);
   const disabled = Boolean(match[1]);
   const expression = match[2].trim();
   if (!expression) throw new LanguageError([{ line, message: 'CLOCK set expects a BPM expression' }]);
@@ -2780,7 +2780,7 @@ function compileClock(lineText: string, line: number): string {
       if (timingDrift < 0 || timingDrift > 100) throw new LanguageError([{ line, message: 'CLOCK drifter expects 0..100' }]);
       continue;
     }
-    if (/^view$/i.test(modifier)) throw new LanguageError([{ line, message: 'the master CLOCK view is always active; WITH VIEW is only for named clocks' }]);
+    if (/^view$/i.test(modifier)) continue;
     throw new LanguageError([{ line, message: `CLOCK does not support modifier '${modifier}'` }]);
   }
   return `__masterclock(${JSON.stringify(expression)},0,"ms",false,${jitter},${timingDrift},${disabled});`;
