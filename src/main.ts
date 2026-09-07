@@ -1,5 +1,16 @@
 import './style.css';
 import { AudioEngine, type AudioLatencyMode } from './audio/engine';
+import {
+  createDefaultAppConfig,
+  loadAppConfig as readAppConfig,
+  normalizeShortcutKey,
+  parseSampleRateChoice,
+  saveAppConfig as persistAppConfig,
+  shortcutMatches,
+  type AppConfig,
+  type AudioConfigChoice,
+} from './config/app-config';
+import { ConfigScreenNavigator } from './ui/config-screen';
 import { SonusEvaluationError, SonusRuntime, type InlineViewState } from './language/runtime';
 import { compileLanguageSource, LanguageError, parseProgramCapabilities, type ProgramCapability } from './language/language';
 import { parameterUpdatePolicy, type ParameterUpdatePolicy } from './language/parameter-policy';
@@ -526,36 +537,8 @@ let editingInlineViews: InlineViewState[] | null = null;
 let pendingLiveUpdate: { compiled: string; hasMasterClock: boolean } | null = null;
 let pendingLiveUpdateUnsubscribe: (() => void) | null = null;
 let diagnosticLines = new Set<number>();
-const CONFIG_STATE_KEY = 'sonus-umbrae.config';
-type SampleRateChoice = 0 | 44100 | 48000 | 88200 | 96000;
-type AppConfig = {
-  showVariables: boolean;
-  showMetrics: boolean;
-  showAssets: boolean;
-  showDspStatus: boolean;
-  liveControlHz: 60 | 30 | 20 | 15;
-  sampleRate: SampleRateChoice;
-  outputDeviceId: string;
-  latencyMode: AudioLatencyMode;
-  outputLevel: number;
-  objectToggleKey: string;
-  schemeToggleKey: string;
-};
-let appConfig: AppConfig = {
-  showVariables: false,
-  showMetrics: false,
-  showAssets: false,
-  showDspStatus: true,
-  liveControlHz: 60,
-  sampleRate: 0,
-  outputDeviceId: '',
-  latencyMode: 'interactive',
-  outputLevel: 100,
-  objectToggleKey: '\\',
-  schemeToggleKey: '1',
-};
-let configSelectionIndex = 0;
-let pendingAudioConfig: { sampleRate: SampleRateChoice; outputDeviceId: string; latencyMode: AudioLatencyMode } | null = null;
+let appConfig: AppConfig = createDefaultAppConfig();
+let pendingAudioConfig: AudioConfigChoice | null = null;
 let activeTuningHz = 440;
 let activeCapabilities = new Set<ProgramCapability>();
 let activeUseDirective: string | null = null;
@@ -577,8 +560,9 @@ const schemeRenderer = new SchemeRenderer({
   },
 });
 const scopeRenderer = new ScopeRenderer(audioEngine);
+const configNavigator = new ConfigScreenNavigator(configScreen);
 
-loadAppConfig();
+appConfig = readAppConfig();
 audioEngine.setPreferredAudioConfiguration({
   sampleRate: appConfig.sampleRate === 0 ? null : appConfig.sampleRate,
   outputDeviceId: appConfig.outputDeviceId || null,
@@ -588,50 +572,8 @@ audioEngine.setHardwareOutputLevel(appConfig.outputLevel);
 applyAppConfig();
 
 
-function normalizeShortcutKey(value: unknown, fallback: string): string {
-  if (typeof value !== 'string') return fallback;
-  const characters = Array.from(value.trim());
-  if (characters.length !== 1 || characters[0] === '/') return fallback;
-  const key = characters[0];
-  return /^[A-Z]$/i.test(key) ? key.toLowerCase() : key;
-}
-
-function shortcutMatches(event: KeyboardEvent, configuredKey: string): boolean {
-  const eventKey = /^[A-Z]$/i.test(event.key) ? event.key.toLowerCase() : event.key;
-  const targetKey = /^[A-Z]$/i.test(configuredKey) ? configuredKey.toLowerCase() : configuredKey;
-  return eventKey === targetKey;
-}
-
-function loadAppConfig(): void {
-  try {
-    const raw = localStorage.getItem(CONFIG_STATE_KEY);
-    if (!raw) return;
-    const parsed = JSON.parse(raw) as Partial<AppConfig>;
-    const hz = parsed.liveControlHz;
-    appConfig = {
-      showVariables: parsed.showVariables ?? false,
-      showMetrics: parsed.showMetrics ?? false,
-      showAssets: parsed.showAssets ?? false,
-      showDspStatus: parsed.showDspStatus ?? true,
-      liveControlHz: hz === 30 || hz === 20 || hz === 15 ? hz : 60,
-      sampleRate: parsed.sampleRate === 44100 || parsed.sampleRate === 48000 || parsed.sampleRate === 88200 || parsed.sampleRate === 96000 ? parsed.sampleRate : 0,
-      outputDeviceId: typeof parsed.outputDeviceId === 'string' ? parsed.outputDeviceId : '',
-      latencyMode: parsed.latencyMode === 'balanced' || parsed.latencyMode === 'playback' ? parsed.latencyMode : 'interactive',
-      outputLevel: Number.isFinite(parsed.outputLevel)
-        ? Math.max(0, Math.min(200, Number(parsed.outputLevel)))
-        : 100,
-      objectToggleKey: normalizeShortcutKey(parsed.objectToggleKey, '\\'),
-      // v2 briefly shipped '|' as the Scheme default. Migrate that default
-      // because modifier handling varies across keyboard layouts/browsers.
-      schemeToggleKey: normalizeShortcutKey(parsed.schemeToggleKey === '|' ? undefined : parsed.schemeToggleKey, '1'),
-    };
-  } catch {
-    appConfig = { showVariables: false, showMetrics: false, showAssets: false, showDspStatus: true, liveControlHz: 60, sampleRate: 0, outputDeviceId: '', latencyMode: 'interactive', outputLevel: 100, objectToggleKey: '\\', schemeToggleKey: '1' };
-  }
-}
-
 function saveAppConfig(): void {
-  localStorage.setItem(CONFIG_STATE_KEY, JSON.stringify(appConfig));
+  persistAppConfig(appConfig);
 }
 
 function applyAppConfig(): void {
@@ -679,48 +621,6 @@ function commitShortcutKey(kind: 'object' | 'scheme', rawValue: string): void {
   applyAppConfig();
 }
 
-function configRows(): HTMLElement[] {
-  return [...configScreen.querySelectorAll<HTMLElement>('.config-row[data-config-key]')];
-}
-
-function updateConfigSelection(): void {
-  const rows = configRows();
-  if (rows.length === 0) return;
-  configSelectionIndex = Math.max(0, Math.min(rows.length - 1, configSelectionIndex));
-  rows.forEach((row, index) => row.classList.toggle('selected', index === configSelectionIndex));
-  rows[configSelectionIndex].scrollIntoView({ block: 'nearest' });
-}
-
-function cycleSelect(select: HTMLSelectElement, direction: -1 | 1): void {
-  if (select.options.length === 0 || select.disabled) return;
-  const index = Math.max(0, select.selectedIndex);
-  const next = (index + direction + select.options.length) % select.options.length;
-  select.selectedIndex = next;
-  select.dispatchEvent(new Event('change', { bubbles: true }));
-}
-
-function activateConfigRow(direction: -1 | 0 | 1): void {
-  const row = configRows()[configSelectionIndex];
-  if (!row) return;
-  const control = row.querySelector<HTMLInputElement | HTMLSelectElement>('input, select');
-  if (!control || control.disabled) return;
-  if (control instanceof HTMLInputElement && control.type === 'checkbox') {
-    control.checked = direction === 0 ? !control.checked : direction > 0;
-    control.dispatchEvent(new Event('change', { bubbles: true }));
-  } else if (control instanceof HTMLInputElement && control.type === 'text') {
-    if (direction === 0) { control.focus(); control.select(); }
-  } else if (control instanceof HTMLInputElement && control.type === 'range') {
-    if (direction === 0) return;
-    const step = Number(control.step || '1') || 1;
-    const min = Number(control.min || '0');
-    const max = Number(control.max || '100');
-    control.value = String(Math.max(min, Math.min(max, Number(control.value) + direction * step)));
-    control.dispatchEvent(new Event('input', { bubbles: true }));
-  } else if (control instanceof HTMLSelectElement) {
-    cycleSelect(control, direction === 0 ? 1 : direction);
-  }
-}
-
 async function refreshAudioConfigUi(): Promise<void> {
   const snapshot = audioEngine.getAudioConfiguration();
   const effective = snapshot.effectiveSampleRate;
@@ -744,16 +644,16 @@ async function refreshAudioConfigUi(): Promise<void> {
   const selectable = audioEngine.supportsOutputDeviceSelection();
   configOutput.disabled = !selectable;
   if (!selectable) configOutput.options[0].text = 'SYSTEM DEFAULT · BROWSER CONTROLLED';
-  updateConfigSelection();
+  configNavigator.updateSelection();
 }
 
-function formatAudioConfig(config: { sampleRate: SampleRateChoice; outputDeviceId: string; latencyMode: AudioLatencyMode }): string {
+function formatAudioConfig(config: AudioConfigChoice): string {
   const device = [...configOutput.options].find((option) => option.value === config.outputDeviceId)?.text ?? 'SYSTEM DEFAULT';
   const rate = config.sampleRate === 0 ? 'DEVICE DEFAULT' : `${config.sampleRate} HZ`;
   return `${device} · ${rate} · ${config.latencyMode.toUpperCase()}`;
 }
 
-function requestAudioConfigRestart(next: { sampleRate: SampleRateChoice; outputDeviceId: string; latencyMode: AudioLatencyMode }): void {
+function requestAudioConfigRestart(next: AudioConfigChoice): void {
   if (next.sampleRate === appConfig.sampleRate && next.outputDeviceId === appConfig.outputDeviceId && next.latencyMode === appConfig.latencyMode) return;
   pendingAudioConfig = next;
   audioConfigCurrent.textContent = formatAudioConfig(appConfig);
@@ -1034,7 +934,7 @@ function showScreen(next: Screen): void {
   aboutScreen.setAttribute('aria-hidden', String(next !== 'about'));
   schemeScreen.setAttribute('aria-hidden', String(next !== 'scheme'));
   if (next === 'scheme') renderScheme();
-  if (next === 'config') { configSelectionIndex = 0; updateConfigSelection(); void refreshAudioConfigUi(); }
+  if (next === 'config') { configNavigator.reset(); void refreshAudioConfigUi(); }
   if (next === 'live') editor.focus();
   requestAnimationFrame(positionBlockCaret);
 }
@@ -3584,24 +3484,21 @@ configOutputLevel.addEventListener('input', () => {
   saveAppConfig();
 });
 configSampleRate.addEventListener('change', () => {
-  const value = Number(configSampleRate.value);
-  const sampleRate: SampleRateChoice = value === 44100 || value === 48000 || value === 88200 || value === 96000 ? value : 0;
+  const sampleRate = parseSampleRateChoice(configSampleRate.value);
   requestAudioConfigRestart({ sampleRate, outputDeviceId: configOutput.value, latencyMode: configLatencyMode.value as AudioLatencyMode });
 });
 configOutput.addEventListener('change', () => {
-  requestAudioConfigRestart({ sampleRate: Number(configSampleRate.value) as SampleRateChoice, outputDeviceId: configOutput.value, latencyMode: configLatencyMode.value as AudioLatencyMode });
+  requestAudioConfigRestart({ sampleRate: parseSampleRateChoice(configSampleRate.value), outputDeviceId: configOutput.value, latencyMode: configLatencyMode.value as AudioLatencyMode });
 });
 configLatencyMode.addEventListener('change', () => {
-  requestAudioConfigRestart({ sampleRate: Number(configSampleRate.value) as SampleRateChoice, outputDeviceId: configOutput.value, latencyMode: configLatencyMode.value as AudioLatencyMode });
+  requestAudioConfigRestart({ sampleRate: parseSampleRateChoice(configSampleRate.value), outputDeviceId: configOutput.value, latencyMode: configLatencyMode.value as AudioLatencyMode });
 });
 audioConfigCancel.addEventListener('click', cancelAudioConfigRestart);
 audioConfigApply.addEventListener('click', () => { void applyAudioConfigRestart(); });
 configScreen.addEventListener('pointerdown', (event) => {
   const row = (event.target as Element).closest<HTMLElement>('.config-row[data-config-key]');
   if (!row) return;
-  const rows = configRows();
-  const index = rows.indexOf(row);
-  if (index >= 0) { configSelectionIndex = index; updateConfigSelection(); }
+  configNavigator.selectRow(row);
 });
 capabilityCancel.addEventListener('click', cancelCapabilityRestart);
 capabilityApply.addEventListener('click', () => { void applyCapabilityRestart(); });
@@ -3663,19 +3560,17 @@ document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') { event.preventDefault(); showScreen('live'); return; }
     if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
       event.preventDefault();
-      const rows = configRows();
-      if (rows.length > 0) configSelectionIndex = (configSelectionIndex + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
-      updateConfigSelection();
+      configNavigator.moveSelection(event.key === 'ArrowDown' ? 1 : -1);
       return;
     }
     if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
       event.preventDefault();
-      activateConfigRow(event.key === 'ArrowRight' ? 1 : -1);
+      configNavigator.activate(event.key === 'ArrowRight' ? 1 : -1);
       return;
     }
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
-      activateConfigRow(0);
+      configNavigator.activate(0);
       return;
     }
   }
