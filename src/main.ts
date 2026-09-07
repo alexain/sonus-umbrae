@@ -4,6 +4,7 @@ import { SonusEvaluationError, SonusRuntime, type DrumkitViewState, type InlineV
 import { compileLanguageSource, LanguageError, parseProgramCapabilities, type ProgramCapability } from './language/language';
 import { parameterUpdatePolicy, type ParameterUpdatePolicy } from './language/parameter-policy';
 import { expandEditorSnippet } from './editor/snippets';
+import { AssetLibrary } from './editor/assets';
 
 type Screen = 'live' | 'config' | 'help' | 'about' | 'scheme';
 
@@ -49,6 +50,7 @@ app.innerHTML = `
         <div class="config-grid">
           <label class="config-row" data-config-key="vars"><span>VARIABLE INSPECTOR</span><input id="config-vars" type="checkbox" /></label>
           <label class="config-row" data-config-key="metrics"><span>METRICS PANEL</span><input id="config-metrics" type="checkbox" /></label>
+          <label class="config-row" data-config-key="assets"><span>ASSETS PANEL</span><input id="config-assets" type="checkbox" /></label>
           <label class="config-row" data-config-key="dsp"><span>DSP STATUS</span><input id="config-dsp" type="checkbox" /></label>
           <label class="config-row" data-config-key="liveRate"><span>LIVE CONTROL RATE</span><select id="config-live-rate"><option value="60">60 HZ</option><option value="30">30 HZ</option><option value="20">20 HZ</option><option value="15">15 HZ</option></select></label>
           <label class="config-row" data-config-key="objectShortcut"><span>OBJECT TOGGLE KEY</span><input id="config-object-shortcut" type="text" maxlength="1" size="2" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Object toggle shortcut key" /></label>
@@ -439,6 +441,7 @@ const dspStatus = must<HTMLElement>('dsp-status');
 const clockStatus = must<HTMLElement>('clock-status');
 const configVars = must<HTMLInputElement>('config-vars');
 const configMetrics = must<HTMLInputElement>('config-metrics');
+const configAssets = must<HTMLInputElement>('config-assets');
 const configDsp = must<HTMLInputElement>('config-dsp');
 const configLiveRate = must<HTMLSelectElement>('config-live-rate');
 const configObjectShortcut = must<HTMLInputElement>('config-object-shortcut');
@@ -466,6 +469,11 @@ const capabilityApply = must<HTMLButtonElement>('capability-apply');
 
 const audioEngine = new AudioEngine();
 const runtime = new SonusRuntime(audioEngine);
+const assetLibrary = new AssetLibrary({
+  maxDecodedBytes: 256 * 1024 * 1024,
+  onChange: () => syncViews(),
+  onMessage: (text) => notify(text),
+});
 
 let screen: Screen = 'live';
 let commandMode = false;
@@ -490,6 +498,7 @@ type SampleRateChoice = 0 | 44100 | 48000 | 88200 | 96000;
 type AppConfig = {
   showVariables: boolean;
   showMetrics: boolean;
+  showAssets: boolean;
   showDspStatus: boolean;
   liveControlHz: 60 | 30 | 20 | 15;
   sampleRate: SampleRateChoice;
@@ -502,6 +511,7 @@ type AppConfig = {
 let appConfig: AppConfig = {
   showVariables: false,
   showMetrics: false,
+  showAssets: false,
   showDspStatus: true,
   liveControlHz: 60,
   sampleRate: 0,
@@ -560,6 +570,7 @@ function loadAppConfig(): void {
     appConfig = {
       showVariables: parsed.showVariables ?? false,
       showMetrics: parsed.showMetrics ?? false,
+      showAssets: parsed.showAssets ?? false,
       showDspStatus: parsed.showDspStatus ?? true,
       liveControlHz: hz === 30 || hz === 20 || hz === 15 ? hz : 60,
       sampleRate: parsed.sampleRate === 44100 || parsed.sampleRate === 48000 || parsed.sampleRate === 88200 || parsed.sampleRate === 96000 ? parsed.sampleRate : 0,
@@ -574,7 +585,7 @@ function loadAppConfig(): void {
       schemeToggleKey: normalizeShortcutKey(parsed.schemeToggleKey === '|' ? undefined : parsed.schemeToggleKey, '1'),
     };
   } catch {
-    appConfig = { showVariables: false, showMetrics: false, showDspStatus: true, liveControlHz: 60, sampleRate: 0, outputDeviceId: '', latencyMode: 'interactive', outputLevel: 100, objectToggleKey: '\\', schemeToggleKey: '1' };
+    appConfig = { showVariables: false, showMetrics: false, showAssets: false, showDspStatus: true, liveControlHz: 60, sampleRate: 0, outputDeviceId: '', latencyMode: 'interactive', outputLevel: 100, objectToggleKey: '\\', schemeToggleKey: '1' };
   }
 }
 
@@ -585,6 +596,7 @@ function saveAppConfig(): void {
 function applyAppConfig(): void {
   configVars.checked = appConfig.showVariables;
   configMetrics.checked = appConfig.showMetrics;
+  configAssets.checked = appConfig.showAssets;
   configDsp.checked = appConfig.showDspStatus;
   configLiveRate.value = String(appConfig.liveControlHz);
   configObjectShortcut.value = appConfig.objectToggleKey;
@@ -1654,6 +1666,7 @@ function syncViews(): void {
 
   if (appConfig.showVariables) panels.push(buildVariablesPanel(variables));
   if (appConfig.showMetrics) panels.push(buildMetricsPanel(scheme, variables.length));
+  if (appConfig.showAssets) panels.push(assetLibrary.buildPanel(createMonitorCard));
   for (const view of turingViews) panels.push(buildTuringPanel(view));
   for (const view of lifeViews) panels.push(buildLifePanel(view));
   for (const view of constellationViews) panels.push(buildConstellationPanel(view));
@@ -5016,6 +5029,11 @@ configVars.addEventListener('change', () => {
 });
 configMetrics.addEventListener('change', () => {
   appConfig.showMetrics = configMetrics.checked;
+  saveAppConfig();
+  applyAppConfig();
+});
+configAssets.addEventListener('change', () => {
+  appConfig.showAssets = configAssets.checked;
   saveAppConfig();
   applyAppConfig();
 });
