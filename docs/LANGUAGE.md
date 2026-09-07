@@ -163,8 +163,13 @@ The master clock is explicit:
 CLOCK SET 120 bpm
 ```
 
-Its clock view is always active in the sidebar and in Scheme. `WITH VIEW` is
-therefore not used on the master clock.
+The master clock has no fixed sidebar monitor. Request its clock view explicitly with:
+
+```text
+CLOCK SET 120 bpm WITH VIEW
+```
+
+Without `WITH VIEW`, the master clock runs normally without adding a clock panel. The same explicit-view rule is used by named clocks.
 
 The master can have its own timing character:
 
@@ -731,7 +736,7 @@ pitch notes [n1@3 n5@3 n8@3] with edo15, random
 pitch notes [C3 G3 Bb3] with walk
 ```
 
-Scales are resolved from the catalog in `docs/SCALES.md`:
+Scales are resolved from the complete [scale catalog](./SCALES.md), which lists every currently usable scale identifier, its EDO, and its composition:
 
 ```text
 pitch scale C minor
@@ -1495,7 +1500,7 @@ The automatic main audio-out scope represents the signal after routing and
 
 ## Scheme
 
-Press `Tab` or use command mode:
+The default editor shortcut for switching between LIVE and Scheme is `Cmd+1` on macOS or `Ctrl+1` on Windows/Linux. The Scheme shortcut key is configurable in `>CONFIG`; `Cmd`/`Ctrl` remains the required modifier. You can also use command mode:
 
 ```text
 :scheme
@@ -1530,6 +1535,10 @@ _CLOCK pulse RATE *2
 The effect depends on the object's audio role: `_VOICE` mutes the voice output while preserving DSP state; `_FILTER` bypasses the filter and passes its input through all exposed filter outputs; `_FX` bypasses the processor dry while stopping new input into the wet engine so an existing reverb/delay tail can decay; `_CLOCK` pauses the selected named clock while the rest of the musical clock tree continues; `_CLOCK SET ... bpm` pauses the entire musical clock tree. Wall-clock `sec`/`ms` scheduling continues during a master-clock pause.
 
 The underscore is a live-performance state change. While the program is running, adding or removing `_` takes effect immediately without `Cmd+Enter`; the disabled-object colour follows the same runtime state, so a yellow block is already muted, bypassed or paused. A later normal compile preserves the source declaration as the source of truth. Timed mute/bypass scheduling is not part of this version yet.
+
+The editor can toggle this state on the current object without typing the underscore manually. The default shortcut is `Cmd+\` on macOS or `Ctrl+\` on Windows/Linux. When the cursor is on an object header or anywhere inside its block, the shortcut adds or removes `_` from that object's declaration. The object-toggle key is configurable in `>CONFIG`; `Cmd`/`Ctrl` remains mandatory.
+
+`Cmd+/` on macOS and `Ctrl+/` on Windows/Linux is reserved for line comments. It adds or removes `// ` after indentation on the current line or selected lines. `Tab` indents by four spaces and `Shift+Tab` dedents.
 
 ## Quick menu and command prompt
 
@@ -2409,7 +2418,7 @@ In the 0.2.x runtime the capability names establish the capability lifecycle and
 
 The Audio section reports the effective Web Audio sample rate and available latency information. `SAMPLE RATE` can use the device default or request 44.1, 48, 88.2 or 96 kHz. Where the browser supports Audio Output Devices, `OUTPUT DEVICE` enumerates and selects available audio outputs; unsupported browsers keep that row browser-controlled. Device and sample-rate changes are structural: Sonus asks for confirmation, restarts the audio engine, reloads its AudioWorklets/WASM, and then rebuilds the current program. Cancelling restores the previous configuration. Browser APIs do not expose reliable hardware bit depth, so Sonus does not invent a bit-depth readout.
 
-The Interface section includes the variable inspector, lightweight runtime metrics, the header DSP status, and the refresh rate used by `LIVE` controls. Preferences are stored locally by the browser.
+The Interface section includes the variable inspector, lightweight runtime metrics, the header DSP status, the refresh rate used by `LIVE` controls, and the configurable Object Toggle and Scheme shortcut keys. The shortcut key is combined with `Cmd` on macOS or `Ctrl` on Windows/Linux. Preferences are stored locally by the browser. On a fresh installation the Variables and Metrics panels are disabled by default; an existing stored preference continues to take precedence.
 
 `>ABOUT` opens the project/version and runtime information screen. `>HELP` remains the command reference and `>SCHEME` remains the signal-graph view.
 
