@@ -7,12 +7,10 @@ import { expandEditorSnippet } from './editor/snippets';
 import { AssetLibrary } from './editor/assets';
 import { updateSampleWaveformViews as renderSampleWaveformViews } from './ui/sample-waveform';
 import { SchemeRenderer } from './ui/scheme';
+import { ScopeRenderer } from './ui/scopes';
 import {
   MonitorPanels,
-  effectiveScopeRange,
-  naturalScopeRange,
   parseModuleViewScales,
-  scopeScaleLabel,
 } from './ui/monitor-panels';
 import {
   buildConstellationPanel,
@@ -578,6 +576,7 @@ const schemeRenderer = new SchemeRenderer({
     if (scopeFrame === 0) scopeFrame = requestAnimationFrame(drawScopes);
   },
 });
+const scopeRenderer = new ScopeRenderer(audioEngine);
 
 loadAppConfig();
 audioEngine.setPreferredAudioConfiguration({
@@ -1770,7 +1769,7 @@ function drawScopes(): void {
   updateDrumkitViews(runtime.getDrumkitViews());
   updateSampleWaveformViews();
   schemeRenderer.updateLiveValues();
-  const canvases = [...document.querySelectorAll<HTMLCanvasElement>('canvas.scope-canvas')];
+  const canvases = document.querySelectorAll<HTMLCanvasElement>('canvas.scope-canvas');
   const liveValues = document.querySelectorAll<HTMLElement>('.scheme-live-value');
   const turingRegisters = document.querySelectorAll<HTMLElement>('.turing-register');
   const lifeGrids = document.querySelectorAll<HTMLElement>('.life-grid');
@@ -1780,148 +1779,13 @@ function drawScopes(): void {
   const sampleWaveforms = document.querySelectorAll<HTMLCanvasElement>('.sample-waveform-canvas');
   if (canvases.length === 0 && liveValues.length === 0 && turingRegisters.length === 0 && lifeGrids.length === 0 && constellationFields.length === 0 && snakeFields.length === 0 && drumkitPatterns.length === 0 && sampleWaveforms.length === 0) return;
 
-  const styles = getComputedStyle(document.documentElement);
-  const phosphor = styles.getPropertyValue('--phosphor-hot').trim() || '#ffe783';
-
-  for (const canvas of canvases) {
-    const signal = canvas.dataset.signal;
-    const compositeSignals = canvas.dataset.signals?.split(',').filter(Boolean) ?? [];
-    if (!signal && compositeSignals.length === 0) continue;
-
-    const width = Math.max(1, Math.floor(canvas.clientWidth * window.devicePixelRatio));
-    const height = Math.max(1, Math.floor(canvas.clientHeight * window.devicePixelRatio));
-    if (canvas.width !== width || canvas.height !== height) {
-      canvas.width = width;
-      canvas.height = height;
-    }
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) continue;
-
-    ctx.clearRect(0, 0, width, height);
-    ctx.strokeStyle = phosphor;
-    ctx.fillStyle = phosphor;
-    ctx.lineWidth = Math.max(1, window.devicePixelRatio);
-    ctx.shadowColor = phosphor;
-    ctx.shadowBlur = 3 * window.devicePixelRatio;
-    const kind = canvas.dataset.kind ?? 'signal';
-    if (kind === 'multi-signal') {
-      const styles = getComputedStyle(document.documentElement);
-      const traceColors = [
-        styles.getPropertyValue('--scope-trace-1').trim() || phosphor,
-        styles.getPropertyValue('--scope-trace-2').trim() || phosphor,
-        styles.getPropertyValue('--scope-trace-3').trim() || phosphor,
-        styles.getPropertyValue('--scope-trace-4').trim() || phosphor,
-      ];
-
-      compositeSignals.forEach((traceSignal, traceIndex) => {
-        const data = new Float32Array(512);
-        if (!audioEngine.readOscilloscope(traceSignal, data)) return;
-        const traceColor = traceColors[traceIndex % traceColors.length];
-        ctx.strokeStyle = traceColor;
-        ctx.shadowColor = traceColor;
-        ctx.beginPath();
-        for (let i = 0; i < data.length; i += 1) {
-          const x = (i / (data.length - 1)) * width;
-          const displayValue = scopeDisplayValue(traceSignal, data[i], canvas);
-          const y = height * 0.5 - displayValue * height * 0.42;
-          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-        }
-        ctx.stroke();
-      });
-      continue;
-    }
-    if (kind === 'trigger') {
-      drawTriggerPhase(ctx, width, height, signal!, phosphor);
-      continue;
-    }
-
-    const data = new Float32Array(512);
-    if (!signal || !audioEngine.readOscilloscope(signal, data)) continue;
-    if (kind === 'gate') {
-      ctx.beginPath();
-      for (let i = 0; i < data.length; i += 1) {
-        const x = (i / (data.length - 1)) * width;
-        const y = data[i] > 0.3 ? height * 0.25 : height * 0.72;
-        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-      }
-      ctx.stroke();
-    } else {
-      ctx.beginPath();
-      for (let i = 0; i < data.length; i += 1) {
-        const x = (i / (data.length - 1)) * width;
-        const displayValue = scopeDisplayValue(signal, data[i], canvas);
-        const y = height * 0.5 - displayValue * height * 0.42;
-        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-      }
-      ctx.stroke();
-    }
-  }
+  scopeRenderer.drawAll();
 
   scopeFrame = requestAnimationFrame(drawScopes);
 }
 
 
 
-function drawTriggerPhase(
-  ctx: CanvasRenderingContext2D,
-  width: number,
-  height: number,
-  signal: string,
-  phosphor: string,
-): void {
-  const ratio = window.devicePixelRatio;
-  const events = audioEngine.getTriggerViewEvents(signal);
-  const left = Math.max(14 * ratio, width * 0.06);
-  const right = width - left;
-  const span = Math.max(1, right - left);
-  const y = height * 0.56;
-
-  ctx.save();
-  ctx.shadowBlur = 0;
-  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--phosphor-dim').trim() || phosphor;
-  ctx.globalAlpha = 0.32;
-  ctx.lineWidth = Math.max(1, ratio);
-  ctx.beginPath();
-  ctx.moveTo(left, y);
-  ctx.lineTo(right, y);
-  ctx.stroke();
-
-  for (const event of events) {
-    const x = left + span * event.progress;
-    const radius = Math.max(3.0 * ratio, height * 0.05);
-
-    // Each trigger is an independent particle. Its speed is frozen at the
-    // moment it is emitted, so later clock changes do not affect particles
-    // already travelling across the monitor.
-    for (let trail = 5; trail >= 1; trail -= 1) {
-      const trailX = Math.max(left, x - trail * 4.5 * ratio);
-      ctx.globalAlpha = 0.035 * (6 - trail);
-      ctx.fillStyle = phosphor;
-      ctx.beginPath();
-      ctx.arc(trailX, y, radius * (0.32 + (6 - trail) * 0.055), 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    ctx.globalAlpha = 1;
-    ctx.fillStyle = phosphor;
-    ctx.shadowColor = phosphor;
-    ctx.shadowBlur = 8 * ratio;
-    ctx.beginPath();
-    ctx.arc(x, y, radius, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  ctx.restore();
-}
-
-
-function scopeDisplayValue(signal: string, value: number, canvas: HTMLCanvasElement): number {
-  const configured = Number(canvas.dataset.scopeRange);
-  const range = Number.isFinite(configured) && configured > 0
-    ? configured
-    : naturalScopeRange([signal]);
-  return value / range;
-}
 
 function renderScheme(): void {
   schemeRenderer.render(runtime.getSchemeModel(), sourceText(), commentStart);
