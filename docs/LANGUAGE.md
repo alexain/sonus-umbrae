@@ -2757,17 +2757,16 @@ Imported audio assets can be used as a dedicated `VOICE` source. The sample engi
 
 ```text
 VOICE guitar with view:
-    sound sample
-    sample guitar with root F3
+    sound sample.guitar with root F3
 
     region 20 60 with loop, reverse
 
     pitch notes [F3 A3 C4 F4] every 1 beat
 ```
 
-`sample <alias>` uses an imported Assets alias. The sample root defaults to `C3`; use `sample <alias> with root <note>` when the source is tuned to a different note. `PITCH` remains the normal VOICE pitch system and changes playback speed by the ratio between target frequency and root frequency.
+`sound sample.<alias>` selects an imported Assets alias and the compiler validates that the asset exists when the program is run. The sample root defaults to `C3`; use `sound sample.<alias> with root <note>` when the source is tuned to a different note. Asset aliases are written exactly as they appear in the Assets library, including characters such as `-`. `PITCH` remains the normal VOICE pitch system and changes playback speed by the ratio between target frequency and root frequency.
 
-`region` is the only sample-playback parameter in this first version. Percentages are normalized over the source:
+`region` defines the playback window. Percentages are normalized over the source:
 
 ```text
 region 20 60
@@ -2778,4 +2777,26 @@ region with loop
 region 20 60 with loop, reverse
 ```
 
-One value means start at that percentage and play to the end. With no explicit range, `region with ...` applies to the whole sample. `loop` repeats the selected range; `reverse` reads it backwards. `VOICE ... with view` shows the imported waveform, selected region and live playhead in Scheme.
+One value means start at that percentage and play to the end. With no explicit range, `region with ...` applies to the whole sample. `loop` repeats the selected range; `reverse` reads it backwards.
+
+A region can instead be divided into equal slices:
+
+```text
+region with slices 16
+region 10 90 with slices 16
+```
+
+Slice numbering is user-facing and starts at `1`, so sixteen slices are addressed as `1..16`. A sliced region cannot also use `loop` or `reverse`; direction is controlled by the slice sequence itself. Slice indices are validated at compile time against the count declared by `region ... with slices N`.
+
+```text
+slice 3
+slice 3r
+slice [1 3r 7 12] every 1 beat
+slice [1 3 7 12] with reverse every 1 beat
+slice [1 3 7 12] with pendulum every 1 beat
+slice [1!20 3r!80 7!40 12!60] with random every EUCLIDEAN 5/16
+```
+
+A trailing `r` reverses only that slice. The traversal modes are `forward` (default), `reverse`, `random`, `walk`, and `pendulum`. In `random` mode, `!N` assigns an integer weight from `1` to `100`; weights are rejected in deterministic traversal modes. `slice` uses the normal `EVERY` timing system, including clocks, patterns, rhythms and Euclidean timing. When a sliced sample also has a sequenced `PITCH`, the slice sequence owns the sample trigger while the pitch sequence updates varispeed, avoiding duplicate triggers at the same step.
+
+`VOICE ... with view` shows the imported waveform, selected region, slice divisions, active slice and live playhead in Scheme and the LIVE sidebar.

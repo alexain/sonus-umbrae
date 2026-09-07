@@ -237,6 +237,7 @@ export interface SchemeEmbeddedView {
   sampleAlias?: string;
   sampleStart?: number;
   sampleEnd?: number;
+  sampleSlices?: number;
   signals?: string[];
   signalKind: SignalKind;
   port: string;
@@ -312,6 +313,9 @@ interface VoiceDefinition {
   sampleEnd: number;
   sampleLoop: boolean;
   sampleReverse: boolean;
+  sampleSlices: number;
+  sampleInitialSlice: number;
+  sampleInitialSliceReverse: boolean;
   parameters: Map<string, string>;
 }
 
@@ -550,6 +554,20 @@ interface LanguageDrumSlotDefinition {
   params: { level:number; pan:number; tune:number; decay:number; transient:number; snappy:number; color:number; noise:number; humanize:number };
   amount:number; unit:'ms'|'sec'|'beat'; chance:number; drift:boolean; loose:boolean; clockSource:string;
   euclidean: { hits:number; steps:number; rotate:number } | null;
+}
+
+interface LanguageSampleSliceItem { index: number; reverse: boolean; weight: number; }
+interface LanguageSampleSliceDefinition {
+  voice: string;
+  items: LanguageSampleSliceItem[];
+  mode: 'forward' | 'reverse' | 'random' | 'walk' | 'pendulum';
+  amount: number;
+  unit: 'ms' | 'sec' | 'beat';
+  chance: number;
+  drift: boolean;
+  loose: boolean;
+  clockSource: string;
+  line: number;
 }
 
 interface LanguageModMetadata {
@@ -1151,6 +1169,8 @@ export class SonusRuntime {
     const languageCompositeTunes = new Map<string, LanguageCompositeTuneDefinition>();
     const languageDrumkits = new Map<string, { kit: string | null; disabled: boolean; viewSteps: number }>();
     const languageDrumSlots: LanguageDrumSlotDefinition[] = [];
+    const languageSampleSlices: LanguageSampleSliceDefinition[] = [];
+    const languageSampleSliceCounts = new Map<string, number>();
     const languageModSets: LanguageModSetDirective[] = [];
     let languageMasterClock: LanguageMasterClockDefinition | null = null;
     for (const { source: line, line: lineNumber } of lines) {
@@ -1473,6 +1493,18 @@ export class SonusRuntime {
         });
       }
 
+      const sampleSlices = parseLanguageSampleSlicesDirective(line);
+      if (sampleSlices) {
+        languageSampleSliceCounts.set(sampleSlices.voice, sampleSlices.count);
+        continue;
+      }
+
+      const sampleSlice = parseLanguageSampleSliceDirective(line);
+      if (sampleSlice) {
+        languageSampleSlices.push(sampleSlice);
+        continue;
+      }
+
       const parameterCycle = parseLanguageParameterCycleDirective(line, lineNumber);
       if (parameterCycle) {
         languageParameterCycles.push(parameterCycle);
@@ -1666,7 +1698,7 @@ export class SonusRuntime {
           strike: 0,
           strikeTimbre: 50,
           drive: null,
-          sampleAlias: null, sampleRootFrequency: 130.8127826502993, sampleStart: 0, sampleEnd: 100, sampleLoop: false, sampleReverse: false,
+          sampleAlias: null, sampleRootFrequency: 130.8127826502993, sampleStart: 0, sampleEnd: 100, sampleLoop: false, sampleReverse: false, sampleSlices: 0, sampleInitialSlice: 0, sampleInitialSliceReverse: false,
           parameters: new Map(),
         };
         voices.set(name, definition);
@@ -1915,6 +1947,23 @@ export class SonusRuntime {
       }
     };
 
+    // Sample-slice directives are collected before declarations, then attached once
+    // all VOICE objects exist. This keeps source order declarative and ensures
+    // slicing metadata is available to the audio program and waveform views.
+    for (const [voiceName, count] of languageSampleSliceCounts) {
+      const voice = voices.get(voiceName);
+      if (!voice) continue;
+      voice.sampleSlices = count;
+      voice.parameters.set('SLICES', String(count));
+    }
+    for (const definition of languageSampleSlices) {
+      const voice = voices.get(definition.voice);
+      if (!voice || definition.items.length === 0) continue;
+      const initial = definition.mode === 'reverse' ? definition.items[definition.items.length - 1] : definition.items[0];
+      voice.sampleInitialSlice = initial.index;
+      voice.sampleInitialSliceReverse = initial.reverse;
+    }
+
     const evalNumber = (expression: string, lineNumber: number, label: string): number | undefined => {
       const value = evalValue(expression, lineNumber);
       if (value === undefined) return undefined;
@@ -1929,7 +1978,7 @@ export class SonusRuntime {
     // source order. All module declarations already exist, so references between
     // modules are still independent from declaration order.
     for (const { source: line, line: lineNumber } of lines) {
-      if (parseLanguageLogicDirective(line) || parseLanguageLogicNodeDirective(line) || parseLanguageCompositePitch(line) || parseLanguageCompositeTune(line) || parseLanguageCompositeEdge(line) || parseLanguageCompositeMix(line) || parseLanguageCompositeOutput(line) || parseLanguageDrumkitDirective(line) || parseLanguageDrumkitMetaDirective(line) || parseLanguageDrumSlotDirective(line) || parseLanguageDrumSampleSlotDirective(line) || parseLanguageTuningDirective(line) !== null || parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageSeqModel(line) || parseLanguageSeqWeights(line) || parseLanguageConstellationParam(line) || parseLanguageConstellationOctaves(line) || parseLanguageConstellationReader(line) || parseLanguageSnakeSize(line) || parseLanguageSnakeMovement(line) || parseLanguageSnakeMatrix(line) || parseLanguageSnakeReader(line) || parseLanguageSeqSize(line) || parseLanguageLifeDensity(line) || parseLanguageLifeReader(line) || parseLanguageLifeEvolve(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageVcaDirective(line, lineNumber) || parseLanguageEnvelopeDirective(line, lineNumber) || parseLanguageFxMetadata(line) || parseLanguageDelayTime(line) || parseLanguageDelayParam(line, lineNumber) || parseLanguageDelayParamDefault(line, lineNumber) || parseLanguageDelayParamCycle(line, lineNumber) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
+      if (parseLanguageLogicDirective(line) || parseLanguageLogicNodeDirective(line) || parseLanguageCompositePitch(line) || parseLanguageCompositeTune(line) || parseLanguageCompositeEdge(line) || parseLanguageCompositeMix(line) || parseLanguageCompositeOutput(line) || parseLanguageDrumkitDirective(line) || parseLanguageDrumkitMetaDirective(line) || parseLanguageDrumSlotDirective(line) || parseLanguageDrumSampleSlotDirective(line) || parseLanguageSampleSlicesDirective(line) || parseLanguageSampleSliceDirective(line) || parseLanguageTuningDirective(line) !== null || parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageSeqModel(line) || parseLanguageSeqWeights(line) || parseLanguageConstellationParam(line) || parseLanguageConstellationOctaves(line) || parseLanguageConstellationReader(line) || parseLanguageSnakeSize(line) || parseLanguageSnakeMovement(line) || parseLanguageSnakeMatrix(line) || parseLanguageSnakeReader(line) || parseLanguageSeqSize(line) || parseLanguageLifeDensity(line) || parseLanguageLifeReader(line) || parseLanguageLifeEvolve(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageVcaDirective(line, lineNumber) || parseLanguageEnvelopeDirective(line, lineNumber) || parseLanguageFxMetadata(line) || parseLanguageDelayTime(line) || parseLanguageDelayParam(line, lineNumber) || parseLanguageDelayParamDefault(line, lineNumber) || parseLanguageDelayParamCycle(line, lineNumber) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
 
       const gainDeclaration = parseGainDeclaration(line);
       if (gainDeclaration) {
@@ -2648,6 +2697,7 @@ export class SonusRuntime {
     }
 
 
+
     for (const cycle of languageParameterCycles) {
       if (!voices.has(cycle.voice)) {
         diagnostics.push({ line: cycle.line, message: `parameter cycle references unknown Voice: ${cycle.voice}` });
@@ -2985,7 +3035,7 @@ export class SonusRuntime {
       } else if (voices.has(name)) {
         const voice = voices.get(name)!;
         if (voice.engine === 'sample') {
-          ownerViews.push({ signal: `${name}.out_L`, signalKind: 'signal', port: 'SAMPLE', display: 'sample', owner: name, sampleAlias: voice.sampleAlias ?? '', sampleStart: voice.sampleStart, sampleEnd: voice.sampleEnd });
+          ownerViews.push({ signal: `${name}.out_L`, signalKind: 'signal', port: 'SAMPLE', display: 'sample', owner: name, sampleAlias: voice.sampleAlias ?? '', sampleStart: voice.sampleStart, sampleEnd: voice.sampleEnd, sampleSlices: voice.sampleSlices });
         } else {
           ownerViews.push({
             signal: `${name}.out`,
@@ -3414,7 +3464,7 @@ export class SonusRuntime {
           range: definition.range,
         })),
       drumkits: [...languageDrumkits.keys()].map((name) => ({ name })),
-      samples: [...voices.entries()].filter(([, definition]) => definition.engine === 'sample').map(([name, definition]) => ({ name, alias: definition.sampleAlias ?? '', enabled: !definition.disabled, level: definition.level, frequency: definition.frequency, rootFrequency: definition.sampleRootFrequency, start: definition.sampleStart, end: definition.sampleEnd, loop: definition.sampleLoop, reverse: definition.sampleReverse })),
+      samples: [...voices.entries()].filter(([, definition]) => definition.engine === 'sample').map(([name, definition]) => ({ name, alias: definition.sampleAlias ?? '', enabled: !definition.disabled, level: definition.level, frequency: definition.frequency, rootFrequency: definition.sampleRootFrequency, start: definition.sampleStart, end: definition.sampleEnd, loop: definition.sampleLoop, reverse: definition.sampleReverse, slices: definition.sampleSlices, initialSlice: definition.sampleInitialSlice, initialSliceReverse: definition.sampleInitialSliceReverse })),
       dices: [...swells.entries()]
         .filter(([, definition]) => definition.model === 'dices')
         .map(([name, definition]) => ({
@@ -4130,6 +4180,59 @@ export class SonusRuntime {
     }
 
 
+    for (const definition of languageSampleSlices) {
+      const voice = voices.get(definition.voice);
+      if (definition.amount <= 0 || !voice || voice.engine !== 'sample' || voice.sampleSlices < 1 || definition.items.length === 0) continue;
+      let cursor = definition.mode === 'reverse' ? definition.items.length - 1 : 0;
+      let direction = 1;
+      let driftRatio = 1;
+
+      const choose = (): LanguageSampleSliceItem => {
+        if (definition.mode === 'random') {
+          const total = definition.items.reduce((sum, item) => sum + item.weight, 0);
+          let pick = random() * total;
+          for (const item of definition.items) { pick -= item.weight; if (pick < 0) return item; }
+          return definition.items[definition.items.length - 1];
+        }
+        const item = definition.items[Math.max(0, Math.min(definition.items.length - 1, cursor))];
+        if (definition.mode === 'forward') cursor = (cursor + 1) % definition.items.length;
+        else if (definition.mode === 'reverse') cursor = (cursor - 1 + definition.items.length) % definition.items.length;
+        else if (definition.mode === 'pendulum') {
+          if (definition.items.length > 1) {
+            cursor += direction;
+            if (cursor >= definition.items.length) { direction = -1; cursor = definition.items.length - 2; }
+            else if (cursor < 0) { direction = 1; cursor = 1; }
+          }
+        } else if (definition.mode === 'walk') {
+          if (definition.items.length > 1) {
+            cursor += random() < 0.5 ? -1 : 1;
+            if (cursor < 0) cursor = 1;
+            else if (cursor >= definition.items.length) cursor = definition.items.length - 2;
+          }
+        }
+        return item;
+      };
+
+      const fire = (): void => {
+        if (definition.chance < 100 && random() * 100 >= definition.chance) return;
+        const item = choose();
+        this.audio.triggerSampleSlice(definition.voice, item.index, voice.sampleSlices, voice.sampleStart, voice.sampleEnd, item.reverse);
+      };
+
+      if (definition.unit === 'beat') {
+        this.scheduler.addBeatJob(`sample-slice:${definition.voice}`, definition.amount, fire, definition.loose, definition.clockSource);
+      } else {
+        const baseMs = definition.unit === 'sec' ? definition.amount * 1000 : definition.amount;
+        this.scheduler.addWallJob(`sample-slice:${definition.voice}`, baseMs, fire, () => {
+          if (definition.drift) { driftRatio += (random() - 0.5) * 0.06; driftRatio = Math.min(1.2, Math.max(0.8, driftRatio)); }
+          else driftRatio = 1;
+          const looseRatio = definition.loose ? 0.94 + random() * 0.12 : 1;
+          return baseMs * driftRatio * looseRatio;
+        });
+      }
+    }
+
+
     for (const cycle of languageGenerativeCycles) {
       let base = evalNumber(cycle.expression, cycle.line, cycle.parameter);
       if (base === undefined) continue;
@@ -4828,7 +4931,8 @@ export class SonusRuntime {
         voice.frequency = frequency;
         this.audio.setVoiceParameter(name, 'freq', frequency);
         updateInlinePiano('voice', name, frequency);
-        triggerVoiceEvent(name);
+        const sliceOwnsTrigger = voice.engine === 'sample' && languageSampleSlices.some((definition) => definition.voice === name && definition.amount > 0);
+        if (!sliceOwnsTrigger) triggerVoiceEvent(name);
 
         const retrig = sequence
           ? sequenceFavorForValue(frequency, sequence.favor, 'frequency')
@@ -5821,6 +5925,37 @@ function parseLanguageGenerativeCycleDirective(
     loose: match[11] === 'true',
     clockSource: match[12],
     line: lineNumber,
+  };
+}
+
+function parseLanguageSampleSlicesDirective(line: string): { voice: string; count: number } | null {
+  const match = line.match(/^__sampleslices\("([A-Za-z_]\w*)",(\d+)\)$/);
+  if (!match) return null;
+  return { voice: match[1], count: Number(match[2]) };
+}
+
+function parseLanguageSampleSliceDirective(line: string): LanguageSampleSliceDefinition | null {
+  const match = line.match(/^__sampleslicedef\("([A-Za-z_]\w*)","((?:[^"\\]|\\.)*)","(forward|reverse|random|walk|pendulum)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([^"]+)",(\d+)\)$/);
+  if (!match) return null;
+  let raw: string;
+  try { raw = JSON.parse(`"${match[2]}"`) as string; } catch { return null; }
+  let items: LanguageSampleSliceItem[];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    items = parsed.map((item) => {
+      if (!item || typeof item !== 'object') throw new Error('invalid slice item');
+      const value = item as { index?: unknown; reverse?: unknown; weight?: unknown };
+      if (!Number.isInteger(value.index) || typeof value.reverse !== 'boolean' || !Number.isFinite(value.weight)) throw new Error('invalid slice item');
+      return { index: Number(value.index), reverse: value.reverse, weight: Number(value.weight) };
+    });
+  } catch { return null; }
+  return {
+    voice: match[1], items,
+    mode: match[3] as LanguageSampleSliceDefinition['mode'],
+    amount: Number(match[4]), unit: match[5] as LanguageSampleSliceDefinition['unit'],
+    chance: Number(match[6]), drift: match[7] === 'true', loose: match[8] === 'true',
+    clockSource: match[9], line: Number(match[10]),
   };
 }
 

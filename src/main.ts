@@ -2483,7 +2483,7 @@ function buildModuleMonitorPanel(options: {
   compositeSignals?: string[];
   stereoLegend?: boolean;
   parameterDetails?: ParameterViewState[];
-  sampleView?: { owner?: string; sampleAlias?: string; sampleStart?: number; sampleEnd?: number };
+  sampleView?: { owner?: string; sampleAlias?: string; sampleStart?: number; sampleEnd?: number; sampleSlices?: number };
   viewScale?: ModuleViewScale;
   defaultCollapsed: boolean;
 }): HTMLElement {
@@ -2508,6 +2508,7 @@ function buildModuleMonitorPanel(options: {
     canvas.dataset.sampleOwner = options.sampleView.owner ?? options.id;
     canvas.dataset.sampleStart = String(start);
     canvas.dataset.sampleEnd = String(end);
+    canvas.dataset.sampleSlices = String(options.sampleView.sampleSlices ?? 0);
     canvas.setAttribute('aria-label', `${alias} waveform`);
     section.append(label, canvas);
     body.append(section);
@@ -2895,7 +2896,9 @@ function updateDrumkitViews(): void {
 }
 
 function updateSampleWaveformViews(): void {
-  const phosphor = getComputedStyle(document.documentElement).getPropertyValue('--phosphor-hot').trim() || '#ffe783';
+  const styles = getComputedStyle(document.documentElement);
+  const phosphor = styles.getPropertyValue('--phosphor-hot').trim() || '#ffe783';
+  const sliceGuide = styles.getPropertyValue('--sample-slice-guide').trim() || '#63e6e2';
   for (const canvas of document.querySelectorAll<HTMLCanvasElement>('canvas.sample-waveform-canvas')) {
     const alias = canvas.dataset.sampleAlias ?? '';
     const owner = canvas.dataset.sampleOwner ?? '';
@@ -2926,7 +2929,25 @@ function updateSampleWaveformViews(): void {
     ctx.globalAlpha = 0.25;
     ctx.fillRect(0, 0, start * width, height); ctx.fillRect(end * width, 0, (1 - end) * width, height);
     ctx.globalAlpha = 1;
+    const configuredSlices = Math.max(0, Math.floor(Number(canvas.dataset.sampleSlices ?? 0)));
+    if (configuredSlices > 0 && end > start) {
+      const previousStroke = ctx.strokeStyle;
+      ctx.strokeStyle = sliceGuide;
+      ctx.globalAlpha = 0.72;
+      ctx.lineWidth = Math.max(1, window.devicePixelRatio);
+      for (let slice = 0; slice <= configuredSlices; slice += 1) {
+        const x = (start + (end - start) * (slice / configuredSlices)) * width;
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke();
+      }
+      ctx.strokeStyle = previousStroke;
+      ctx.globalAlpha = 1;
+    }
     const progress = owner ? audioEngine.getSampleVoiceProgress(owner) : null;
+    if (progress?.activeSlice && configuredSlices > 0) {
+      const sliceStart = start + (end - start) * ((progress.activeSlice - 1) / configuredSlices);
+      const sliceEnd = start + (end - start) * (progress.activeSlice / configuredSlices);
+      ctx.globalAlpha = 0.12; ctx.fillRect(sliceStart * width, 0, (sliceEnd - sliceStart) * width, height); ctx.globalAlpha = 1;
+    }
     const position = progress?.position ?? start;
     ctx.lineWidth = Math.max(1, 2 * window.devicePixelRatio); ctx.beginPath(); ctx.moveTo(position * width, 0); ctx.lineTo(position * width, height); ctx.stroke();
     if (progress?.active) { ctx.globalAlpha = 0.14; ctx.fillRect(start * width, 0, Math.max(0, (position - start) * width), height); ctx.globalAlpha = 1; }
@@ -2954,8 +2975,8 @@ function drawScopes(): void {
   const sampleWaveforms = document.querySelectorAll<HTMLCanvasElement>('.sample-waveform-canvas');
   if (canvases.length === 0 && liveValues.length === 0 && turingRegisters.length === 0 && lifeGrids.length === 0 && constellationFields.length === 0 && snakeFields.length === 0 && drumkitPatterns.length === 0 && sampleWaveforms.length === 0) return;
 
-  const phosphor = getComputedStyle(document.documentElement).getPropertyValue('--phosphor-hot').trim() || '#ffe783';
-
+  const styles = getComputedStyle(document.documentElement);
+  const phosphor = styles.getPropertyValue('--phosphor-hot').trim() || '#ffe783';
 
   for (const canvas of canvases) {
     const signal = canvas.dataset.signal;
@@ -3202,6 +3223,7 @@ function buildSchemeNode(node: SchemeNode, viewScale?: ModuleViewScale): HTMLEle
       canvas.dataset.sampleOwner = view.owner ?? node.id;
       canvas.dataset.sampleStart = String(view.sampleStart ?? 0);
       canvas.dataset.sampleEnd = String(view.sampleEnd ?? 100);
+      canvas.dataset.sampleSlices = String(view.sampleSlices ?? 0);
       canvas.setAttribute('aria-label', `${view.sampleAlias ?? 'sample'} waveform`);
     } else {
       canvas.className = `scope-canvas scheme-scope view-${view.signalKind}`;

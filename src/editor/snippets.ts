@@ -82,6 +82,20 @@ function splitFullSuffix(raw: string): { key: string; full: boolean } {
 }
 
 function expandVoice(name: string, rawTemplate: string): SnippetExpansion | null {
+  const sampleMatch = rawTemplate.match(/^sample\.(.+?)(\.full)?$/i);
+  if (sampleMatch) {
+    const alias = sampleMatch[1];
+    const full = Boolean(sampleMatch[2]);
+    if (!alias || /\s/.test(alias)) return null;
+    const body = [
+      `VOICE ${name}:`,
+      `    sound sample.${alias}${full ? ' with root C3' : ''}`,
+      '    pitch notes [C3]',
+    ];
+    if (full) body.push('    region 0 100');
+    return { text: body.join('\n'), label: `VOICE sample.${alias}${full ? '.full' : ''}` };
+  }
+
   const { key, full } = splitFullSuffix(rawTemplate);
   const template = VOICE_TEMPLATES[key];
   if (!template) return null;

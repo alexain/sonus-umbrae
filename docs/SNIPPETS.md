@@ -92,6 +92,37 @@ matter
 
 `@v ... saw` is a convenience alias that generates `sound sawtooth`. Engine names otherwise use the public Sonus names directly; Mutable Instruments product names are not snippet aliases.
 
+Sample VOICE snippets accept any asset text after `sample.` and deliberately do not validate the asset while expanding the snippet:
+
+```text
+@v guitar sample.test-sound
+```
+
+expands to:
+
+```text
+VOICE guitar:
+    sound sample.test-sound
+    pitch notes [C3]
+```
+
+The `.full` form makes the default root and region explicit:
+
+```text
+@v guitar sample.test-sound.full
+```
+
+expands to:
+
+```text
+VOICE guitar:
+    sound sample.test-sound with root C3
+    pitch notes [C3]
+    region 0 100
+```
+
+The editor does not check whether `test-sound` exists. Normal language compilation performs that validation when the expanded source is run.
+
 Without `.full`, VOICE snippets deliberately create only the minimum useful skeleton: `sound` and `pitch`. With `.full`, the registered public engine parameters are added with neutral starting values.
 
 ## ENVELOPE

@@ -244,6 +244,8 @@ type VoiceState = {
   pitchProperty: 'note' | 'scale' | 'freq' | null;
   vcaTargets: Set<string>;
   embeddedFilter: string | null;
+  sampleSlices: number | null;
+  sampleRegionHasPlaybackModifiers: boolean;
 };
 
 type FxState = {
@@ -1371,43 +1373,68 @@ function compileVoiceProperty(
     return compileCompositeOutputDirective(voice.name, value, line);
   }
 
-  if (key === 'sample') {
-    if (voice.soundId !== 'sample') throw new LanguageError([{ line, message: 'sample is available only for sound sample' }]);
-    const match = value.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+root\s+([A-Ga-g][#b]?-?\d+))?$/i);
-    if (!match) throw new LanguageError([{ line, message: 'sample expects <asset> [with root <note>]' }]);
-    const alias = match[1];
-    if (hasSampleAsset && !hasSampleAsset(alias)) throw new LanguageError([{ line, message: `unknown sample asset '${alias}'` }]);
-    const rootNote = match[2] ?? 'C3';
-    const rootMidi = midiFromNote(rootNote);
-    if (rootMidi === null) throw new LanguageError([{ line, message: `invalid sample root note '${rootNote}'` }]);
-    const rootFrequency = midiToFrequency(rootMidi);
-    return `${voice.name}.sample(${JSON.stringify(alias)}); ${voice.name}.sampleRoot(${rootFrequency});`;
-  }
-
   if (key === 'region') {
     if (voice.soundId !== 'sample') throw new LanguageError([{ line, message: 'region is available only for sound sample' }]);
     const split = value.match(/^(?:(.*?)\s+)?with\s+(.+)$/i);
     const rangeText = split ? (split[1] ?? '').trim() : value.trim();
     const range = rangeText ? rangeText.split(/\s+/) : [];
     if (range.length > 2 || range.some((item) => !/^\d+(?:\.\d+)?$/.test(item))) {
-      throw new LanguageError([{ line, message: 'region expects [<start> [<end>]] [with loop][, reverse]' }]);
+      throw new LanguageError([{ line, message: 'region expects [<start> [<end>]] [with loop][, reverse] or [with slices <count>]' }]);
     }
     const start = range.length >= 1 ? numberValue(range[0], line, 'region start') : 0;
     const end = range.length >= 2 ? numberValue(range[1], line, 'region end') : 100;
-    if (start < 0 || start > 100 || end < 0 || end > 100) {
-      throw new LanguageError([{ line, message: 'region start/end expect 0..100' }]);
-    }
+    if (start < 0 || start > 100 || end < 0 || end > 100) throw new LanguageError([{ line, message: 'region start/end expect 0..100' }]);
     if (end < start) throw new LanguageError([{ line, message: 'region end must be greater than or equal to start' }]);
 
     let loop = false;
     let reverse = false;
+    let slices: number | null = null;
     const modifiers = (split?.[2] ?? '').split(',').map((item) => item.trim().toLowerCase()).filter(Boolean);
     for (const modifier of modifiers) {
-      if (modifier === 'loop') loop = true;
+      const sliceMatch = modifier.match(/^slices\s+(\d+)$/i);
+      if (sliceMatch) {
+        if (slices !== null) throw new LanguageError([{ line, message: 'region accepts only one slices modifier' }]);
+        slices = Number(sliceMatch[1]);
+        if (!Number.isInteger(slices) || slices < 1 || slices > 128) throw new LanguageError([{ line, message: 'region slices expects an integer from 1 to 128' }]);
+      } else if (modifier === 'loop') loop = true;
       else if (modifier === 'reverse') reverse = true;
       else throw new LanguageError([{ line, message: `region does not support modifier '${modifier}'` }]);
     }
-    return `${voice.name}.sampleRegion(${start},${end},${loop},${reverse});`;
+    if (slices !== null && (loop || reverse)) throw new LanguageError([{ line, message: 'region slices cannot be combined with loop or reverse' }]);
+    voice.sampleSlices = slices;
+    voice.sampleRegionHasPlaybackModifiers = loop || reverse;
+    const sliceDirective = ` __sampleslices(${JSON.stringify(voice.name)},${slices ?? 0});`;
+    return `${voice.name}.sampleRegion(${start},${end},${loop},${reverse});${sliceDirective}`;
+  }
+
+  if (key === 'slice') {
+    if (voice.soundId !== 'sample') throw new LanguageError([{ line, message: 'slice is available only for sound sample' }]);
+    if (voice.sampleSlices === null) throw new LanguageError([{ line, message: 'slice requires region ... with slices <count> declared first' }]);
+    if (voice.sampleRegionHasPlaybackModifiers) throw new LanguageError([{ line, message: 'slice cannot be used with region loop/reverse' }]);
+
+    const timingSplit = splitEveryClause(value);
+    const modeMatch = timingSplit.base.match(/^(.*?)(?:\s+with\s+(forward|reverse|random|walk|pendulum))?$/i);
+    if (!modeMatch) throw new LanguageError([{ line, message: 'invalid slice expression' }]);
+    const sequenceText = modeMatch[1].trim();
+    const mode = (modeMatch[2] ?? 'forward').toLowerCase();
+    const listMatch = sequenceText.match(/^\[(.*)\]$/);
+    const tokenTexts = (listMatch ? listMatch[1].trim().split(/\s+/) : [sequenceText]).filter(Boolean);
+    if (tokenTexts.length === 0) throw new LanguageError([{ line, message: 'slice requires at least one slice index' }]);
+    const items = tokenTexts.map((token) => {
+      const parsed = token.match(/^(\d+)(r)?(?:!(\d+))?$/i);
+      if (!parsed) throw new LanguageError([{ line, message: `invalid slice token '${token}'; expected <index>[r][!weight]` }]);
+      const index = Number(parsed[1]);
+      if (!Number.isInteger(index) || index < 1 || index > voice.sampleSlices!) throw new LanguageError([{ line, message: `slice ${index} is outside 1..${voice.sampleSlices}` }]);
+      const weight = parsed[3] === undefined ? 100 : Number(parsed[3]);
+      if (!Number.isInteger(weight) || weight < 1 || weight > 100) throw new LanguageError([{ line, message: 'slice weight expects an integer from 1 to 100' }]);
+      if (parsed[3] !== undefined && mode !== 'random') throw new LanguageError([{ line, message: 'slice weights require WITH RANDOM' }]);
+      return { index, reverse: Boolean(parsed[2]), weight };
+    });
+    const payload = JSON.stringify(items);
+    if (!timingSplit.every) return `__sampleslicedef(${JSON.stringify(voice.name)},${JSON.stringify(payload)},${JSON.stringify(mode)},0,"ms",100,false,false,"Clock",${line});`;
+    const timing = parseEverySpec(timingSplit.every, line, sourceDefinitions);
+    const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+    return `${prefix}__sampleslicedef(${JSON.stringify(voice.name)},${JSON.stringify(payload)},${JSON.stringify(mode)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)},${line});`;
   }
 
   const soundParameter = voice.soundId ? SOUND_ENGINE_REGISTRY[voice.soundId]?.parameters[key] : undefined;
@@ -1602,6 +1629,22 @@ function compileVoiceProperty(
 
     case 'sound': {
       if (voice.hasSound) throw new LanguageError([{ line, message: `VOICE '${voice.name}' can declare SOUND only once` }]);
+
+      const sampleMatch = value.match(/^sample\.([^\s]+)(?:\s+with\s+root\s+([A-Ga-g][#b]?-?\d+))?$/i);
+      if (sampleMatch) {
+        const alias = sampleMatch[1];
+        if (hasSampleAsset && !hasSampleAsset(alias)) throw new LanguageError([{ line, message: `unknown sample asset '${alias}'` }]);
+        const rootNote = sampleMatch[2] ?? 'C3';
+        const rootMidi = midiFromNote(rootNote);
+        if (rootMidi === null) throw new LanguageError([{ line, message: `invalid sample root note '${rootNote}'` }]);
+        const rootFrequency = midiToFrequency(rootMidi);
+        voice.soundId = 'sample';
+        return `${voice.name}.model("sample"); ${voice.name}.sample(${JSON.stringify(alias)}); ${voice.name}.sampleRoot(${rootFrequency});`;
+      }
+      if (/^sample(?:\s|$)/i.test(value)) {
+        throw new LanguageError([{ line, message: 'sample sound expects sample.<asset> [with root <note>]' }]);
+      }
+
       const match = value.match(/^([a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)?)(?:\s+with\s+(.+))?$/i);
       if (!match) {
         throw new LanguageError([{ line, message: 'sound expects an engine or engine.algorithm [with option, ...]' }]);
@@ -4350,7 +4393,7 @@ export function compileLanguageSource(source: string, options: { hasSampleAsset?
         }
         voices.add(name);
         sourceKinds.set(name, 'voice');
-        currentVoice = { name, line: lineNumber, indentation, hasSound: false, soundId: null, pitchProperty: null, vcaTargets: new Set(), embeddedFilter: null };
+        currentVoice = { name, line: lineNumber, indentation, hasSound: false, soundId: null, pitchProperty: null, vcaTargets: new Set(), embeddedFilter: null, sampleSlices: null, sampleRegionHasPlaybackModifiers: false };
         const viewDirective = voiceMatch[3] ? `\n${name}.view();` : '';
         const disabledDirective = disabled ? `\n${name}.disabled(true);` : '';
         output[index] = `${name} = Voice();${viewDirective}${disabledDirective}`;

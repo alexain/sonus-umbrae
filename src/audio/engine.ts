@@ -112,7 +112,7 @@ export interface AudioProgram {
     diversity: number;
   }>;
   drumkits: Array<{ name: string }>;
-  samples: Array<{ name: string; alias: string; enabled: boolean; level: number; frequency: number; rootFrequency: number; start: number; end: number; loop: boolean; reverse: boolean; }>;
+  samples: Array<{ name: string; alias: string; enabled: boolean; level: number; frequency: number; rootFrequency: number; start: number; end: number; loop: boolean; reverse: boolean; slices: number; initialSlice: number; initialSliceReverse: boolean; }>;
   mists: Array<{
     name: string;
     bypassed: boolean;
@@ -316,7 +316,7 @@ interface DicesVoice {
 
 interface DrumkitVoice { node: AudioWorkletNode; outputSplitter: ChannelSplitterNode; outputL: GainNode; outputR: GainNode; loadedSamples: Set<string> }
 interface DrumSample { alias: string; sampleRate: number; channels: readonly Float32Array[] }
-interface SampleVoiceRuntime { node: AudioWorkletNode; outputSplitter: ChannelSplitterNode; outputL: GainNode; outputR: GainNode; alias: string; level: number; frequency: number; rootFrequency: number; start: number; end: number; loop: boolean; reverse: boolean; progress: number; active: boolean; }
+interface SampleVoiceRuntime { node: AudioWorkletNode; outputSplitter: ChannelSplitterNode; outputL: GainNode; outputR: GainNode; alias: string; level: number; frequency: number; rootFrequency: number; start: number; end: number; loop: boolean; reverse: boolean; slices: number; activeSlice: number; sliceReverse: boolean; progress: number; active: boolean; }
 
 interface MistVoice {
   bypassed: boolean;
@@ -1488,7 +1488,7 @@ export class AudioEngine {
     const splitter = context.createChannelSplitter(2);
     const outputL = context.createGain(); const outputR = context.createGain();
     node.connect(splitter); splitter.connect(outputL, 0); splitter.connect(outputR, 1);
-    const runtime: SampleVoiceRuntime = { node, outputSplitter: splitter, outputL, outputR, alias: definition.alias, level: definition.level, frequency: definition.frequency, rootFrequency: definition.rootFrequency, start: definition.start, end: definition.end, loop: definition.loop, reverse: definition.reverse, progress: definition.start / 100, active: false };
+    const runtime: SampleVoiceRuntime = { node, outputSplitter: splitter, outputL, outputR, alias: definition.alias, level: definition.level, frequency: definition.frequency, rootFrequency: definition.rootFrequency, start: definition.start, end: definition.end, loop: definition.loop, reverse: definition.reverse, slices: definition.slices, activeSlice: 0, sliceReverse: false, progress: definition.start / 100, active: false };
     node.port.onmessage = (event) => { const m = event.data; if (m?.type === 'progress') { runtime.progress = Number(m.position) || 0; runtime.active = Boolean(m.active); } };
     this.samples.set(definition.name, runtime);
     this.sendSampleVoicePcm(node, sample);
@@ -1497,9 +1497,17 @@ export class AudioEngine {
   private updateSampleVoice(definition: AudioProgram['samples'][number]): void {
     const voice = this.samples.get(definition.name); if (!voice) return;
     if (voice.alias !== definition.alias) { const sample = this.drumSamples.get(definition.alias); if (!sample) throw new Error(`unknown audio sample: ${definition.alias}`); voice.alias = definition.alias; this.sendSampleVoicePcm(voice.node, sample); }
-    voice.level = definition.level; voice.frequency = definition.frequency; voice.rootFrequency = definition.rootFrequency; voice.start = definition.start; voice.end = definition.end; voice.loop = definition.loop; voice.reverse = definition.reverse;
+    voice.level = definition.level; voice.frequency = definition.frequency; voice.rootFrequency = definition.rootFrequency; voice.start = definition.start; voice.end = definition.end; voice.loop = definition.loop; voice.reverse = definition.reverse; voice.slices = definition.slices; voice.activeSlice = 0; voice.sliceReverse = false;
     voice.outputL.gain.value = definition.enabled ? 1 : 0; voice.outputR.gain.value = definition.enabled ? 1 : 0;
-    voice.node.port.postMessage({ type: 'params', start: definition.start / 100, end: definition.end / 100, loop: definition.loop, reverse: definition.reverse, level: definition.level / 100, frequency: definition.frequency, rootFrequency: definition.rootFrequency });
+    let playbackStart = definition.start; let playbackEnd = definition.end; let playbackReverse = definition.reverse;
+    if (definition.slices > 0 && definition.initialSlice > 0) {
+      const span = (definition.end - definition.start) / definition.slices;
+      playbackStart = definition.start + span * (definition.initialSlice - 1);
+      playbackEnd = definition.start + span * definition.initialSlice;
+      playbackReverse = definition.initialSliceReverse;
+      voice.activeSlice = definition.initialSlice; voice.sliceReverse = definition.initialSliceReverse;
+    }
+    voice.node.port.postMessage({ type: 'params', start: playbackStart / 100, end: playbackEnd / 100, loop: definition.slices > 0 ? false : definition.loop, reverse: playbackReverse, level: definition.level / 100, frequency: definition.frequency, rootFrequency: definition.rootFrequency });
   }
 
   private sendSampleVoicePcm(node: AudioWorkletNode, sample: DrumSample): void {
@@ -1507,7 +1515,7 @@ export class AudioEngine {
     node.port.postMessage({ type: 'sample', alias: sample.alias, sampleRate: sample.sampleRate, channels }, channels.map((channel) => channel.buffer));
   }
 
-  getSampleVoiceProgress(name: string): { position: number; active: boolean } | null { const voice = this.samples.get(name); return voice ? { position: voice.progress, active: voice.active } : null; }
+  getSampleVoiceProgress(name: string): { position: number; active: boolean; slices: number; activeSlice: number; sliceReverse: boolean } | null { const voice = this.samples.get(name); return voice ? { position: voice.progress, active: voice.active, slices: voice.slices, activeSlice: voice.activeSlice, sliceReverse: voice.sliceReverse } : null; }
 
   private createMist(definition: AudioProgram['mists'][number]): void {
     if (this.mists.has(definition.name)) return;
@@ -2203,6 +2211,24 @@ export class AudioEngine {
     if (!Number.isFinite(level) || level < 0 || level > 100) throw new RangeError('VOICE VCA level must be 0..100');
     this.voiceVcaLevels.set(this.voiceVcaKey(name, output), level / 100);
     this.applyVoiceVcaGain(name, output);
+  }
+
+  setSampleSlice(name: string, index: number, count: number, regionStart: number, regionEnd: number, reverse: boolean): void {
+    const voice = this.samples.get(name);
+    if (!voice || count < 1 || index < 1 || index > count) return;
+    const start = Math.max(0, Math.min(100, regionStart));
+    const end = Math.max(start, Math.min(100, regionEnd));
+    const span = (end - start) / count;
+    const sliceStart = start + span * (index - 1);
+    const sliceEnd = start + span * index;
+    voice.slices = count; voice.activeSlice = index; voice.sliceReverse = reverse;
+    voice.node.port.postMessage({ type: 'params', start: sliceStart / 100, end: sliceEnd / 100, loop: false, reverse });
+  }
+
+  triggerSampleSlice(name: string, index: number, count: number, regionStart: number, regionEnd: number, reverse: boolean): void {
+    this.setSampleSlice(name, index, count, regionStart, regionEnd, reverse);
+    const voice = this.samples.get(name);
+    if (voice) voice.node.port.postMessage({ type: 'trigger' });
   }
 
   triggerVoice(name: string): void {
