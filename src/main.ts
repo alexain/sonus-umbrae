@@ -2899,6 +2899,7 @@ function updateSampleWaveformViews(): void {
   const styles = getComputedStyle(document.documentElement);
   const phosphor = styles.getPropertyValue('--phosphor-hot').trim() || '#ffe783';
   const sliceGuide = styles.getPropertyValue('--sample-slice-guide').trim() || '#63e6e2';
+  const regionMask = styles.getPropertyValue('--bg').trim() || '#050605';
   for (const canvas of document.querySelectorAll<HTMLCanvasElement>('canvas.sample-waveform-canvas')) {
     const alias = canvas.dataset.sampleAlias ?? '';
     const owner = canvas.dataset.sampleOwner ?? '';
@@ -2926,9 +2927,12 @@ function updateSampleWaveformViews(): void {
     }
     const start = Math.max(0, Math.min(100, Number(canvas.dataset.sampleStart ?? 0))) / 100;
     const end = Math.max(0, Math.min(100, Number(canvas.dataset.sampleEnd ?? 100))) / 100;
-    ctx.globalAlpha = 0.25;
+    const previousFill = ctx.fillStyle;
+    ctx.fillStyle = regionMask;
+    ctx.globalAlpha = 0.82;
     ctx.fillRect(0, 0, start * width, height); ctx.fillRect(end * width, 0, (1 - end) * width, height);
     ctx.globalAlpha = 1;
+    ctx.fillStyle = previousFill;
     const configuredSlices = Math.max(0, Math.floor(Number(canvas.dataset.sampleSlices ?? 0)));
     if (configuredSlices > 0 && end > start) {
       const previousStroke = ctx.strokeStyle;
@@ -2950,7 +2954,7 @@ function updateSampleWaveformViews(): void {
     }
     const position = progress?.position ?? start;
     ctx.lineWidth = Math.max(1, 2 * window.devicePixelRatio); ctx.beginPath(); ctx.moveTo(position * width, 0); ctx.lineTo(position * width, height); ctx.stroke();
-    if (progress?.active) { ctx.globalAlpha = 0.14; ctx.fillRect(start * width, 0, Math.max(0, (position - start) * width), height); ctx.globalAlpha = 1; }
+    if (progress?.active && configuredSlices === 0) { ctx.globalAlpha = 0.14; ctx.fillRect(start * width, 0, Math.max(0, (position - start) * width), height); ctx.globalAlpha = 1; }
   }
 }
 
