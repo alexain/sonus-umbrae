@@ -24,7 +24,7 @@ app.innerHTML = `
     <section id="surface" class="surface">
       <div id="live-screen" class="screen live-screen">
         <div class="editor-pane">
-          <div id="line-gutter" class="line-gutter" aria-hidden="true"><div id="line-gutter-content" class="line-gutter-content"></div></div>
+          <div id="line-gutter" class="line-gutter" aria-label="Object controls and statement numbers"><div id="line-gutter-content" class="line-gutter-content"></div></div>
           <div class="editor-stack"><div id="syntax-layer" class="syntax-layer" aria-hidden="true"></div><textarea id="editor" class="editor" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Live coding editor"></textarea><div id="live-control-layer" class="live-control-layer" aria-label="Live parameter controls"></div><div id="inline-view-layer" class="inline-view-layer" aria-hidden="true"></div></div>
         </div>
         <aside id="view-panel" class="view-panel hidden" aria-label="Signal views">
@@ -88,6 +88,7 @@ app.innerHTML = `
           <span id="help-object-shortcut">CMD/CTRL+\\</span><span>TOGGLE CURRENT OBJECT</span>
           <span id="help-scheme-shortcut">CMD/CTRL+1</span><span>TOGGLE LIVE / SCHEME</span>
           <span>CMD/CTRL+/</span><span>COMMENT / UNCOMMENT LINE(S)</span>
+          <span>CMD/CTRL+↑ / ↓</span><span>PREVIOUS / NEXT OBJECT</span>
           <span>&gt;SAVE</span><span>SAVE SOURCE FILE</span>
           <span>&gt;LOAD</span><span>LOAD SOURCE FILE</span>
           <span>&gt;NEW</span><span>CLEAR SOURCE</span>
@@ -238,6 +239,76 @@ inlineViewStyle.textContent = `
     text-align: right;
     color: rgb(112 226 223);
     text-shadow: 0 0 3px rgb(112 226 223 / .35);
+  }
+
+  .line-number {
+    position: relative;
+  }
+  .object-toggle-led {
+    position: absolute;
+    left: 1px;
+    top: 50%;
+    width: 16px;
+    height: 16px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    transform: translateY(-50%);
+    cursor: pointer;
+    color: rgb(112 226 223);
+    z-index: 2;
+  }
+  .object-toggle-led::before {
+    content: '';
+    display: block;
+    width: 7px;
+    height: 7px;
+    margin: 4.5px;
+    border: 1px solid currentColor;
+    border-radius: 50%;
+    box-sizing: border-box;
+    background: currentColor;
+    box-shadow: 0 0 5px rgb(112 226 223 / .65);
+  }
+  .object-toggle-led.disabled {
+    color: rgb(148 150 158);
+  }
+  .object-toggle-led.disabled::before {
+    background: transparent;
+    box-shadow: none;
+  }
+  .object-toggle-led:hover::before,
+  .object-toggle-led:focus-visible::before {
+    box-shadow: 0 0 8px currentColor;
+  }
+  .object-toggle-led:focus {
+    outline: none;
+  }
+  .line-number.collapsible {
+    cursor: pointer;
+  }
+  .line-number.collapsible:hover .object-fold-arrow {
+    opacity: 1;
+  }
+  .line-number-label {
+    position: relative;
+  }
+  .object-fold-arrow {
+    position: absolute;
+    left: 100%;
+    top: 50%;
+    margin-left: -1px;
+    padding: 5px 6px;
+    font-size: .62em;
+    line-height: 1;
+    transform: translateY(-50%);
+    opacity: .62;
+    color: rgb(176 180 190);
+    cursor: pointer;
+  }
+  .syntax-fold-placeholder {
+    opacity: .34;
+    letter-spacing: .08em;
   }
 
   .syntax-inline-spacer {
@@ -1004,8 +1075,112 @@ function normalizeLanguageCommandCase(): void {
   editor.setSelectionRange(start, end, direction);
 }
 
+type CollapsedEditorBlock = { body: string };
+
+const collapsedEditorBlocks = new Map<string, CollapsedEditorBlock>();
+let nextCollapsedEditorBlockId = 1;
+
+function foldMarkerId(line: string): string | null {
+  const match = line.match(/^\s*\/\/~F(\d+)\s*$/);
+  return match?.[1] ?? null;
+}
+
+type FoldMarkerRange = {
+  start: number;
+  end: number;
+  headerEnd: number;
+  nextLineStart: number | null;
+};
+
+function foldMarkerRanges(value = editor.value): FoldMarkerRange[] {
+  const lines = value.split('\n');
+  const ranges: FoldMarkerRange[] = [];
+  let offset = 0;
+  let previousLineStart = 0;
+  let previousLineLength = 0;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (foldMarkerId(line)) {
+      const end = offset + line.length;
+      ranges.push({
+        start: offset,
+        end,
+        headerEnd: index > 0 ? previousLineStart + previousLineLength : offset,
+        nextLineStart: index < lines.length - 1 ? end + 1 : null,
+      });
+    }
+    previousLineStart = offset;
+    previousLineLength = line.length;
+    offset += line.length + 1;
+  }
+  return ranges;
+}
+
+function keepCaretOutOfFoldMarker(): boolean {
+  if (document.activeElement !== editor || editor.selectionStart !== editor.selectionEnd) return false;
+  const caret = editor.selectionStart;
+  const marker = foldMarkerRanges().find((range) => caret >= range.start && caret <= range.end);
+  if (!marker) return false;
+  editor.setSelectionRange(marker.headerEnd, marker.headerEnd);
+  return true;
+}
+
+function skipFoldMarkerWithArrow(direction: 'up' | 'down'): boolean {
+  if (editor.selectionStart !== editor.selectionEnd) return false;
+  const caret = editor.selectionStart;
+  for (const marker of foldMarkerRanges()) {
+    if (direction === 'down' && caret <= marker.headerEnd && caret >= editor.value.lastIndexOf('\n', Math.max(0, marker.headerEnd - 1)) + 1) {
+      if (marker.nextLineStart === null) return true;
+      editor.setSelectionRange(marker.nextLineStart, marker.nextLineStart);
+      return true;
+    }
+    if (direction === 'up' && marker.nextLineStart !== null) {
+      const nextLineEndAt = editor.value.indexOf('\n', marker.nextLineStart);
+      const nextLineEnd = nextLineEndAt < 0 ? editor.value.length : nextLineEndAt;
+      if (caret >= marker.nextLineStart && caret <= nextLineEnd) {
+        editor.setSelectionRange(marker.headerEnd, marker.headerEnd);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function protectFoldMarkerBoundary(key: 'Backspace' | 'Delete'): boolean {
+  if (editor.selectionStart !== editor.selectionEnd) return false;
+  const caret = editor.selectionStart;
+  for (const marker of foldMarkerRanges()) {
+    if (key === 'Delete' && caret === marker.headerEnd) return true;
+    if (key === 'Backspace' && marker.nextLineStart !== null && caret === marker.nextLineStart) return true;
+  }
+  return false;
+}
+
+function expandFoldMarkers(value: string): string {
+  let expanded = value;
+  for (let pass = 0; pass < 64; pass += 1) {
+    let changed = false;
+    const lines = expanded.split('\n');
+    const rebuilt: string[] = [];
+    for (const line of lines) {
+      const id = foldMarkerId(line);
+      const block = id ? collapsedEditorBlocks.get(id) : undefined;
+      if (!block) {
+        rebuilt.push(line);
+        continue;
+      }
+      changed = true;
+      const body = block.body.endsWith('\n') ? block.body.slice(0, -1) : block.body;
+      rebuilt.push(...body.split('\n'));
+    }
+    expanded = rebuilt.join('\n');
+    if (!changed) break;
+  }
+  return expanded;
+}
+
 function sourceText(): string {
-  return editor.value.replace(/\r\n/g, '\n');
+  return expandFoldMarkers(editor.value.replace(/\r\n/g, '\n'));
 }
 
 function setCodeRunning(running: boolean): void {
@@ -3223,6 +3398,117 @@ function updateEditorInlineScrollExtent(): void {
   editor.style.paddingBottom = total > 0 ? `${total + 8}px` : '';
 }
 
+function liveDisableHeader(line: string): { disabled: boolean } | null {
+  const commentAt = commentStart(line);
+  const code = commentAt < 0 ? line : line.slice(0, commentAt);
+  const match = code.match(/^\s*(_?)(VOICE|DRUMKIT|FX|FILTER|CLOCK)\b/i);
+  if (!match) return null;
+  return { disabled: match[1] === '_' };
+}
+
+function toggleObjectDisabledAtPhysicalLine(physicalLine: number): void {
+  const lines = editor.value.split('\n');
+  if (physicalLine < 1 || physicalLine > lines.length) return;
+  const targetLine = lines[physicalLine - 1];
+  if (!liveDisableHeader(targetLine)) return;
+
+  const targetStart = lines.slice(0, physicalLine - 1).reduce((total, line) => total + line.length + 1, 0);
+  const match = targetLine.match(/^(\s*)(_?)/);
+  const indentation = match?.[1] ?? '';
+  const disabled = match?.[2] === '_';
+  const markerStart = targetStart + indentation.length;
+  const originalStart = editor.selectionStart;
+  const originalEnd = editor.selectionEnd;
+  const direction = editor.selectionDirection ?? 'none';
+
+  if (disabled) editor.setRangeText('', markerStart, markerStart + 1, 'preserve');
+  else editor.setRangeText('_', markerStart, markerStart, 'preserve');
+
+  const delta = disabled ? -1 : 1;
+  const selectionStart = Math.max(0, originalStart + (originalStart > markerStart ? delta : 0));
+  const selectionEnd = Math.max(selectionStart, originalEnd + (originalEnd > markerStart ? delta : 0));
+  editor.setSelectionRange(selectionStart, selectionEnd, direction);
+  afterEditorMutation();
+}
+
+function collapsibleObjectHeader(line: string): { indentation: string } | null {
+  const commentAt = commentStart(line);
+  const code = commentAt < 0 ? line : line.slice(0, commentAt);
+  const match = code.match(/^(\s*)_?(VOICE|DRUMKIT|FX|FILTER|MOD|SEQ|REGISTER|LOGIC)\s+[A-Za-z_][A-Za-z0-9_]*\b[^:]*:\s*$/i);
+  if (!match) return null;
+  return { indentation: match[1] };
+}
+
+function foldedMarkerAfterLine(lines: string[], index: number): string | null {
+  if (index + 1 >= lines.length) return null;
+  return foldMarkerId(lines[index + 1]);
+}
+
+function toggleCollapsedObjectAtPhysicalLine(physicalLine: number): void {
+  const lines = editor.value.split('\n');
+  const index = physicalLine - 1;
+  if (index < 0 || index >= lines.length) return;
+  const header = collapsibleObjectHeader(lines[index]);
+  if (!header) return;
+
+  const lineStarts: number[] = [];
+  let offset = 0;
+  for (const line of lines) {
+    lineStarts.push(offset);
+    offset += line.length + 1;
+  }
+
+  const existingId = foldedMarkerAfterLine(lines, index);
+  if (existingId) {
+    const block = collapsedEditorBlocks.get(existingId);
+    if (!block) return;
+    const markerStart = lineStarts[index + 1];
+    const markerEnd = markerStart + lines[index + 1].length + (index + 1 < lines.length - 1 ? 1 : 0);
+    const restoredBody = block.body.endsWith('\n\n')
+      ? block.body
+      : block.body.endsWith('\n')
+        ? `${block.body}\n`
+        : `${block.body}\n\n`;
+    editor.setRangeText(restoredBody, markerStart, markerEnd, 'preserve');
+    collapsedEditorBlocks.delete(existingId);
+    afterEditorMutation();
+    return;
+  }
+
+  const headerIndent = header.indentation.length;
+  let endLine = index + 1;
+  while (endLine < lines.length) {
+    const line = lines[endLine];
+    if (!line.trim()) {
+      endLine += 1;
+      continue;
+    }
+    const commentAt = commentStart(line);
+    const code = commentAt < 0 ? line : line.slice(0, commentAt);
+    const indentation = code.length - code.trimStart().length;
+    if (indentation <= headerIndent) break;
+    endLine += 1;
+  }
+
+  if (endLine === index + 1) return;
+  const bodyStart = lineStarts[index + 1];
+  const bodyEnd = endLine < lines.length ? lineStarts[endLine] : editor.value.length;
+  const body = editor.value.slice(bodyStart, bodyEnd);
+  if (!body.trim()) return;
+
+  const selectionStart = editor.selectionStart;
+  const selectionEnd = editor.selectionEnd;
+  const selectionInsideBody = selectionStart < bodyEnd && selectionEnd >= bodyStart;
+  const headerCaret = lineStarts[index] + lines[index].length;
+
+  const id = String(nextCollapsedEditorBlockId++);
+  collapsedEditorBlocks.set(id, { body });
+  const marker = `${header.indentation}    //~F${id}${body.endsWith('\n') ? '\n' : ''}`;
+  editor.setRangeText(marker, bodyStart, bodyEnd, 'preserve');
+  if (selectionInsideBody) editor.setSelectionRange(headerCaret, headerCaret);
+  afterEditorMutation();
+}
+
 function renderLineGutter(): void {
   const lines = editor.value.split('\n');
   const style = getComputedStyle(editor);
@@ -3269,7 +3555,53 @@ function renderLineGutter(): void {
     marker.className = 'line-number-marker';
     marker.textContent = diagnosticLines.has(physicalLine) ? '!' : '';
     const label = document.createElement('span');
+    label.className = 'line-number-label';
     label.textContent = labels[index] ?? '';
+
+    const collapsible = collapsibleObjectHeader(lines[index]);
+    if (collapsible) {
+      const collapsed = Boolean(foldedMarkerAfterLine(lines, index));
+      row.classList.add('collapsible');
+      row.title = collapsed ? 'Expand object' : 'Collapse object';
+      const arrow = document.createElement('span');
+      arrow.className = 'object-fold-arrow';
+      arrow.textContent = collapsed ? '▴' : '▾';
+      label.append(arrow);
+      row.addEventListener('pointerdown', (event) => {
+        const target = event.target as Element;
+        if (target.closest('.object-toggle-led')) return;
+        event.preventDefault();
+      });
+      row.addEventListener('click', (event) => {
+        const target = event.target as Element;
+        if (target.closest('.object-toggle-led')) return;
+        event.preventDefault();
+        event.stopPropagation();
+        toggleCollapsedObjectAtPhysicalLine(physicalLine);
+        editor.focus();
+      });
+    }
+
+    const objectState = liveDisableHeader(lines[index]);
+    if (objectState) {
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = `object-toggle-led${objectState.disabled ? ' disabled' : ''}`;
+      toggle.setAttribute('aria-label', `${objectState.disabled ? 'Enable' : 'Disable'} object on line ${physicalLine}`);
+      toggle.title = objectState.disabled ? 'Enable object' : 'Disable object';
+      toggle.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      toggle.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleObjectDisabledAtPhysicalLine(physicalLine);
+        editor.focus();
+      });
+      row.append(toggle);
+    }
+
     row.append(marker, label);
     lineGutterContent.append(row);
 
@@ -3293,7 +3625,7 @@ function statementLabels(source: string): string[] {
   for (let index = 0; index < lines.length; index += 1) {
     const trimmed = lines[index].trim();
     if (!trimmed || trimmed.startsWith('//')) continue;
-    if (/^_?(VOICE|FX|FILTER|MOD|SEQ|SET|CLOCK|OUT)\b/i.test(trimmed)) {
+    if (/^_?(VOICE|DRUMKIT|FX|FILTER|MOD|SEQ|REGISTER|LOGIC|SET|CLOCK|OUT)\b/i.test(trimmed)) {
       statement += 1;
       labels[index] = String(statement);
     }
@@ -3775,6 +4107,12 @@ function renderSyntaxLayer(): void {
     const physicalLine = index + 1;
     const row = document.createElement('div');
     row.className = 'syntax-line';
+    if (foldMarkerId(line)) {
+      row.classList.add('syntax-fold-placeholder');
+      row.textContent = '⋯';
+      syntaxLayer.append(row);
+      return;
+    }
     const commentAt = commentStart(line);
     const codePart = commentAt < 0 ? line : line.slice(0, commentAt);
     const trimmedCode = codePart.trim();
@@ -3845,6 +4183,8 @@ function syncLineGutter(): void {
 function setSourceText(text: string): void {
   clearDiagnostic();
   savedEditorSelection = null;
+  collapsedEditorBlocks.clear();
+  nextCollapsedEditorBlockId = 1;
   editor.value = text.replace(/\r\n/g, '\n');
   renderSyntaxLayer();
   renderLineGutter();
@@ -4307,6 +4647,47 @@ function toggleLineComments(): void {
   afterEditorMutation();
 }
 
+function objectHeaderOffsets(source: string): number[] {
+  const offsets: number[] = [];
+  const lines = source.split('\n');
+  let offset = 0;
+  for (const line of lines) {
+    const commentAt = commentStart(line);
+    const code = commentAt < 0 ? line : line.slice(0, commentAt);
+    if (/^\s*_?(VOICE|DRUMKIT|FX|FILTER|MOD|SEQ|REGISTER|LOGIC|CLOCK)\b/i.test(code)) {
+      offsets.push(offset + (line.match(/^\s*/)?.[0].length ?? 0));
+    }
+    offset += line.length + 1;
+  }
+  return offsets;
+}
+
+function navigateObject(direction: -1 | 1): void {
+  const headers = objectHeaderOffsets(editor.value);
+  if (headers.length === 0) {
+    notify('no objects');
+    return;
+  }
+
+  const caret = editor.selectionStart;
+  let target: number | undefined;
+  if (direction > 0) {
+    target = headers.find((offset) => offset > caret);
+  } else {
+    const currentOrPrevious = headers.filter((offset) => offset < caret);
+    target = currentOrPrevious.at(-1);
+  }
+
+  if (target === undefined) {
+    notify(direction > 0 ? 'last object' : 'first object');
+    return;
+  }
+
+  editor.focus();
+  editor.setSelectionRange(target, target);
+  requestAnimationFrame(positionBlockCaret);
+}
+
 function toggleCurrentObjectDisabled(): void {
   const value = editor.value;
   const caret = editor.selectionStart;
@@ -4347,7 +4728,10 @@ function toggleCurrentObjectDisabled(): void {
   afterEditorMutation();
 }
 
-document.addEventListener('selectionchange', () => requestAnimationFrame(positionBlockCaret));
+document.addEventListener('selectionchange', () => {
+  keepCaretOutOfFoldMarker();
+  requestAnimationFrame(positionBlockCaret);
+});
 editor.addEventListener('input', () => {
   normalizeLanguageCommandCase();
   normalizeLiveControlSpacing();
@@ -4360,7 +4744,11 @@ editor.addEventListener('input', () => {
 });
 editor.addEventListener('keyup', () => requestAnimationFrame(positionBlockCaret));
 editor.addEventListener('pointerdown', () => leaveBlockCaretTrail());
-editor.addEventListener('pointerup', () => requestAnimationFrame(() => { moveCaretAcrossLiveControlGap('nearest'); positionBlockCaret(); }));
+editor.addEventListener('pointerup', () => requestAnimationFrame(() => {
+  moveCaretAcrossLiveControlGap('nearest');
+  keepCaretOutOfFoldMarker();
+  positionBlockCaret();
+}));
 liveScreen.addEventListener('scroll', () => {
   clearDiagnostic();
   requestAnimationFrame(positionBlockCaret);
@@ -4378,13 +4766,31 @@ window.addEventListener('resize', () => {
 
 editor.addEventListener('beforeinput', (event) => {
   const input = event as InputEvent;
-  if (input.inputType.startsWith('insert') && editor.selectionStart === editor.selectionEnd) moveCaretAcrossLiveControlGap('forward');
+  if (input.inputType.startsWith('insert') && editor.selectionStart === editor.selectionEnd) {
+    keepCaretOutOfFoldMarker();
+    moveCaretAcrossLiveControlGap('forward');
+  }
   if (input.inputType === 'insertText' && input.data) flashAtCaret(input.data);
 });
 
 editor.addEventListener('keydown', (event) => {
   if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) {
     leaveBlockCaretTrail();
+  }
+
+  if (event.key === 'ArrowDown' && skipFoldMarkerWithArrow('down')) {
+    event.preventDefault();
+    requestAnimationFrame(positionBlockCaret);
+    return;
+  }
+  if (event.key === 'ArrowUp' && skipFoldMarkerWithArrow('up')) {
+    event.preventDefault();
+    requestAnimationFrame(positionBlockCaret);
+    return;
+  }
+  if ((event.key === 'Backspace' || event.key === 'Delete') && protectFoldMarkerBoundary(event.key)) {
+    event.preventDefault();
+    return;
   }
 
   if (event.key === 'ArrowRight' && editor.selectionStart === editor.selectionEnd) {
@@ -4412,6 +4818,13 @@ editor.addEventListener('keydown', (event) => {
   if (event.key === '>' && !event.metaKey && !event.ctrlKey && !event.altKey) {
     event.preventDefault();
     enterCommandMode();
+    return;
+  }
+
+  if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && (event.metaKey || event.ctrlKey) && !event.altKey) {
+    event.preventDefault();
+    event.stopPropagation();
+    navigateObject(event.key === 'ArrowUp' ? -1 : 1);
     return;
   }
 
@@ -4469,9 +4882,32 @@ editor.addEventListener('keydown', (event) => {
     const start = editor.selectionStart;
     const end = editor.selectionEnd;
     const before = editor.value.slice(0, start);
-    const currentLine = before.slice(before.lastIndexOf('\n') + 1);
+    const currentLineStart = before.lastIndexOf('\n') + 1;
+    const currentLineEndAt = editor.value.indexOf('\n', start);
+    const currentLineEnd = currentLineEndAt < 0 ? editor.value.length : currentLineEndAt;
+    const currentLine = editor.value.slice(currentLineStart, currentLineEnd);
     const trimmed = currentLine.trim();
     const currentIndent = currentLine.match(/^\s*/)?.[0] ?? '';
+
+    // A collapsed block is editor-atomic. Enter on its header creates a new
+    // peer line after the fold placeholder instead of reopening/editing its body.
+    if (start === end && collapsibleObjectHeader(currentLine)) {
+      const markerStart = currentLineEndAt < 0 ? -1 : currentLineEndAt + 1;
+      if (markerStart >= 0) {
+        const markerLineEndAt = editor.value.indexOf('\n', markerStart);
+        const markerLineEnd = markerLineEndAt < 0 ? editor.value.length : markerLineEndAt;
+        const markerLine = editor.value.slice(markerStart, markerLineEnd);
+        if (foldMarkerId(markerLine)) {
+          editor.setRangeText('\n', markerLineEnd, markerLineEnd, 'end');
+          refreshInlineViewEditingPreview();
+          renderSyntaxLayer();
+          renderLineGutter();
+          scheduleStoppedPreview();
+          requestAnimationFrame(positionBlockCaret);
+          return;
+        }
+      }
+    }
 
     let indentation = currentIndent;
     if (!trimmed) indentation = currentIndent.length >= 4 ? currentIndent.slice(0, -4) : '';
