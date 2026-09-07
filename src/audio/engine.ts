@@ -313,7 +313,8 @@ interface DicesVoice {
 }
 
 
-interface DrumkitVoice { node: AudioWorkletNode; outputSplitter: ChannelSplitterNode; outputL: GainNode; outputR: GainNode }
+interface DrumkitVoice { node: AudioWorkletNode; outputSplitter: ChannelSplitterNode; outputL: GainNode; outputR: GainNode; loadedSamples: Set<string> }
+interface DrumSample { alias: string; sampleRate: number; channels: readonly Float32Array[] }
 
 interface MistVoice {
   bypassed: boolean;
@@ -471,6 +472,7 @@ export class AudioEngine {
   private swells = new Map<string, SwellVoice>();
   private dices = new Map<string, DicesVoice>();
   private drumkits = new Map<string, DrumkitVoice>();
+  private drumSamples = new Map<string, DrumSample>();
   private mists = new Map<string, MistVoice>();
   private skies = new Map<string, SkyVoice>();
   private delays = new Map<string, DelayVoice>();
@@ -1397,7 +1399,7 @@ export class AudioEngine {
     outputL.gain.value = DRUMKIT_OUTPUT_TRIM;
     outputR.gain.value = DRUMKIT_OUTPUT_TRIM;
     node.connect(outputSplitter); outputSplitter.connect(outputL,0,0); outputSplitter.connect(outputR,1,0);
-    this.drumkits.set(definition.name,{node,outputSplitter,outputL,outputR});
+    this.drumkits.set(definition.name,{node,outputSplitter,outputL,outputR,loadedSamples:new Set()});
   }
 
   triggerDrumkit(name:string, voice:'kick'|'snare'|'clap'|'hihat'|'openhat'|'lowtom'|'hightom', params:{level:number;pan:number;tune:number;decay:number;transient:number;snappy:number;color:number;noise:number}): void {
@@ -1406,6 +1408,64 @@ export class AudioEngine {
       level:Math.max(0,Math.min(1,params.level/100)), pan:Math.max(-1,Math.min(1,params.pan/100)), tune:params.tune,
       decay:Math.max(0,Math.min(1,params.decay/100)), transient:Math.max(0,Math.min(1,params.transient/100)),
       snappy:Math.max(0,Math.min(1,params.snappy/100)), color:2 ** ((params.color-50)/25), noise:Math.max(0,Math.min(1,params.noise/100)) });
+  }
+
+  hasDrumSample(alias: string): boolean {
+    return this.drumSamples.has(alias);
+  }
+
+  registerDrumSample(sample: DrumSample): void {
+    this.drumSamples.set(sample.alias, {
+      alias: sample.alias,
+      sampleRate: sample.sampleRate,
+      channels: sample.channels,
+    });
+  }
+
+  unregisterDrumSample(alias: string): void {
+    if (!this.drumSamples.delete(alias)) return;
+    for (const drumkit of this.drumkits.values()) {
+      if (!drumkit.loadedSamples.delete(alias)) continue;
+      drumkit.node.port.postMessage({ type: 'remove-sample', alias });
+    }
+  }
+
+  prepareDrumkitSample(name: string, alias: string): void {
+    const drumkit = this.drumkits.get(name);
+    if (!drumkit) throw new Error(`unknown DRUMKIT object: ${name}`);
+    const sample = this.drumSamples.get(alias);
+    if (!sample) throw new Error(`unknown audio sample: ${alias}`);
+    if (drumkit.loadedSamples.has(alias)) return;
+    this.sendDrumSample(drumkit.node, sample);
+    drumkit.loadedSamples.add(alias);
+  }
+
+  triggerDrumkitSample(name: string, alias: string, params: { level: number; pan: number; tune: number; decay: number }): void {
+    const drumkit = this.drumkits.get(name);
+    if (!drumkit) throw new Error(`unknown DRUMKIT object: ${name}`);
+    this.prepareDrumkitSample(name, alias);
+    drumkit.node.port.postMessage({
+      type: 'trigger-sample',
+      alias,
+      level: Math.max(0, Math.min(1, params.level / 100)),
+      pan: Math.max(-1, Math.min(1, params.pan / 100)),
+      tune: params.tune,
+      decay: Math.max(0, Math.min(1, params.decay / 100)),
+    });
+  }
+
+  private sendDrumSample(node: AudioWorkletNode, sample: DrumSample): void {
+    // Send dedicated PCM copies to the AudioWorklet and transfer ownership of
+    // those copies. The AssetLibrary keeps its canonical PCM, so the same
+    // sample can still be loaded by other DRUMKIT instances without sharing
+    // or detaching the source buffers.
+    const channels = sample.channels.map((channel) => channel.slice());
+    node.port.postMessage({
+      type: 'sample',
+      alias: sample.alias,
+      sampleRate: sample.sampleRate,
+      channels,
+    }, channels.map((channel) => channel.buffer));
   }
 
   private createMist(definition: AudioProgram['mists'][number]): void {

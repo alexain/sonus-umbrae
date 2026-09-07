@@ -8,6 +8,7 @@ export type AudioAsset = {
   frames: number;
   duration: number;
   decodedBytes: number;
+  pcmChannels: readonly Float32Array[];
 };
 
 type MonitorCardFactory = (id: string, title: string, defaultCollapsed: boolean) => HTMLElement;
@@ -16,6 +17,8 @@ type AssetLibraryOptions = {
   maxDecodedBytes: number;
   onChange?: () => void;
   onMessage?: (message: string) => void;
+  onSampleReady?: (asset: AudioAsset) => void;
+  onSampleRemoved?: (alias: string) => void;
 };
 
 type AudioMetadata = {
@@ -26,6 +29,8 @@ type AudioMetadata = {
   decodedBytes: number;
 };
 
+type DecodedAudio = AudioMetadata & { pcmChannels: Float32Array[] };
+
 const WAV_HEADER_SCAN_BYTES = 1024 * 1024;
 
 export class AssetLibrary {
@@ -33,6 +38,8 @@ export class AssetLibrary {
   private readonly maxDecodedBytes: number;
   private readonly onChange: () => void;
   private readonly onMessage: (message: string) => void;
+  private readonly onSampleReady: (asset: AudioAsset) => void;
+  private readonly onSampleRemoved: (alias: string) => void;
   private previewAudio: HTMLAudioElement | null = null;
   private previewAlias: string | null = null;
   private previewObjectUrl: string | null = null;
@@ -41,6 +48,8 @@ export class AssetLibrary {
     this.maxDecodedBytes = Math.max(1, Math.floor(options.maxDecodedBytes));
     this.onChange = options.onChange ?? (() => undefined);
     this.onMessage = options.onMessage ?? (() => undefined);
+    this.onSampleReady = options.onSampleReady ?? (() => undefined);
+    this.onSampleRemoved = options.onSampleRemoved ?? (() => undefined);
   }
 
   getAll(): readonly AudioAsset[] {
@@ -61,6 +70,7 @@ export class AssetLibrary {
     if (this.previewAlias === alias) this.stopPreview(false);
     const removed = this.assets.delete(alias);
     if (removed) {
+      this.onSampleRemoved(alias);
       this.onChange();
       this.onMessage(`sample ${alias} removed`);
     }
@@ -76,23 +86,31 @@ export class AssetLibrary {
       }
 
       try {
-        const metadata = isWavFile(file)
-          ? await readWavMetadata(file)
-          : await readBrowserAudioMetadata(file);
-        const projected = this.getDecodedBytes() + metadata.decodedBytes;
+        if (isWavFile(file)) {
+          const header = await readWavMetadata(file);
+          if (this.getDecodedBytes() + header.decodedBytes > this.maxDecodedBytes) {
+            this.onMessage(`${file.name}: sample memory limit exceeded`);
+            continue;
+          }
+        }
+
+        const decoded = await decodeBrowserAudio(file);
+        const projected = this.getDecodedBytes() + decoded.decodedBytes;
         if (projected > this.maxDecodedBytes) {
           this.onMessage(`${file.name}: sample memory limit exceeded`);
           continue;
         }
 
         const alias = uniqueAlias(file.name, new Set(this.assets.keys()));
-        this.assets.set(alias, {
+        const asset: AudioAsset = {
           id: typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
           alias,
           fileName: file.name,
           file,
-          ...metadata,
-        });
+          ...decoded,
+        };
+        this.assets.set(alias, asset);
+        this.onSampleReady(asset);
         imported += 1;
       } catch (error) {
         this.onMessage(error instanceof Error ? `${file.name}: ${error.message}` : `${file.name}: invalid or unsupported audio file`);
@@ -368,7 +386,7 @@ async function readWavMetadata(file: File): Promise<AudioMetadata> {
   return { channels, sampleRate, frames, duration, decodedBytes };
 }
 
-async function readBrowserAudioMetadata(file: File): Promise<AudioMetadata> {
+async function decodeBrowserAudio(file: File): Promise<DecodedAudio> {
   const AudioContextClass = window.AudioContext
     ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
   if (!AudioContextClass) throw new Error('browser audio decoder is not available');
@@ -385,7 +403,8 @@ async function readBrowserAudioMetadata(file: File): Promise<AudioMetadata> {
     if (channels < 1 || sampleRate < 1 || frames < 0 || !Number.isFinite(duration) || !Number.isSafeInteger(decodedBytes)) {
       throw new Error('invalid decoded audio metadata');
     }
-    return { channels, sampleRate, frames, duration, decodedBytes };
+    const pcmChannels = Array.from({ length: channels }, (_, channel) => new Float32Array(audio.getChannelData(channel)));
+    return { channels, sampleRate, frames, duration, decodedBytes, pcmChannels };
   } finally {
     await context.close().catch(() => undefined);
   }

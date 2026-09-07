@@ -8,7 +8,7 @@ import { AssetLibrary } from './editor/assets';
 
 type Screen = 'live' | 'config' | 'help' | 'about' | 'scheme';
 
-const VERSION = '0.5.0';
+const VERSION = '0.6.0';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Missing #app');
@@ -473,7 +473,19 @@ const assetLibrary = new AssetLibrary({
   maxDecodedBytes: 256 * 1024 * 1024,
   onChange: () => syncViews(),
   onMessage: (text) => notify(text),
+  onSampleReady: (asset) => audioEngine.registerDrumSample({
+    alias: asset.alias,
+    sampleRate: asset.sampleRate,
+    channels: asset.pcmChannels,
+  }),
+  onSampleRemoved: (alias) => audioEngine.unregisterDrumSample(alias),
 });
+
+function compileSource(source: string): string {
+  return compileLanguageSource(source, {
+    hasSampleAsset: (alias) => assetLibrary.getByAlias(alias) !== undefined,
+  });
+}
 
 let screen: Screen = 'live';
 let commandMode = false;
@@ -733,7 +745,7 @@ function cancelAudioConfigRestart(): void {
 async function restartEngineWithConfig(next = { sampleRate: appConfig.sampleRate, outputDeviceId: appConfig.outputDeviceId, latencyMode: appConfig.latencyMode }): Promise<void> {
   const source = sourceText();
   const shouldRun = codeRunning;
-  const compiled = source.trim() ? compileLanguageSource(source) : '';
+  const compiled = source.trim() ? compileSource(source) : '';
   runtime.stopExecution({ preserveTails: false });
   audioEngine.setClockTransport(false);
   setCodeRunning(false);
@@ -884,7 +896,7 @@ async function applyCapabilityRestart(): Promise<void> {
   capabilityCancel.disabled = true;
   try {
     clearDiagnostic();
-    const compiled = pending.source.trim() ? compileLanguageSource(pending.source) : '';
+    const compiled = pending.source.trim() ? compileSource(pending.source) : '';
     runtime.stopExecution({ preserveTails: false });
     audioEngine.setClockTransport(false);
     setCodeRunning(false);
@@ -1221,7 +1233,7 @@ function refreshStoppedPreview(): boolean {
 
   try {
     const source = sourceText();
-    const compiled = source.trim() ? compileLanguageSource(source) : '';
+    const compiled = source.trim() ? compileSource(source) : '';
     runtime.evaluate(compiled, { applyAudio: false });
     clearDiagnostic();
     syncViews();
@@ -1272,7 +1284,7 @@ function queueLiveUpdate(): boolean {
   try {
     clearDiagnostic();
     const source = sourceText();
-    const compiled = source.trim() ? compileLanguageSource(source) : '';
+    const compiled = source.trim() ? compileSource(source) : '';
     runtime.validate(compiled);
     const hasMasterClock = /^\s*_?CLOCK\s+SET\b/im.test(source);
     pendingLiveUpdate = { compiled, hasMasterClock };
@@ -1330,7 +1342,7 @@ function evaluateLiveSource(): boolean {
     }
 
     if (requestCapabilityRestart(source)) return false;
-    const compiled = compileLanguageSource(source);
+    const compiled = compileSource(source);
     const hasMasterClock = /^\s*_?CLOCK\s+SET\b/im.test(source);
     // Build all scheduler jobs while transport is stopped, then start the
     // musical epoch. Starting the clock before runtime.evaluate() can emit the
@@ -3386,7 +3398,7 @@ function refreshInlineViewEditingPreview(): void {
   }
   try {
     const source = sourceText();
-    const compiled = source.trim() ? compileLanguageSource(source) : '';
+    const compiled = source.trim() ? compileSource(source) : '';
     editingInlineViews = runtime.previewInlineViews(compiled);
   } catch (error) {
     // While a line is being typed it can be transiently incomplete. Keep the
@@ -3988,7 +4000,7 @@ function commitLiveControlSource(): void {
     liveControlCommitTimer = 0;
     try {
       const source = sourceText();
-      const compiled = source.trim() ? compileLanguageSource(source) : '';
+      const compiled = source.trim() ? compileSource(source) : '';
       runtime.evaluate(compiled, { hotReload: true });
       editingInlineViews = null;
       clearDiagnostic();

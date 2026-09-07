@@ -182,7 +182,7 @@ export interface SnakeViewState {
 
 export interface DrumkitLaneViewState {
   alias: string;
-  voice: 'kick' | 'snare' | 'clap' | 'hihat' | 'openhat' | 'lowtom' | 'hightom';
+  voice: 'kick' | 'snare' | 'clap' | 'hihat' | 'openhat' | 'lowtom' | 'hightom' | 'sample';
   steps: number;
   totalSteps: number;
   page: number;
@@ -535,7 +535,7 @@ interface LanguageClockConfig {
 
 type LanguageDrumVoiceId = 'kick' | 'snare' | 'clap' | 'hihat' | 'openhat' | 'lowtom' | 'hightom';
 interface LanguageDrumSlotDefinition {
-  drumkit: string; alias: string; voice: LanguageDrumVoiceId;
+  drumkit: string; alias: string; voice: LanguageDrumVoiceId | 'sample'; sampleAlias: string | null;
   params: { level:number; pan:number; tune:number; decay:number; transient:number; snappy:number; color:number; noise:number; humanize:number };
   amount:number; unit:'ms'|'sec'|'beat'; chance:number; drift:boolean; loose:boolean; clockSource:string;
   euclidean: { hits:number; steps:number; rotate:number } | null;
@@ -1138,7 +1138,7 @@ export class SonusRuntime {
     const languageCompositeOutputs = new Map<string, Array<{ name: string; level: number }>>();
     const languageCompositePitchVoices = new Set<string>();
     const languageCompositeTunes = new Map<string, LanguageCompositeTuneDefinition>();
-    const languageDrumkits = new Map<string, { kit: string; disabled: boolean; viewSteps: number }>();
+    const languageDrumkits = new Map<string, { kit: string | null; disabled: boolean; viewSteps: number }>();
     const languageDrumSlots: LanguageDrumSlotDefinition[] = [];
     const languageModSets: LanguageModSetDirective[] = [];
     let languageMasterClock: LanguageMasterClockDefinition | null = null;
@@ -1180,15 +1180,21 @@ export class SonusRuntime {
       const compositeOutput = parseLanguageCompositeOutput(line);
       if (compositeOutput) { languageCompositeOutputs.set(compositeOutput.name, compositeOutput.outputs); continue; }
       const drumkitDeclaration = parseLanguageDrumkitDirective(line);
-      if (drumkitDeclaration) { languageDrumkits.set(drumkitDeclaration.name, { kit: 'sonus606', disabled: drumkitDeclaration.disabled, viewSteps: drumkitDeclaration.viewSteps }); continue; }
+      if (drumkitDeclaration) { languageDrumkits.set(drumkitDeclaration.name, { kit: null, disabled: drumkitDeclaration.disabled, viewSteps: drumkitDeclaration.viewSteps }); continue; }
       const drumkitMeta = parseLanguageDrumkitMetaDirective(line);
       if (drumkitMeta) {
         const previous = languageDrumkits.get(drumkitMeta.name);
         languageDrumkits.set(drumkitMeta.name, { kit: drumkitMeta.kit, disabled: previous?.disabled ?? false, viewSteps: previous?.viewSteps ?? 0 });
         continue;
       }
-      const drumSlot = parseLanguageDrumSlotDirective(line);
-      if (drumSlot) { languageDrumSlots.push(drumSlot); continue; }
+      const drumSlot = parseLanguageDrumSlotDirective(line) ?? parseLanguageDrumSampleSlotDirective(line);
+      if (drumSlot) {
+        if (drumSlot.voice === 'sample' && drumSlot.sampleAlias && !this.audio.hasDrumSample(drumSlot.sampleAlias)) {
+          diagnostics.push({ line: lineNumber, message: `unknown sample asset '${drumSlot.sampleAlias}'` });
+        }
+        languageDrumSlots.push(drumSlot);
+        continue;
+      }
       const registerDeclaration = parseLanguageRegisterDeclaration(line);
       if (registerDeclaration) {
         languageRegisters.set(registerDeclaration, { model: 'shift', size: 4, source: '', mode: 'direct', amount: 0 });
@@ -1911,7 +1917,7 @@ export class SonusRuntime {
     // source order. All module declarations already exist, so references between
     // modules are still independent from declaration order.
     for (const { source: line, line: lineNumber } of lines) {
-      if (parseLanguageLogicDirective(line) || parseLanguageLogicNodeDirective(line) || parseLanguageCompositePitch(line) || parseLanguageCompositeTune(line) || parseLanguageCompositeEdge(line) || parseLanguageCompositeMix(line) || parseLanguageCompositeOutput(line) || parseLanguageDrumkitDirective(line) || parseLanguageDrumkitMetaDirective(line) || parseLanguageDrumSlotDirective(line) || parseLanguageTuningDirective(line) !== null || parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageSeqModel(line) || parseLanguageSeqWeights(line) || parseLanguageConstellationParam(line) || parseLanguageConstellationOctaves(line) || parseLanguageConstellationReader(line) || parseLanguageSnakeSize(line) || parseLanguageSnakeMovement(line) || parseLanguageSnakeMatrix(line) || parseLanguageSnakeReader(line) || parseLanguageSeqSize(line) || parseLanguageLifeDensity(line) || parseLanguageLifeReader(line) || parseLanguageLifeEvolve(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageVcaDirective(line, lineNumber) || parseLanguageEnvelopeDirective(line, lineNumber) || parseLanguageFxMetadata(line) || parseLanguageDelayTime(line) || parseLanguageDelayParam(line, lineNumber) || parseLanguageDelayParamDefault(line, lineNumber) || parseLanguageDelayParamCycle(line, lineNumber) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
+      if (parseLanguageLogicDirective(line) || parseLanguageLogicNodeDirective(line) || parseLanguageCompositePitch(line) || parseLanguageCompositeTune(line) || parseLanguageCompositeEdge(line) || parseLanguageCompositeMix(line) || parseLanguageCompositeOutput(line) || parseLanguageDrumkitDirective(line) || parseLanguageDrumkitMetaDirective(line) || parseLanguageDrumSlotDirective(line) || parseLanguageDrumSampleSlotDirective(line) || parseLanguageTuningDirective(line) !== null || parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageSeqModel(line) || parseLanguageSeqWeights(line) || parseLanguageConstellationParam(line) || parseLanguageConstellationOctaves(line) || parseLanguageConstellationReader(line) || parseLanguageSnakeSize(line) || parseLanguageSnakeMovement(line) || parseLanguageSnakeMatrix(line) || parseLanguageSnakeReader(line) || parseLanguageSeqSize(line) || parseLanguageLifeDensity(line) || parseLanguageLifeReader(line) || parseLanguageLifeEvolve(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageVcaDirective(line, lineNumber) || parseLanguageEnvelopeDirective(line, lineNumber) || parseLanguageFxMetadata(line) || parseLanguageDelayTime(line) || parseLanguageDelayParam(line, lineNumber) || parseLanguageDelayParamDefault(line, lineNumber) || parseLanguageDelayParamCycle(line, lineNumber) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
 
       const gainDeclaration = parseGainDeclaration(line);
       if (gainDeclaration) {
@@ -3065,7 +3071,7 @@ export class SonusRuntime {
       }),
       ...[...languageDrumkits.entries()].map(([name, definition]) => ({
         id: name, label: `${name.toUpperCase()} : DRUMKIT`, kind: 'module' as const,
-        parameters: [{ name: 'KIT', value: definition.kit.toUpperCase() }, ...(definition.disabled ? [{ name: 'STATE', value: 'DISABLED' }] : []), ...languageDrumSlots.filter((slot) => slot.drumkit === name).map((slot) => ({ name: slot.alias.toUpperCase(), value: `${slot.voice}${slot.amount > 0 ? ` · every ${slot.amount} ${slot.unit}` : ''}` }))],
+        parameters: [...(definition.kit ? [{ name: 'KIT', value: definition.kit.toUpperCase() }] : []), ...(definition.disabled ? [{ name: 'STATE', value: 'DISABLED' }] : []), ...languageDrumSlots.filter((slot) => slot.drumkit === name).map((slot) => ({ name: slot.alias.toUpperCase(), value: `${slot.voice === 'sample' ? `sample ${slot.sampleAlias}` : slot.voice}${slot.amount > 0 ? ` · every ${slot.amount} ${slot.unit}` : ''}` }))],
         views: embeddedViews.get(name),
       })),
       ...[...mists.entries()].map(([name, definition]) => {
@@ -3698,6 +3704,16 @@ export class SonusRuntime {
         [...languageDrumkits.entries()].filter(([, definition]) => definition.disabled).map(([name]) => name),
       );
       this.audio.applyProgram(program, { hotReload });
+      if (applyAudio) {
+        const preparedSamples = new Set<string>();
+        for (const slot of languageDrumSlots) {
+          if (slot.voice !== 'sample' || !slot.sampleAlias) continue;
+          const key = `${slot.drumkit}:${slot.sampleAlias}`;
+          if (preparedSamples.has(key)) continue;
+          this.audio.prepareDrumkitSample(slot.drumkit, slot.sampleAlias);
+          preparedSamples.add(key);
+        }
+      }
 
     for (const slot of languageDrumSlots) {
       if (slot.amount <= 0) continue;
@@ -3744,10 +3760,19 @@ export class SonusRuntime {
           laneView.revision += 1;
         }
 
-        this.audio.triggerDrumkit(slot.drumkit, slot.voice, {
-          ...slot.params,
-          level,
-        });
+        if (slot.voice === 'sample' && slot.sampleAlias) {
+          this.audio.triggerDrumkitSample(slot.drumkit, slot.sampleAlias, {
+            level,
+            pan: slot.params.pan,
+            tune: slot.params.tune,
+            decay: slot.params.decay,
+          });
+        } else if (slot.voice !== 'sample') {
+          this.audio.triggerDrumkit(slot.drumkit, slot.voice, {
+            ...slot.params,
+            level,
+          });
+        }
       };
 
       if (slot.unit === 'beat') this.scheduler.addBeatJob(humanizeStateKey, slot.amount, fire, slot.loose, slot.clockSource);
@@ -5822,7 +5847,15 @@ function parseLanguageDrumSlotDirective(line: string): LanguageDrumSlotDefinitio
   let encoded=''; try { encoded = JSON.parse(`"${match[4]}"`) as string; } catch { return null; }
   let params: LanguageDrumSlotDefinition['params']; try { params = JSON.parse(encoded) as LanguageDrumSlotDefinition['params']; } catch { return null; }
   const hits = Number(match[11]), steps = Number(match[12]), rotate = Number(match[13]);
-  return { drumkit:match[1], alias:match[2], voice:match[3] as LanguageDrumVoiceId, params, amount:Number(match[5]), unit:match[6] as 'ms'|'sec'|'beat', chance:Number(match[7]), drift:match[8]==='true', loose:match[9]==='true', clockSource:match[10], euclidean: hits > 0 && steps > 0 ? { hits, steps, rotate } : null };
+  return { drumkit:match[1], alias:match[2], voice:match[3] as LanguageDrumVoiceId, sampleAlias:null, params, amount:Number(match[5]), unit:match[6] as 'ms'|'sec'|'beat', chance:Number(match[7]), drift:match[8]==='true', loose:match[9]==='true', clockSource:match[10], euclidean: hits > 0 && steps > 0 ? { hits, steps, rotate } : null };
+}
+function parseLanguageDrumSampleSlotDirective(line: string): LanguageDrumSlotDefinition | null {
+  const match = line.match(/^__drumsampleslot\("([A-Za-z_]\w*)","([A-Za-z_]\w*)","([A-Za-z_]\w*)","((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([^"]+)",(\d+),(\d+),(\d+)\)$/);
+  if (!match) return null;
+  let encoded=''; try { encoded = JSON.parse(`"${match[4]}"`) as string; } catch { return null; }
+  let params: LanguageDrumSlotDefinition['params']; try { params = JSON.parse(encoded) as LanguageDrumSlotDefinition['params']; } catch { return null; }
+  const hits = Number(match[11]), steps = Number(match[12]), rotate = Number(match[13]);
+  return { drumkit:match[1], alias:match[2], voice:'sample', sampleAlias:match[3], params, amount:Number(match[5]), unit:match[6] as 'ms'|'sec'|'beat', chance:Number(match[7]), drift:match[8]==='true', loose:match[9]==='true', clockSource:match[10], euclidean: hits > 0 && steps > 0 ? { hits, steps, rotate } : null };
 }
 
 function parseLanguageObjectEveryDirective(

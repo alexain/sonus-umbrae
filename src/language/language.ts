@@ -130,6 +130,7 @@ type EnvelopeSpec = {
 };
 
 type DrumVoiceId = 'kick' | 'snare' | 'clap' | 'hihat' | 'openhat' | 'lowtom' | 'hightom';
+type DrumSourceId = DrumVoiceId | 'sample';
 
 type DrumSlotDefaults = {
   level: number;
@@ -143,7 +144,7 @@ type DrumSlotDefaults = {
   humanize: number;
 };
 
-type DrumKitEntry = { source: DrumVoiceId; alias: string; defaults: DrumSlotDefaults };
+type DrumKitEntry = { source: DrumSourceId; sampleAlias: string | null; alias: string; defaults: DrumSlotDefaults };
 type DrumKitDefinition = { entries: Map<string, DrumKitEntry> };
 type DrumkitState = { name: string; line: number; indentation: number; kit: DrumKitDefinition | null; viewSteps: number };
 
@@ -157,23 +158,23 @@ const DRUM_DEFAULTS: DrumSlotDefaults = {
 
 const SONUS606_KIT: DrumKitDefinition = {
   entries: new Map<string, DrumKitEntry>([
-    ['kick', { source: 'kick', alias: 'kick', defaults: { ...DRUM_DEFAULTS } }],
-    ['snare', { source: 'snare', alias: 'snare', defaults: { ...DRUM_DEFAULTS } }],
-    ['clap', { source: 'clap', alias: 'clap', defaults: { ...DRUM_DEFAULTS } }],
-    ['hihat', { source: 'hihat', alias: 'hihat', defaults: { ...DRUM_DEFAULTS, decay: 30 } }],
-    ['openhat', { source: 'openhat', alias: 'openhat', defaults: { ...DRUM_DEFAULTS, decay: 75 } }],
-    ['lowtom', { source: 'lowtom', alias: 'lowtom', defaults: { ...DRUM_DEFAULTS } }],
-    ['hightom', { source: 'hightom', alias: 'hightom', defaults: { ...DRUM_DEFAULTS } }],
+    ['kick', { source: 'kick', sampleAlias: null, alias: 'kick', defaults: { ...DRUM_DEFAULTS } }],
+    ['snare', { source: 'snare', sampleAlias: null, alias: 'snare', defaults: { ...DRUM_DEFAULTS } }],
+    ['clap', { source: 'clap', sampleAlias: null, alias: 'clap', defaults: { ...DRUM_DEFAULTS } }],
+    ['hihat', { source: 'hihat', sampleAlias: null, alias: 'hihat', defaults: { ...DRUM_DEFAULTS, decay: 30 } }],
+    ['openhat', { source: 'openhat', sampleAlias: null, alias: 'openhat', defaults: { ...DRUM_DEFAULTS, decay: 75 } }],
+    ['lowtom', { source: 'lowtom', sampleAlias: null, alias: 'lowtom', defaults: { ...DRUM_DEFAULTS } }],
+    ['hightom', { source: 'hightom', sampleAlias: null, alias: 'hightom', defaults: { ...DRUM_DEFAULTS } }],
   ]),
 };
 
 function cloneDrumKit(kit: DrumKitDefinition): DrumKitDefinition {
   return { entries: new Map([...kit.entries].map(([alias, entry]) => [alias, {
-    source: entry.source, alias: entry.alias, defaults: { ...entry.defaults },
+    source: entry.source, sampleAlias: entry.sampleAlias, alias: entry.alias, defaults: { ...entry.defaults },
   }])) };
 }
 
-function drumParameterDefaults(source: DrumVoiceId, raw: string, line: number, base: DrumSlotDefaults = DRUM_DEFAULTS): DrumSlotDefaults {
+function drumParameterDefaults(source: DrumSourceId, raw: string, line: number, base: DrumSlotDefaults = DRUM_DEFAULTS): DrumSlotDefaults {
   const result = { ...base };
   const modifiers = raw.trim() ? raw.split(',').map((item) => item.trim()).filter(Boolean) : [];
   for (const modifier of modifiers) {
@@ -188,6 +189,9 @@ function drumParameterDefaults(source: DrumVoiceId, raw: string, line: number, b
     } else if (key === 'tune') {
       if (value < -24 || value > 24) throw new LanguageError([{ line, message: 'drum tune expects -24..24 semitones' }]);
     } else throw new LanguageError([{ line, message: `unknown drum parameter '${match[1]}'` }]);
+    if (source === 'sample' && (key === 'transient' || key === 'snappy' || key === 'color' || key === 'noise')) {
+      throw new LanguageError([{ line, message: `${key} is not available for drum samples` }]);
+    }
     if (key === 'transient' && source !== 'kick') throw new LanguageError([{ line, message: 'transient is available only for drum.kick' }]);
     if ((key === 'snappy' || key === 'color') && source !== 'snare') throw new LanguageError([{ line, message: `${key} is available only for drum.snare` }]);
     if (key === 'noise' && source !== 'clap') throw new LanguageError([{ line, message: 'noise is available only for drum.clap' }]);
@@ -200,13 +204,22 @@ function parseDrumKitEntry(raw: string, line: number, kit: DrumKitDefinition): D
   const sourceEntry = raw.match(/^drum\.(kick|snare|clap|hihat|openhat|lowtom|hightom)\s+as\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(.+))?$/i);
   if (sourceEntry) {
     const source = sourceEntry[1].toLowerCase() as DrumVoiceId;
-    return { source, alias: sourceEntry[2], defaults: drumParameterDefaults(source, sourceEntry[3] ?? '', line) };
+    return { source, sampleAlias: null, alias: sourceEntry[2], defaults: drumParameterDefaults(source, sourceEntry[3] ?? '', line) };
+  }
+  const sampleEntry = raw.match(/^sample\s+([A-Za-z_][A-Za-z0-9_]*)\s+as\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(.+))?$/i);
+  if (sampleEntry) {
+    return {
+      source: 'sample',
+      sampleAlias: sampleEntry[1],
+      alias: sampleEntry[2],
+      defaults: drumParameterDefaults('sample', sampleEntry[3] ?? '', line, { ...DRUM_DEFAULTS, decay: 100 }),
+    };
   }
   const override = raw.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(.+))?$/i);
   if (override) {
     const previous = kit.entries.get(override[1]);
     if (!previous) throw new LanguageError([{ line, message: `unknown KIT alias '${override[1]}'` }]);
-    return { source: previous.source, alias: previous.alias, defaults: drumParameterDefaults(previous.source, override[2] ?? '', line, previous.defaults) };
+    return { source: previous.source, sampleAlias: previous.sampleAlias, alias: previous.alias, defaults: drumParameterDefaults(previous.source, override[2] ?? '', line, previous.defaults) };
   }
   throw new LanguageError([{ line, message: `invalid KIT entry '${raw}'` }]);
 }
@@ -3815,7 +3828,7 @@ function validateDeclaredIdentifiers(source: string): void {
   }
 }
 
-export function compileLanguageSource(source: string): string {
+export function compileLanguageSource(source: string, options: { hasSampleAsset?: (alias: string) => boolean } = {}): string {
   validateDeclaredIdentifiers(source);
   const capabilitySet = parseProgramCapabilities(source);
   setReferenceTuningHz(capabilitySet.tuningHz);
@@ -4363,6 +4376,13 @@ export function compileLanguageSource(source: string): string {
           const base = baseName ? (scoped?.get(baseName) ?? kitDefinitions.get(baseName.toLowerCase()) ?? kitDefinitions.get(baseName)) : { entries: new Map<string, DrumKitEntry>() };
           if (!base) throw new LanguageError([{ line: lineNumber, message: `unknown KIT '${baseName}'` }]);
           const defined = applyDrumKitEntries(base, setKit[3], lineNumber);
+          if (options.hasSampleAsset) {
+            for (const entry of defined.entries.values()) {
+              if (entry.source === 'sample' && entry.sampleAlias && !options.hasSampleAsset(entry.sampleAlias)) {
+                throw new LanguageError([{ line: lineNumber, message: `unknown sample asset '${entry.sampleAlias}'` }]);
+              }
+            }
+          }
           if (local) scoped!.set(setName, defined); else kitDefinitions.set(setName, defined);
           output[index] = '';
           continue;
@@ -4463,22 +4483,44 @@ export function compileLanguageSource(source: string): string {
           output[index] = `__drumkitmeta(${JSON.stringify(currentDrumkit.name)},${JSON.stringify(kitLine[1])});`;
           continue;
         }
-        if (!currentDrumkit.kit) throw new LanguageError([{ line: lineNumber, message: `DRUMKIT '${currentDrumkit.name}' requires KIT before instrument lines` }]);
         const split = splitEveryClause(trimmed);
+        const inlineSample = split.base.match(/^sample\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(.+))?$/i);
+        if (inlineSample) {
+          const sampleAlias = inlineSample[1];
+          if (options.hasSampleAsset && !options.hasSampleAsset(sampleAlias)) {
+            throw new LanguageError([{ line: lineNumber, message: `unknown sample asset '${sampleAlias}'` }]);
+          }
+          const slotAlias = sampleAlias;
+          const params = drumParameterDefaults('sample', inlineSample[2] ?? '', lineNumber, { ...DRUM_DEFAULTS, decay: 100 });
+          if (!split.every) {
+            output[index] = `__drumsampleslot(${JSON.stringify(currentDrumkit.name)},${JSON.stringify(slotAlias)},${JSON.stringify(sampleAlias)},${JSON.stringify(serializeDrumParams(params))},0,"ms",100,false,false,"Clock",0,0,0);`;
+            continue;
+          }
+          const timing = parseEverySpec(split.every, lineNumber, scopedDefinitions(`drumkit:${currentDrumkit.name}`));
+          const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+          const euclidean = timing.euclidean ?? { hits: 0, steps: 0, rotate: 0 };
+          output[index] = `${prefix}__drumsampleslot(${JSON.stringify(currentDrumkit.name)},${JSON.stringify(slotAlias)},${JSON.stringify(sampleAlias)},${JSON.stringify(serializeDrumParams(params))},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)},${euclidean.hits},${euclidean.steps},${euclidean.rotate});`;
+          continue;
+        }
+        if (!currentDrumkit.kit) throw new LanguageError([{ line: lineNumber, message: `DRUMKIT '${currentDrumkit.name}' requires KIT before KIT alias lines` }]);
         const soundPart = split.base.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(.+))?$/i);
         if (!soundPart) throw new LanguageError([{ line: lineNumber, message: `invalid DRUMKIT instrument line '${trimmed}'` }]);
         const alias = soundPart[1];
         const entry = currentDrumkit.kit.entries.get(alias);
         if (!entry) throw new LanguageError([{ line: lineNumber, message: `unknown KIT alias '${alias}'` }]);
         const params = drumParameterDefaults(entry.source, soundPart[2] ?? '', lineNumber, entry.defaults);
+        const drumkitName = currentDrumkit.name;
+        const directive = (amount: number, unit: string, chance: number, drift: boolean, loose: boolean, clockSource: string, hits: number, steps: number, rotate: number): string => entry.source === 'sample'
+          ? `__drumsampleslot(${JSON.stringify(drumkitName)},${JSON.stringify(alias)},${JSON.stringify(entry.sampleAlias)},${JSON.stringify(serializeDrumParams(params))},${amount},${JSON.stringify(unit)},${chance},${drift},${loose},${JSON.stringify(clockSource)},${hits},${steps},${rotate});`
+          : `__drumslot(${JSON.stringify(drumkitName)},${JSON.stringify(alias)},${JSON.stringify(entry.source)},${JSON.stringify(serializeDrumParams(params))},${amount},${JSON.stringify(unit)},${chance},${drift},${loose},${JSON.stringify(clockSource)},${hits},${steps},${rotate});`;
         if (!split.every) {
-          output[index] = `__drumslot(${JSON.stringify(currentDrumkit.name)},${JSON.stringify(alias)},${JSON.stringify(entry.source)},${JSON.stringify(serializeDrumParams(params))},0,"ms",100,false,false,"Clock",0,0,0);`;
+          output[index] = directive(0, 'ms', 100, false, false, 'Clock', 0, 0, 0);
           continue;
         }
         const timing = parseEverySpec(split.every, lineNumber, scopedDefinitions(`drumkit:${currentDrumkit.name}`));
         const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
         const euclidean = timing.euclidean ?? { hits: 0, steps: 0, rotate: 0 };
-        output[index] = `${prefix}__drumslot(${JSON.stringify(currentDrumkit.name)},${JSON.stringify(alias)},${JSON.stringify(entry.source)},${JSON.stringify(serializeDrumParams(params))},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)},${euclidean.hits},${euclidean.steps},${euclidean.rotate});`;
+        output[index] = `${prefix}${directive(timing.amount, timing.unit, timing.chance, timing.drift, timing.loose, timing.clockSource, euclidean.hits, euclidean.steps, euclidean.rotate)}`;
         continue;
       }
 
