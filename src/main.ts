@@ -39,7 +39,7 @@ import {
   updateTuringViews,
 } from './ui/sequence-monitors';
 
-const VERSION = '0.6.0';
+const VERSION = '0.7.0';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Missing #app');
