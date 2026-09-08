@@ -322,6 +322,18 @@ sound square
 
 The basic oscillators inherit the normal VOICE pitch, level, routing and timing behaviour. `square` additionally exposes `width 0..100`, defaulting to 50; the other basic oscillator sounds have no sound-specific parameters.
 
+DaisySP noise engines are exposed with public `noise.*` names:
+
+```text
+sound noise.white
+sound noise.dust
+sound noise.clocked
+sound noise.fractal
+```
+
+`noise.white` and `noise.fractal` ignore VOICE pitch as a DSP control, while `noise.clocked` maps VOICE pitch to its clock frequency. `noise.dust` exposes `density 0..100`; density is the model-specific control rather than a pitch-like parameter. Noise voices otherwise use the normal VOICE lifecycle, level, routing and timing semantics.
+
+Sample-backed voices use `sound sample.<asset>` and are documented in [Sample VOICE](#sample-voice).
 
 A `VOICE` must declare exactly one `sound` and exactly one `pitch`. The `pitch`
 statement is the voice's primary musical trigger: changing other parameters does
@@ -920,7 +932,7 @@ All jobs remain synchronized to the shared runtime scheduler.
 
 ## DRUMKIT
 
-`DRUMKIT` is a stereo synthesized-drum object. `KIT` is mandatory, like `SOUND` for `VOICE`.
+`DRUMKIT` is a stereo drum object. A `KIT` is optional when the object contains direct sample one-shots; KIT aliases can resolve either synthesized drum voices or imported samples.
 
 ```text
 DRUMKIT drums:
@@ -985,58 +997,130 @@ Precedence is `drum model defaults < KIT defaults < derived/inline KIT overrides
 
 Common `WITH` parameters are `level 0..100`, `pan -100..100`, `tune -24..24`, and `decay 0..100`. Model-specific parameters are `transient` for kick, `snappy`/`color` for snare, and `noise` for clap.
 
-The canonical order is `alias [WITH sound parameters] [EVERY timing]`. If `EVERY` is absent, the alias remains configured but silent. `EVERY` reuses the normal Sonus scheduler, including Euclidean timing and named/derived clocks.
+A sample can be triggered directly, without a KIT:
 
-`DRUMKIT` is stereo; when no explicit `OUT` is declared, its main stereo output is routed to `MAIN` automatically. The first backend is synthesized only; samples and explicit pattern syntax remain future extensions of the same abstraction.
+```text
+DRUMKIT drums:
+    SAMPLE kick909 EVERY 1 beat
+    SAMPLE snare_linn WITH level 80, tune -2 EVERY EUCLIDEAN 5/16
+```
+
+The token after `SAMPLE` is the Sonus asset alias shown in the Assets panel. A reusable KIT can also map imported assets to arbitrary aliases:
+
+```text
+SET mykit: KIT [
+    sample kick909 as kick;
+    sample snareLinn as snare;
+    sample hat01 as hihat
+]
+
+DRUMKIT drums:
+    KIT mykit
+    kick EVERY 1 beat
+    snare EVERY EUCLIDEAN 5/16
+    hihat EVERY 0.5 beat
+```
+
+The same `SET ... KIT [...]` declaration can be global or local to a `DRUMKIT`, following the normal KIT scoping rules. `kick`, `snare`, and `hihat` above are user-defined KIT aliases, not fixed lane names and not restrictions on the sample content.
+
+Sample one-shots support `level`, `pan`, `tune`, `decay`, and `humanize`; synthesized-only controls such as `transient`, `snappy`, `color`, and `noise` are rejected. Sample `decay` defaults to `100`, so the complete asset plays unless an explicit shorter decay is requested. `tune` changes playback rate and therefore also changes duration.
+
+The direct sample form is `SAMPLE asset [WITH sample parameters] [EVERY timing]`. The KIT form remains `alias [WITH sound parameters] [EVERY timing]`, with the alias resolving to either a synthesized source or a sample source. If `EVERY` is absent, the slot remains configured but silent. `EVERY` reuses the normal Sonus scheduler, including Euclidean timing and named/derived clocks.
+
+`DRUMKIT` is stereo; when no explicit `OUT` is declared, its main stereo output is routed to `MAIN` automatically. Imported samples are currently one-shot only: there is no slicing, loop, reverse, start/end control, or independent time stretching yet.
 
 ## MOD
 
-`MOD` is the current four-output modulation object.
-
-Top-level declaration:
+`MOD` declares a named modulation source. The concrete `model` determines its output ports and model-specific properties, while `rate` belongs to the common MOD abstraction.
 
 ```text
 MOD motion:
-    rate 4 sec
-    shape sine
-```
-
-A module view can be requested directly:
-
-```text
-MOD motion with view:
+    model lfo
     rate 4 sec
 ```
 
-The four outputs are named:
+`rate` accepts `hz`, `beat`/`beats`, `sec`/`seconds`, or `ms` and can be written before or after `model`. Models that do not need a temporal rate may omit it.
+
+Current models are:
 
 ```text
-motion.a
-motion.b
-motion.c
-motion.d
+lfo
+noise.white
+noise.dust
+noise.clocked
+noise.fractal
+swell
+dices
+composite
 ```
 
-Current parameters include:
+A module view is requested with `WITH VIEW`:
 
 ```text
-rate 4 sec
-slope 50
-shape sine
-smooth 50
-shift 50
-relation phase
-range control
+MOD motion WITH VIEW:
+    model lfo
+    rate 4 sec
 ```
 
-For phase-related output relationships:
+### LFO
+
+`model lfo` provides up to four independently configured outputs: `out1`, `out2`, `out3`, and `out4`. `out` is a routing/control alias for `out1`. Only outputs explicitly configured by the source are exposed, except that a new LFO starts with a default triangle `out1`.
 
 ```text
-relation phase with shift 100
+MOD motion:
+    model lfo
+    rate 2 sec
+    out1 sine
+    out2 triangle /2 with phase 90
+    out3 sawtooth *2 with level 60
+    out4 square with phase 180, level 25
 ```
 
-The four outputs remain synchronized and share the same underlying modulation
-object.
+Supported waveforms are `sine`, `triangle`, `sawtooth`, `ramp`, and `square`. An output can multiply or divide the MOD base rate with `*N` or `/N`. `phase` is expressed in degrees and normalized cyclically. `level` accepts either a fixed `0..100` value or a parenthesized control expression.
+
+For example:
+
+```text
+MOD slow:
+    model lfo
+    rate 4 sec
+    out1 sine
+
+MOD motion:
+    model lfo
+    rate 1 sec
+    out1 triangle with level (50 + slow.out1 * 10)
+```
+
+This keeps the LFO model compact while allowing each output to have its own waveform, rate relationship, phase, and amplitude.
+
+### Noise modulation
+
+Noise uses the same public model family as noise VOICE engines:
+
+```text
+MOD random:
+    model noise.white
+
+MOD dust:
+    model noise.dust
+    density 35
+
+MOD stepped:
+    model noise.clocked
+    rate 2 beats
+
+MOD fractal:
+    model noise.fractal
+```
+
+All noise MOD models expose one signal as `out` (with `out1` accepted as its canonical first channel where routing requires it). `noise.dust` alone exposes `density 0..100`. `RATE` remains part of the common MOD grammar, but among noise models only `noise.clocked` consumes it, as its clock frequency. `noise.white`, `noise.fractal`, and `noise.dust` reject `rate` instead of silently ignoring it. Legacy `model noise` resolves to `noise.white`.
+
+### Swell and Dices
+
+`model swell` retains four synchronized outputs and its Tides-derived controls such as `shape`, `slope`, `smooth`, `shift`, `relation`, and `range`. Its outputs are `out1..out4`, with `out` referring to the first output.
+
+`model dices` exposes the random-voltage outputs `x1`, `x2`, `x3`, and `y`, with model-specific controls `spread`, `bias`, `steps`, `deja`, `length`, and `diversity`.
 
 ### Local MOD inside VOICE
 
@@ -1047,32 +1131,16 @@ VOICE lead:
     sound macro.fm
 
     MOD motion:
+        model lfo
         rate 4 sec
-        shape sine
+        out1 sine
+        out2 triangle /2 with phase 90
 
-    morph motion.a with depth 40
+    morph motion.out1 with depth 40
+    timbre motion.out2 with depth 20
 ```
 
-The local name is scoped to the containing object. Internally the runtime uses
-a generated identifier, but that identifier is not part of the public language.
-
-Multiple voice parameters can reuse different outputs from the same local
-modulator:
-
-```text
-VOICE lead:
-    sound macro.fm
-
-    MOD motion:
-        rate 4 sec
-        relation phase with shift 100
-
-    morph motion.a with depth 30
-    timbre motion.b with depth 20
-    harmo motion.c with depth 15
-```
-
-`depth` is expressed in the logical -100..100 modulation range.
+The local name is scoped to the containing object. Internally the runtime uses a generated identifier, but that identifier is not part of the public language. `depth` is expressed in the logical `-100..100` modulation range.
 
 ## FX
 
@@ -1481,7 +1549,9 @@ VOICE lead with view:
 
 ```text
 MOD motion with view:
+    model lfo
     rate 4 sec
+    out1 sine
 ```
 
 ```text
@@ -1491,7 +1561,7 @@ FX grain with view:
 
 VOICE views show the source object's output at the voice's own level.
 
-MOD views are output-driven rather than tied to one model. `swell` and `dices` keep their four named traces, while a `model composite` view displays exactly the signals declared by its `output` property, from one output to any number of named outputs.
+MOD views are output-driven rather than tied to one model. `lfo` displays its configured `out1..out4` signals, noise models display their single `out` signal, `swell` and `dices` keep their model-specific traces, and a `model composite` view displays exactly the signals declared by its `output` property.
 
 FX/Mist views are stereo.
 
@@ -1579,11 +1649,13 @@ Sonus Umbrae includes editor-only snippets for expanding common object skeletons
 @v lead macro.fm
 @env pluck
 @seq melody life
+@mod motion lfo
+@mod random noise.white
 @d drums
 @c 120
 ```
 
-After expansion the editor contains normal Sonus source such as `VOICE`, `SET ... ENVELOPE`, `SEQ`, `DRUMKIT`, or `CLOCK` declarations. Voice and FX snippets also provide `.full` variants that insert the public parameters of the selected engine with useful starting values. Envelope snippets default to ADSR and can request the common `ad`, `ar`, `adr`, `adsr`, or `adhsr` shapes explicitly.
+After expansion the editor contains normal Sonus source such as `VOICE`, `SET ... ENVELOPE`, `SEQ`, `MOD`, `DRUMKIT`, or `CLOCK` declarations. Voice and FX snippets also provide `.full` variants that insert the public parameters of the selected engine with useful starting values. Envelope snippets default to ADSR and can request the common `ad`, `ar`, `adr`, `adsr`, or `adhsr` shapes explicitly.
 
 Snippets are a writing aid only: they do not bypass normal parsing or validation, and duplicate master clocks or otherwise invalid generated programs are still rejected normally when the source is compiled. Names generated by snippets follow the same identifier rule as the language: the first character must be a letter, followed by letters, digits, or `_`.
 
@@ -2722,3 +2794,53 @@ MAIN LEVEL 70
 ```
 
 `MAIN LEVEL` is part of the musical patch and travels with the source file. `OUTPUT LEVEL` compensates for the playback environment and the desired application-wide hardware level.
+
+### Sample VOICE
+
+Imported audio assets can be used as a dedicated `VOICE` source. The sample engine is separate from DRUMKIT and runs in `sample.wasm` through its own AudioWorklet.
+
+```text
+VOICE guitar with view:
+    sound sample.guitar with root F3
+
+    region 20 60 with loop, reverse
+
+    pitch notes [F3 A3 C4 F4] every 1 beat
+```
+
+`sound sample.<alias>` selects an imported Assets alias and the compiler validates that the asset exists when the program is run. The sample root defaults to `C3`; use `sound sample.<alias> with root <note>` when the source is tuned to a different note. Asset aliases are written exactly as they appear in the Assets library, including characters such as `-`. `PITCH` remains the normal VOICE pitch system and changes playback speed by the ratio between target frequency and root frequency.
+
+`region` defines the playback window. Percentages are normalized over the source:
+
+```text
+region 20 60
+region 20
+region 0 60
+region with reverse
+region with loop
+region 20 60 with loop, reverse
+```
+
+One value means start at that percentage and play to the end. With no explicit range, `region with ...` applies to the whole sample. `loop` repeats the selected range; `reverse` reads it backwards.
+
+A region can instead be divided into equal slices:
+
+```text
+region with slices 16
+region 10 90 with slices 16
+```
+
+Slice numbering is user-facing and starts at `1`, so sixteen slices are addressed as `1..16`. A sliced region cannot also use `loop` or `reverse`; direction is controlled by the slice sequence itself. Slice indices are validated at compile time against the count declared by `region ... with slices N`.
+
+```text
+slice 3
+slice 3r
+slice [1 3r 7 12] every 1 beat
+slice [1 3 7 12] with reverse every 1 beat
+slice [1 3 7 12] with pendulum every 1 beat
+slice [1!20 3r!80 7!40 12!60] with random every EUCLIDEAN 5/16
+```
+
+A trailing `r` reverses only that slice. The traversal modes are `forward` (default), `reverse`, `random`, `walk`, and `pendulum`. In `random` mode, `!N` assigns an integer weight from `1` to `100`; weights are rejected in deterministic traversal modes. `slice` uses the normal `EVERY` timing system, including clocks, patterns, rhythms and Euclidean timing. When a sliced sample also has a sequenced `PITCH`, the slice sequence owns the sample trigger while the pitch sequence updates varispeed, avoiding duplicate triggers at the same step.
+
+`VOICE ... with view` shows the imported waveform, selected region, slice divisions, active slice and live playhead in Scheme and the LIVE sidebar.

@@ -1,6 +1,48 @@
 import { AudioEngine, type AudioProgram, type SignalKind } from '../audio/engine';
 import { evaluateExpression, ExpressionError, type ScalarValue } from './expression';
+import {
+  ControlExpressionError,
+  evaluateControlExpression,
+  parseControlExpression,
+  type InlineControlState,
+} from './control-expression';
 import { RuntimeScheduler, parseRuntimePatternSource } from './runtime/scheduler';
+import * as directives from './runtime/directives';
+import {
+  applyFilterCall,
+  applyGainCall,
+  applyMistCall,
+  applySwellCall,
+  applyVoiceCall,
+  applyVoiceModelValue,
+  formatVoiceModel,
+  parseVoiceModelValue,
+} from './runtime/object-calls';
+import {
+  drumViewLaneSteps,
+  drumViewPattern,
+  parseLanguageDrumkitDirective,
+  parseLanguageDrumkitMetaDirective,
+  parseLanguageDrumSampleSlotDirective,
+  parseLanguageDrumSlotDirective,
+  type LanguageDrumSlotDefinition,
+} from './runtime/drumkit';
+import {
+  parseLanguageSampleSliceDirective,
+  parseLanguageSampleSlicesDirective,
+  type LanguageSampleSliceDefinition,
+  type LanguageSampleSliceItem,
+} from './runtime/sample';
+import {
+  resolveRouteLine,
+  type RouteDefinition,
+} from './runtime/routing';
+import {
+  applyModSetDirective,
+  createModDefinition,
+  modViewSignals,
+  type ModDefinition,
+} from './runtime/modulation';
 import type { CompositeDefinition, CompositeDomain } from './composite/types';
 import { COMPOSITE_DOMAIN_POLICY } from './composite/types';
 import {
@@ -182,7 +224,7 @@ export interface SnakeViewState {
 
 export interface DrumkitLaneViewState {
   alias: string;
-  voice: 'kick' | 'snare' | 'clap' | 'hihat' | 'openhat' | 'lowtom' | 'hightom';
+  voice: 'kick' | 'snare' | 'clap' | 'hihat' | 'openhat' | 'lowtom' | 'hightom' | 'sample';
   steps: number;
   totalSteps: number;
   page: number;
@@ -232,6 +274,12 @@ export type InlineViewState = InlinePianoViewState | InlineScalarViewState;
 
 export interface SchemeEmbeddedView {
   signal: string;
+  display?: 'scope' | 'sample';
+  owner?: string;
+  sampleAlias?: string;
+  sampleStart?: number;
+  sampleEnd?: number;
+  sampleSlices?: number;
   signals?: string[];
   signalKind: SignalKind;
   port: string;
@@ -272,8 +320,8 @@ interface GainDefinition {
   parameters: Map<string, string>;
 }
 
-type VoiceEngineKind = 'macro' | 'matter' | 'resonator' | 'oscillator' | 'composite';
-type VoiceParameterName = 'harmo' | 'timbre' | 'morph' | 'width' | 'geometry' | 'structure' | 'brightness' | 'damping' | 'position' | 'space' | 'bow' | 'bowTimbre' | 'blow' | 'blowTimbre' | 'strike' | 'strikeTimbre';
+type VoiceEngineKind = 'macro' | 'matter' | 'resonator' | 'oscillator' | 'noise' | 'composite' | 'sample';
+type VoiceParameterName = 'harmo' | 'timbre' | 'morph' | 'width' | 'density' | 'geometry' | 'structure' | 'brightness' | 'damping' | 'position' | 'space' | 'bow' | 'bowTimbre' | 'blow' | 'blowTimbre' | 'strike' | 'strikeTimbre';
 
 interface VoiceDefinition {
   disabled: boolean;
@@ -288,6 +336,7 @@ interface VoiceDefinition {
   timbre: number;
   morph: number;
   width: number;
+  density: number;
   geometry: number;
   structure: number;
   brightness: number;
@@ -301,25 +350,15 @@ interface VoiceDefinition {
   strike: number;
   strikeTimbre: number;
   drive: { kind: string; values: number[] } | null;
-  parameters: Map<string, string>;
-}
-
-interface SwellDefinition {
-  model: 'swell' | 'dices' | 'composite';
-  frequency: number;
-  slope: number;
-  shape: number;
-  smooth: number;
-  shift: number;
-  mode: number;
-  outputMode: number;
-  range: number;
-  spread: number;
-  bias: number;
-  steps: number;
-  deja: number;
-  length: number;
-  diversity: number;
+  sampleAlias: string | null;
+  sampleRootFrequency: number;
+  sampleStart: number;
+  sampleEnd: number;
+  sampleLoop: boolean;
+  sampleReverse: boolean;
+  sampleSlices: number;
+  sampleInitialSlice: number;
+  sampleInitialSliceReverse: boolean;
   parameters: Map<string, string>;
 }
 
@@ -353,12 +392,6 @@ interface FilterDefinition {
   parameters: Map<string, string>;
 }
 
-interface RouteDefinition {
-  source: string;
-  target: string;
-  amount: number;
-  kind: SignalKind;
-}
 
 interface ClockDefinition {
   disabled: boolean;
@@ -373,20 +406,20 @@ interface ClockDefinition {
   parameters: Map<string, string>;
 }
 
-interface LanguageSequenceFavorEntry {
+export interface LanguageSequenceFavorEntry {
   target: string;
   operator: 'weight' | 'repeat' | 'retrig';
   amount: number;
 }
 
-interface LanguageSequenceDefinition {
+export interface LanguageSequenceDefinition {
   values: number[];
   mode: 'order' | 'random' | 'walk' | 'shuffle' | 'reverse' | 'pendulum';
   amount: number;
   favor: LanguageSequenceFavorEntry[];
 }
 
-interface LanguageCompositeTuneDefinition {
+export interface LanguageCompositeTuneDefinition {
   owner: string;
   node: string;
   mode: 'relative' | 'absolute';
@@ -400,7 +433,7 @@ interface LanguageCompositeTuneDefinition {
   timing: LanguageCycleDefinition | null;
 }
 
-interface LanguageTuringDefinition {
+export interface LanguageTuringDefinition {
   model: 'turing';
   length: number;
   change: number;
@@ -409,30 +442,30 @@ interface LanguageTuringDefinition {
   current: number;
 }
 
-interface LanguageConstellationDefinition extends ConstellationDefinition {
+export interface LanguageConstellationDefinition extends ConstellationDefinition {
   model: 'constellation';
 }
 
-interface LanguageConstellationReaderDefinition {
+export interface LanguageConstellationReaderDefinition {
   voice: string;
   seq: string;
 }
 
-interface LanguageSnakeDefinition extends SnakeDefinition {
+export interface LanguageSnakeDefinition extends SnakeDefinition {
   model: 'snake';
   matrixExplicit: boolean;
 }
 
-interface LanguageSnakeReaderDefinition {
+export interface LanguageSnakeReaderDefinition {
   voice: string;
   seq: string;
 }
 
-type LanguageLogicOperator = 'and' | 'or' | 'xor' | 'nand' | 'nor' | 'divider' | 'counter' | 'flipflop';
-type LanguageLogicInput =
+export type LanguageLogicOperator = 'and' | 'or' | 'xor' | 'nand' | 'nor' | 'divider' | 'counter' | 'flipflop';
+export type LanguageLogicInput =
   | { kind: 'node'; name: string }
   | { kind: 'rhythm'; name: string; spec: LanguageCycleDefinition & { clockPrelude?: string; euclidean?: { hits: number; steps: number; rotate: number } | null } };
-interface LanguageLogicNodeDefinition {
+export interface LanguageLogicNodeDefinition {
   owner: string;
   name: string;
   operator: LanguageLogicOperator;
@@ -440,7 +473,7 @@ interface LanguageLogicNodeDefinition {
   parameter: number;
 }
 
-interface LanguageLifeDefinition {
+export interface LanguageLifeDefinition {
   model: 'life';
   variant: LifeVariant;
   size: 8 | 16;
@@ -451,9 +484,9 @@ interface LanguageLifeDefinition {
   cells: boolean[];
 }
 
-type LifeReaderMode = 'order' | 'random' | 'walk' | 'reverse' | 'pendulum' | 'first' | 'last';
+export type LifeReaderMode = 'order' | 'random' | 'walk' | 'reverse' | 'pendulum' | 'first' | 'last';
 
-interface LanguageLifeReaderDefinition {
+export interface LanguageLifeReaderDefinition {
   voice: string;
   seq: string;
   mode: LifeReaderMode;
@@ -461,7 +494,7 @@ interface LanguageLifeReaderDefinition {
   view: boolean;
 }
 
-interface LanguageRegisterDefinition {
+export interface LanguageRegisterDefinition {
   model: 'shift';
   size: number;
   source: string;
@@ -469,13 +502,13 @@ interface LanguageRegisterDefinition {
   amount: number;
 }
 
-interface LanguageRegisterVoiceDefinition {
+export interface LanguageRegisterVoiceDefinition {
   voice: string;
   register: string;
   stage: number;
 }
 
-interface LanguageCycleDefinition {
+export interface LanguageCycleDefinition {
   amount: number;
   unit: 'ms' | 'sec' | 'beat';
   chance: number;
@@ -484,7 +517,7 @@ interface LanguageCycleDefinition {
   clockSource: string;
 }
 
-interface LanguageSetCycleDefinition {
+export interface LanguageSetCycleDefinition {
   amount: number;
   unit: 'ms' | 'sec' | 'beat';
   chance: number;
@@ -492,7 +525,7 @@ interface LanguageSetCycleDefinition {
   loose: boolean;
 }
 
-interface LanguageParameterCycleDefinition {
+export interface LanguageParameterCycleDefinition {
   voice: string;
   parameter: VoiceParameterName;
   expression: string;
@@ -505,16 +538,16 @@ interface LanguageParameterCycleDefinition {
   line: number;
 }
 
-interface LanguageParameterDefaultDefinition {
+export interface LanguageParameterDefaultDefinition {
   voice: string;
   parameter: VoiceParameterName;
   expression: string;
   line: number;
 }
 
-type LanguageObjectEveryDefinition = LanguageCycleDefinition;
+export type LanguageObjectEveryDefinition = LanguageCycleDefinition;
 
-interface LanguageMasterClockDefinition {
+export interface LanguageMasterClockDefinition {
   expression: string;
   amount: number;
   unit: 'ms' | 'sec' | 'beat';
@@ -525,7 +558,7 @@ interface LanguageMasterClockDefinition {
   line: number;
 }
 
-interface LanguageClockConfig {
+export interface LanguageClockConfig {
   parent: string;
   rate: number;
   rateLabel: string;
@@ -533,42 +566,34 @@ interface LanguageClockConfig {
   drift: number;
 }
 
-type LanguageDrumVoiceId = 'kick' | 'snare' | 'clap' | 'hihat' | 'openhat' | 'lowtom' | 'hightom';
-interface LanguageDrumSlotDefinition {
-  drumkit: string; alias: string; voice: LanguageDrumVoiceId;
-  params: { level:number; pan:number; tune:number; decay:number; transient:number; snappy:number; color:number; noise:number; humanize:number };
-  amount:number; unit:'ms'|'sec'|'beat'; chance:number; drift:boolean; loose:boolean; clockSource:string;
-  euclidean: { hits:number; steps:number; rotate:number } | null;
-}
-
-interface LanguageModMetadata {
+export interface LanguageModMetadata {
   internalName: string;
   displayName: string;
   ownerVoice: string | null;
 }
 
-interface LanguageModSetDirective {
+export interface LanguageModSetDirective {
   internalName: string;
-  parameter: 'model' | 'freq' | 'ratebeat' | 'slope' | 'shape' | 'smooth' | 'shift' | 'output' | 'range' | 'spread' | 'bias' | 'steps' | 'deja' | 'length' | 'diversity';
+  parameter: 'model' | 'freq' | 'ratebeat' | 'out1' | 'out2' | 'out3' | 'out4' | 'slope' | 'shape' | 'smooth' | 'shift' | 'output' | 'range' | 'spread' | 'bias' | 'steps' | 'deja' | 'length' | 'diversity' | 'density';
   value: string;
   line: number;
 }
 
-interface LanguageFxMetadata {
+export interface LanguageFxMetadata {
   name: string;
   modelId: string | null;
 }
 
-type LanguageDelayParameter = 'lines' | 'spread' | 'spreadloose' | 'reverse' | 'pitchprob' | 'pitchcount' | 'pitch0' | 'pitch1' | 'pitch2' | 'pitch3' | 'pitch4' | 'pitch5' | 'pitch6' | 'pitch7' | 'pitch8' | 'pitch9' | 'pitch10' | 'pitch11' | 'pitch12' | 'pitch13' | 'pitch14' | 'pitch15' | 'tape' | 'diffusion' | 'pingpong';
-interface LanguageDelayTimeDefinition { name: string; amount: number; unit: 'ms' | 'sec' | 'beat'; }
-interface LanguageDelayParamDefaultDefinition { name: string; parameter: LanguageDelayParameter; expression: string; line: number; }
-interface LanguageDelayParamCycleDefinition extends LanguageDelayParamDefaultDefinition {
+export type LanguageDelayParameter = 'lines' | 'spread' | 'spreadloose' | 'reverse' | 'pitchprob' | 'pitchcount' | 'pitch0' | 'pitch1' | 'pitch2' | 'pitch3' | 'pitch4' | 'pitch5' | 'pitch6' | 'pitch7' | 'pitch8' | 'pitch9' | 'pitch10' | 'pitch11' | 'pitch12' | 'pitch13' | 'pitch14' | 'pitch15' | 'tape' | 'diffusion' | 'pingpong';
+export interface LanguageDelayTimeDefinition { name: string; amount: number; unit: 'ms' | 'sec' | 'beat'; }
+export interface LanguageDelayParamDefaultDefinition { name: string; parameter: LanguageDelayParameter; expression: string; line: number; }
+export interface LanguageDelayParamCycleDefinition extends LanguageDelayParamDefaultDefinition {
   amount: number; unit: 'ms' | 'sec' | 'beat'; chance: number; drift: boolean; loose: boolean; clockSource: string;
 }
 
-type LanguageFxParameter = 'position' | 'size' | 'pitch' | 'density' | 'texture' | 'mix' | 'spread' | 'feedback' | 'reverb';
+export type LanguageFxParameter = 'position' | 'size' | 'pitch' | 'density' | 'texture' | 'mix' | 'spread' | 'feedback' | 'reverb';
 
-interface LanguageFxParameterCycleDefinition {
+export interface LanguageFxParameterCycleDefinition {
   fx: string;
   parameter: LanguageFxParameter;
   expression: string;
@@ -581,14 +606,14 @@ interface LanguageFxParameterCycleDefinition {
   line: number;
 }
 
-interface LanguageFxParameterDefaultDefinition {
+export interface LanguageFxParameterDefaultDefinition {
   fx: string;
   parameter: LanguageFxParameter;
   expression: string;
   line: number;
 }
 
-interface LanguageFilterSequenceDefinition {
+export interface LanguageFilterSequenceDefinition {
   filter: string;
   values: number[];
   mode: LanguageSequenceDefinition['mode'];
@@ -602,14 +627,14 @@ interface LanguageFilterSequenceDefinition {
   clockSource: string;
 }
 
-interface LanguageFxPitchSequenceDefinition {
+export interface LanguageFxPitchSequenceDefinition {
   values: number[];
   mode: 'order' | 'random' | 'walk' | 'shuffle' | 'reverse' | 'pendulum';
   amount: number;
   favor: LanguageSequenceFavorEntry[];
 }
 
-interface LanguageFxModulationDefinition {
+export interface LanguageFxModulationDefinition {
   fx: string;
   parameter: LanguageFxParameter;
   mod: string;
@@ -620,10 +645,10 @@ interface LanguageFxModulationDefinition {
 
 
 
-type LanguageEnvelopeCurve = 'lin' | 'log';
-type LanguageEnvelopeUnit = 'ms' | 'sec' | 'beat';
-type LanguageEnvelopeStage = { amount: number; unit: LanguageEnvelopeUnit; curve: LanguageEnvelopeCurve };
-type LanguageEnvelopeSpec = {
+export type LanguageEnvelopeCurve = 'lin' | 'log';
+export type LanguageEnvelopeUnit = 'ms' | 'sec' | 'beat';
+export type LanguageEnvelopeStage = { amount: number; unit: LanguageEnvelopeUnit; curve: LanguageEnvelopeCurve };
+export type LanguageEnvelopeSpec = {
   delay: LanguageEnvelopeStage | null;
   attack: LanguageEnvelopeStage | null;
   hold: LanguageEnvelopeStage | null;
@@ -632,7 +657,7 @@ type LanguageEnvelopeSpec = {
   release: LanguageEnvelopeStage | null;
   range: [number, number];
 };
-type LanguageEnvelopeDefinition = {
+export type LanguageEnvelopeDefinition = {
   ownerKind: 'voice' | 'fx' | 'filter';
   owner: string;
   parameter: string;
@@ -646,16 +671,16 @@ type LanguageEnvelopeDefinition = {
   clockSource: string;
 };
 
-type LanguageVcaDefinition = {
+export type LanguageVcaDefinition = {
   owner: string;
   output: string;
   spec: LanguageEnvelopeSpec;
   line: number;
 };
 
-type LanguageGenerativeMode = 'wander' | 'trend' | 'scatter' | 'flutter';
+export type LanguageGenerativeMode = 'wander' | 'trend' | 'scatter' | 'flutter';
 
-interface LanguageGenerativeDefaultDefinition {
+export interface LanguageGenerativeDefaultDefinition {
   ownerKind: 'voice' | 'fx' | 'filter';
   owner: string;
   parameter: string;
@@ -665,7 +690,7 @@ interface LanguageGenerativeDefaultDefinition {
   line: number;
 }
 
-interface LanguageGenerativeCycleDefinition extends LanguageGenerativeDefaultDefinition {
+export interface LanguageGenerativeCycleDefinition extends LanguageGenerativeDefaultDefinition {
   interval: number;
   unit: 'ms' | 'sec' | 'beat';
   chance: number;
@@ -674,7 +699,7 @@ interface LanguageGenerativeCycleDefinition extends LanguageGenerativeDefaultDef
   clockSource: string;
 }
 
-interface LanguageInlinePianoDefinition {
+export interface LanguageInlinePianoDefinition {
   ownerKind: 'voice' | 'fx' | 'filter';
   owner: string;
   property: 'note' | 'scale';
@@ -682,77 +707,12 @@ interface LanguageInlinePianoDefinition {
   values: number[];
 }
 
-interface LanguageInlineScalarDefinition {
+export interface LanguageInlineScalarDefinition {
   ownerKind: 'voice' | 'fx' | 'filter';
   owner: string;
   property: string;
   line: number;
   expression: string;
-}
-
-function buildEuclideanPattern(hits: number, steps: number, rotate: number): boolean[] {
-  const pattern = Array.from({ length: steps }, () => false);
-  if (hits <= 0 || steps <= 0) return pattern;
-  for (let hit = 0; hit < hits; hit += 1) {
-    const base = Math.floor(hit * steps / hits);
-    const index = ((base + rotate) % steps + steps) % steps;
-    pattern[index] = true;
-  }
-  return pattern;
-}
-
-function drumViewLaneSteps(
-  slot: LanguageDrumSlotDefinition,
-  sourceClockRate: number,
-  fallbackSteps: number,
-): number {
-  const pattern = parseRuntimePatternSource(slot.clockSource);
-  if (pattern) return pattern.spec.steps;
-  if (slot.unit !== 'beat') return Math.max(1, fallbackSteps);
-  const rate = Number.isFinite(sourceClockRate) && sourceClockRate > 0 ? sourceClockRate : 1;
-  // The view spans four master beats. One visual cell corresponds to one
-  // actual tick of the lane clock, so triplets naturally use 12 cells,
-  // sixteenths 16, eighths 8, and so on.
-  return Math.max(1, Math.ceil(4 * rate - 1e-9));
-}
-
-function drumViewPattern(
-  slot: LanguageDrumSlotDefinition,
-  laneSteps: number,
-  masterBeatMs: number,
-): boolean[] {
-  const result = Array.from({ length: laneSteps }, () => false);
-  if (slot.amount <= 0) return result;
-
-  const pattern = parseRuntimePatternSource(slot.clockSource);
-  if (pattern) {
-    for (const event of pattern.spec.events) {
-      const index = event.index - 1;
-      if (index >= 0 && index < result.length) result[index] = true;
-    }
-    return result;
-  }
-
-  if (slot.unit !== 'beat') {
-    const intervalMs = slot.unit === 'sec' ? slot.amount * 1000 : slot.amount;
-    if (!Number.isFinite(masterBeatMs) || masterBeatMs <= 0 || intervalMs <= 0) return result;
-    const intervalBeats = intervalMs / masterBeatMs;
-    for (let beat = 0; beat < 4 - 1e-9; beat += intervalBeats) {
-      const cell = Math.floor((beat / 4) * laneSteps);
-      if (cell >= 0 && cell < laneSteps) result[cell] = true;
-    }
-    return result;
-  }
-
-  const euclidean = slot.euclidean;
-  const euclideanPattern = euclidean ? buildEuclideanPattern(euclidean.hits, euclidean.steps, euclidean.rotate) : null;
-  for (let tick = 0; tick < laneSteps; tick += 1) {
-    const due = euclideanPattern
-      ? euclideanPattern[tick % euclideanPattern.length]
-      : tick % slot.amount === 0;
-    if (due) result[tick] = true;
-  }
-  return result;
 }
 
 export class SonusRuntime {
@@ -793,6 +753,7 @@ export class SonusRuntime {
   private drumHumanizeState = new Map<string, number>();
   private liveDisabledDrumkits = new Set<string>();
   private randomState = 0x6d2b79f5;
+  private inlineControlState = new Map<string, InlineControlState>();
 
   constructor(private readonly audio: AudioEngine) {
     this.scheduler = new RuntimeScheduler(audio);
@@ -1067,10 +1028,11 @@ export class SonusRuntime {
       this.whenEventState.clear();
       this.drumHumanizeState.clear();
       this.randomState = 0x6d2b79f5;
+      this.inlineControlState.clear();
     }
     const gains = new Map<string, GainDefinition>();
     const voices = new Map<string, VoiceDefinition>();
-    const swells = new Map<string, SwellDefinition>();
+    const swells = new Map<string, ModDefinition>();
     const mists = new Map<string, MistDefinition>();
     const filters = new Map<string, FilterDefinition>();
     const routes = new Map<string, RouteDefinition>();
@@ -1138,24 +1100,29 @@ export class SonusRuntime {
     const languageCompositeOutputs = new Map<string, Array<{ name: string; level: number }>>();
     const languageCompositePitchVoices = new Set<string>();
     const languageCompositeTunes = new Map<string, LanguageCompositeTuneDefinition>();
-    const languageDrumkits = new Map<string, { kit: string; disabled: boolean; viewSteps: number }>();
+    const languageDrumkits = new Map<string, { kit: string | null; disabled: boolean; viewSteps: number }>();
     const languageDrumSlots: LanguageDrumSlotDefinition[] = [];
+    const languageSampleSlices: LanguageSampleSliceDefinition[] = [];
+    const languageSampleSliceCounts = new Map<string, number>();
     const languageModSets: LanguageModSetDirective[] = [];
+    const languageControlParameters: directives.LanguageControlParameterDefinition[] = [];
     let languageMasterClock: LanguageMasterClockDefinition | null = null;
     for (const { source: line, line: lineNumber } of lines) {
-      const logicDeclaration = parseLanguageLogicDirective(line);
+      const controlParameter = directives.parseLanguageControlParameterDirective(line);
+      if (controlParameter) { languageControlParameters.push(controlParameter); continue; }
+      const logicDeclaration = directives.parseLanguageLogicDirective(line);
       if (logicDeclaration) { languageLogics.set(logicDeclaration.name, { view: logicDeclaration.view, nodes: [] }); continue; }
-      const logicNode = parseLanguageLogicNodeDirective(line);
+      const logicNode = directives.parseLanguageLogicNodeDirective(line);
       if (logicNode) {
         const logic = languageLogics.get(logicNode.owner);
         if (logic) logic.nodes.push(logicNode);
         continue;
       }
 
-      const compositePitch = parseLanguageCompositePitch(line);
+      const compositePitch = directives.parseLanguageCompositePitch(line);
       if (compositePitch) { languageCompositePitchVoices.add(compositePitch.name); continue; }
 
-      const compositeTune = parseLanguageCompositeTune(line);
+      const compositeTune = directives.parseLanguageCompositeTune(line);
       if (compositeTune) {
         const key = `${compositeTune.owner}:${compositeTune.node}`;
         if (languageCompositeTunes.has(key)) throw new SonusEvaluationError([{ line: lineNumber, message: `composite '${compositeTune.owner}' tunes '${compositeTune.node}' more than once` }]);
@@ -1163,50 +1130,56 @@ export class SonusRuntime {
         continue;
       }
 
-      const compositeEdge = parseLanguageCompositeEdge(line);
+      const compositeEdge = directives.parseLanguageCompositeEdge(line);
       if (compositeEdge) {
         const list = languageCompositeEdges.get(compositeEdge.name) ?? [];
         list.push({ relation: compositeEdge.relation, source: compositeEdge.source, target: compositeEdge.target, params: compositeEdge.params });
         languageCompositeEdges.set(compositeEdge.name, list);
         continue;
       }
-      const compositeMix = parseLanguageCompositeMix(line);
+      const compositeMix = directives.parseLanguageCompositeMix(line);
       if (compositeMix) {
         const list = languageCompositeMixes.get(compositeMix.name) ?? [];
         list.push({ name: compositeMix.mix, inputs: compositeMix.inputs });
         languageCompositeMixes.set(compositeMix.name, list);
         continue;
       }
-      const compositeOutput = parseLanguageCompositeOutput(line);
+      const compositeOutput = directives.parseLanguageCompositeOutput(line);
       if (compositeOutput) { languageCompositeOutputs.set(compositeOutput.name, compositeOutput.outputs); continue; }
       const drumkitDeclaration = parseLanguageDrumkitDirective(line);
-      if (drumkitDeclaration) { languageDrumkits.set(drumkitDeclaration.name, { kit: 'sonus606', disabled: drumkitDeclaration.disabled, viewSteps: drumkitDeclaration.viewSteps }); continue; }
+      if (drumkitDeclaration) { languageDrumkits.set(drumkitDeclaration.name, { kit: null, disabled: drumkitDeclaration.disabled, viewSteps: drumkitDeclaration.viewSteps }); continue; }
       const drumkitMeta = parseLanguageDrumkitMetaDirective(line);
       if (drumkitMeta) {
         const previous = languageDrumkits.get(drumkitMeta.name);
         languageDrumkits.set(drumkitMeta.name, { kit: drumkitMeta.kit, disabled: previous?.disabled ?? false, viewSteps: previous?.viewSteps ?? 0 });
         continue;
       }
-      const drumSlot = parseLanguageDrumSlotDirective(line);
-      if (drumSlot) { languageDrumSlots.push(drumSlot); continue; }
-      const registerDeclaration = parseLanguageRegisterDeclaration(line);
+      const drumSlot = parseLanguageDrumSlotDirective(line) ?? parseLanguageDrumSampleSlotDirective(line);
+      if (drumSlot) {
+        if (drumSlot.voice === 'sample' && drumSlot.sampleAlias && !this.audio.hasDrumSample(drumSlot.sampleAlias)) {
+          diagnostics.push({ line: lineNumber, message: `unknown sample asset '${drumSlot.sampleAlias}'` });
+        }
+        languageDrumSlots.push(drumSlot);
+        continue;
+      }
+      const registerDeclaration = directives.parseLanguageRegisterDeclaration(line);
       if (registerDeclaration) {
         languageRegisters.set(registerDeclaration, { model: 'shift', size: 4, source: '', mode: 'direct', amount: 0 });
         continue;
       }
-      const registerModel = parseLanguageRegisterModel(line);
+      const registerModel = directives.parseLanguageRegisterModel(line);
       if (registerModel) {
         const register = languageRegisters.get(registerModel.name);
         if (register) register.model = 'shift';
         continue;
       }
-      const registerSize = parseLanguageRegisterSize(line);
+      const registerSize = directives.parseLanguageRegisterSize(line);
       if (registerSize) {
         const register = languageRegisters.get(registerSize.name);
         if (register) register.size = registerSize.size;
         continue;
       }
-      const registerSource = parseLanguageRegisterSource(line);
+      const registerSource = directives.parseLanguageRegisterSource(line);
       if (registerSource) {
         const register = languageRegisters.get(registerSource.name);
         if (register) {
@@ -1216,26 +1189,26 @@ export class SonusRuntime {
         }
         continue;
       }
-      const registerWrite = parseLanguageRegisterWrite(line);
+      const registerWrite = directives.parseLanguageRegisterWrite(line);
       if (registerWrite) {
         languageRegisterWrites.set(registerWrite.name, registerWrite.timing);
         continue;
       }
-      const registerVoice = parseLanguageRegisterPitch(line);
+      const registerVoice = directives.parseLanguageRegisterPitch(line);
       if (registerVoice) {
         languageRegisterVoices.push(registerVoice);
         continue;
       }
 
-      const seqDeclaration = parseLanguageTuringDeclaration(line);
+      const seqDeclaration = directives.parseLanguageTuringDeclaration(line);
       if (seqDeclaration) {
         languageTurings.set(seqDeclaration, { model: 'turing', length: 8, change: 10, values: [], register: 1, current: 440 });
         continue;
       }
-      const seqView = parseLanguageTuringView(line);
+      const seqView = directives.parseLanguageTuringView(line);
       if (seqView) { languageTuringViews.add(seqView); continue; }
 
-      const seqModel = parseLanguageSeqModel(line);
+      const seqModel = directives.parseLanguageSeqModel(line);
       if (seqModel) {
         if (seqModel.model === 'life') {
           languageTurings.delete(seqModel.name);
@@ -1255,19 +1228,19 @@ export class SonusRuntime {
         }
         continue;
       }
-      const seqSize = parseLanguageSeqSize(line);
+      const seqSize = directives.parseLanguageSeqSize(line);
       if (seqSize) { const seq = languageLives.get(seqSize.name); if (seq) seq.size = seqSize.size; continue; }
-      const lifeDensity = parseLanguageLifeDensity(line);
+      const lifeDensity = directives.parseLanguageLifeDensity(line);
       if (lifeDensity) {
         const seq = languageLives.get(lifeDensity.name);
         if (seq) { seq.density = lifeDensity.density; seq.maxDensity = lifeDensity.maxDensity; seq.respawn = lifeDensity.respawn; }
         continue;
       }
-      const seqLength = parseLanguageTuringLength(line);
+      const seqLength = directives.parseLanguageTuringLength(line);
       if (seqLength) { const seq = languageTurings.get(seqLength.name); if (seq) seq.length = seqLength.length; continue; }
-      const seqChange = parseLanguageTuringChange(line);
+      const seqChange = directives.parseLanguageTuringChange(line);
       if (seqChange) { const seq = languageTurings.get(seqChange.name); if (seq) seq.change = seqChange.change; continue; }
-      const seqValues = parseLanguageTuringValues(line);
+      const seqValues = directives.parseLanguageTuringValues(line);
       if (seqValues) {
         const turing = languageTurings.get(seqValues.name);
         if (turing) { turing.values = seqValues.values; turing.current = seqValues.values[0] ?? 440; }
@@ -1279,51 +1252,51 @@ export class SonusRuntime {
         if (snake) snake.values = seqValues.values;
         continue;
       }
-      const seqWeights = parseLanguageSeqWeights(line);
+      const seqWeights = directives.parseLanguageSeqWeights(line);
       if (seqWeights) { const seq = languageConstellations.get(seqWeights.name); if (seq) seq.weights = seqWeights.weights; continue; }
-      const snakeSize = parseLanguageSnakeSize(line);
+      const snakeSize = directives.parseLanguageSnakeSize(line);
       if (snakeSize) { const seq = languageSnakes.get(snakeSize.name); if (seq) { seq.width = snakeSize.width; seq.height = snakeSize.height; } continue; }
-      const snakeMovement = parseLanguageSnakeMovement(line);
+      const snakeMovement = directives.parseLanguageSnakeMovement(line);
       if (snakeMovement) { const seq = languageSnakes.get(snakeMovement.name); if (seq) seq.movement = snakeMovement.movement; continue; }
-      const snakeMatrix = parseLanguageSnakeMatrix(line);
+      const snakeMatrix = directives.parseLanguageSnakeMatrix(line);
       if (snakeMatrix) { const seq = languageSnakes.get(snakeMatrix.name); if (seq) seq.matrixExplicit = snakeMatrix.explicit; continue; }
-      const snakeReader = parseLanguageSnakeReader(line);
+      const snakeReader = directives.parseLanguageSnakeReader(line);
       if (snakeReader) { languageSnakeReaders.set(snakeReader.voice, snakeReader); continue; }
-      const constellationParam = parseLanguageConstellationParam(line);
+      const constellationParam = directives.parseLanguageConstellationParam(line);
       if (constellationParam) { const seq = languageConstellations.get(constellationParam.name); if (seq) (seq as unknown as Record<string, unknown>)[constellationParam.param] = constellationParam.value; continue; }
-      const constellationOctaves = parseLanguageConstellationOctaves(line);
+      const constellationOctaves = directives.parseLanguageConstellationOctaves(line);
       if (constellationOctaves) { const seq = languageConstellations.get(constellationOctaves.name); if (seq) seq.octaves = constellationOctaves.octaves; continue; }
-      const constellationReader = parseLanguageConstellationReader(line);
+      const constellationReader = directives.parseLanguageConstellationReader(line);
       if (constellationReader) { languageConstellationReaders.set(constellationReader.voice, constellationReader); continue; }
-      const seqVoice = parseLanguageTuringVoice(line);
+      const seqVoice = directives.parseLanguageTuringVoice(line);
       if (seqVoice) { languageTuringVoiceSources.set(seqVoice.voice, seqVoice.seq); continue; }
-      const lifeReader = parseLanguageLifeReader(line);
+      const lifeReader = directives.parseLanguageLifeReader(line);
       if (lifeReader) { languageLifeReaders.set(lifeReader.voice, lifeReader); continue; }
-      const lifeEvolve = parseLanguageLifeEvolve(line);
+      const lifeEvolve = directives.parseLanguageLifeEvolve(line);
       if (lifeEvolve) { languageLifeEvolve.set(lifeEvolve.name, lifeEvolve.timing); continue; }
 
-      const inlinePiano = parseLanguageInlinePianoDirective(line);
+      const inlinePiano = directives.parseLanguageInlinePianoDirective(line);
       if (inlinePiano) {
         languageInlinePianos.push(inlinePiano);
         continue;
       }
 
-      const inlineScalar = parseLanguageInlineScalarDirective(line);
+      const inlineScalar = directives.parseLanguageInlineScalarDirective(line);
       if (inlineScalar) {
         languageInlineScalars.push(inlineScalar);
         continue;
       }
 
-      const voiceVca = parseLanguageVcaDirective(line, lineNumber);
+      const voiceVca = directives.parseLanguageVcaDirective(line, lineNumber);
       if (voiceVca) { languageVcas.push(voiceVca); continue; }
 
-      const envelope = parseLanguageEnvelopeDirective(line, lineNumber);
+      const envelope = directives.parseLanguageEnvelopeDirective(line, lineNumber);
       if (envelope) {
         languageEnvelopes.push(envelope);
         continue;
       }
 
-      const fxMetadata = parseLanguageFxMetadata(line);
+      const fxMetadata = directives.parseLanguageFxMetadata(line);
       if (fxMetadata) {
         const existing = languageFxMeta.get(fxMetadata.name);
         languageFxMeta.set(fxMetadata.name, {
@@ -1333,76 +1306,76 @@ export class SonusRuntime {
         continue;
       }
 
-      const delayTime = parseLanguageDelayTime(line);
+      const delayTime = directives.parseLanguageDelayTime(line);
       if (delayTime) { languageDelayTimes.set(delayTime.name, delayTime); continue; }
-      const delayLiteral = parseLanguageDelayParam(line, lineNumber);
+      const delayLiteral = directives.parseLanguageDelayParam(line, lineNumber);
       if (delayLiteral) { languageDelayDefaults.push(delayLiteral); continue; }
-      const delayDefault = parseLanguageDelayParamDefault(line, lineNumber);
+      const delayDefault = directives.parseLanguageDelayParamDefault(line, lineNumber);
       if (delayDefault) { languageDelayDefaults.push(delayDefault); continue; }
-      const delayCycle = parseLanguageDelayParamCycle(line, lineNumber);
+      const delayCycle = directives.parseLanguageDelayParamCycle(line, lineNumber);
       if (delayCycle) { languageDelayCycles.push(delayCycle); continue; }
 
-      const fxParameterCycle = parseLanguageFxParameterCycleDirective(line, lineNumber);
+      const fxParameterCycle = directives.parseLanguageFxParameterCycleDirective(line, lineNumber);
       if (fxParameterCycle) {
         languageFxParameterCycles.push(fxParameterCycle);
         continue;
       }
 
-      const fxParameterDefault = parseLanguageFxParameterDefaultDirective(line, lineNumber);
+      const fxParameterDefault = directives.parseLanguageFxParameterDefaultDirective(line, lineNumber);
       if (fxParameterDefault) {
         languageFxParameterDefaults.push(fxParameterDefault);
         continue;
       }
 
-      const fxSequence = parseLanguageFxPitchSequenceDirective(line);
+      const fxSequence = directives.parseLanguageFxPitchSequenceDirective(line);
       if (fxSequence) {
         languageFxPitchSequences.set(fxSequence.name, { values: fxSequence.values, mode: fxSequence.mode, amount: fxSequence.amount, favor: fxSequence.favor });
         continue;
       }
 
-      const fxPitchCycle = parseLanguageFxPitchCycleDirective(line);
+      const fxPitchCycle = directives.parseLanguageFxPitchCycleDirective(line);
       if (fxPitchCycle) {
         languageFxPitchCycles.set(fxPitchCycle.name, fxPitchCycle.timing);
         continue;
       }
 
-      const fxModulation = parseLanguageFxModulationDirective(line, lineNumber);
+      const fxModulation = directives.parseLanguageFxModulationDirective(line, lineNumber);
       if (fxModulation) {
         languageFxModulations.push(fxModulation);
         continue;
       }
 
-      const generativeCycle = parseLanguageGenerativeCycleDirective(line, lineNumber);
+      const generativeCycle = directives.parseLanguageGenerativeCycleDirective(line, lineNumber);
       if (generativeCycle) {
         languageGenerativeCycles.push(generativeCycle);
         continue;
       }
 
-      const generativeDefault = parseLanguageGenerativeDefaultDirective(line, lineNumber);
+      const generativeDefault = directives.parseLanguageGenerativeDefaultDirective(line, lineNumber);
       if (generativeDefault) {
         languageGenerativeDefaults.push(generativeDefault);
         continue;
       }
 
-      const modMetadata = parseLanguageModMetadata(line);
+      const modMetadata = directives.parseLanguageModMetadata(line);
       if (modMetadata) {
         languageMods.set(modMetadata.internalName, modMetadata);
         continue;
       }
 
-      const modSet = parseLanguageModSetDirective(line, lineNumber);
+      const modSet = directives.parseLanguageModSetDirective(line, lineNumber);
       if (modSet) {
         languageModSets.push(modSet);
         continue;
       }
 
-      const tuning = parseLanguageTuningDirective(line);
+      const tuning = directives.parseLanguageTuningDirective(line);
       if (tuning !== null) {
         referenceTuningHz = tuning;
         continue;
       }
 
-      const clockParent = parseLanguageClockParentDirective(line);
+      const clockParent = directives.parseLanguageClockParentDirective(line);
       if (clockParent) {
         const config = languageClockConfigs.get(clockParent.name) ?? { parent: 'Clock', rate: 1, rateLabel: '*1', jitter: 0, drift: 0 };
         config.parent = clockParent.parent;
@@ -1412,7 +1385,7 @@ export class SonusRuntime {
         continue;
       }
 
-      const clockFeel = parseLanguageClockFeelDirective(line);
+      const clockFeel = directives.parseLanguageClockFeelDirective(line);
       if (clockFeel) {
         const config = languageClockConfigs.get(clockFeel.name) ?? { parent: 'Clock', rate: 1, rateLabel: '*1', jitter: 0, drift: 0 };
         if (clockFeel.kind === 'jitter') config.jitter = clockFeel.amount;
@@ -1421,20 +1394,20 @@ export class SonusRuntime {
         continue;
       }
 
-      const masterClock = parseLanguageMasterClockDirective(line, lineNumber);
+      const masterClock = directives.parseLanguageMasterClockDirective(line, lineNumber);
       if (masterClock) {
         if (languageMasterClock) diagnostics.push({ line: lineNumber, message: 'only one CLOCK statement is allowed' });
         else languageMasterClock = masterClock;
         continue;
       }
 
-      const filterSequence = parseLanguageFilterSequenceDirective(line);
+      const filterSequence = directives.parseLanguageFilterSequenceDirective(line);
       if (filterSequence) {
         languageFilterSequences.push(filterSequence);
         continue;
       }
 
-      const sequence = parseLanguageSequenceDirective(line);
+      const sequence = directives.parseLanguageSequenceDirective(line);
       if (sequence) {
         if (sequence.values.length === 0 || sequence.values.some((value) => !Number.isFinite(value) || value <= 0)) {
           diagnostics.push({ line: lineNumber, message: 'invalid internal sequence values' });
@@ -1444,7 +1417,7 @@ export class SonusRuntime {
         continue;
       }
 
-      const cycle = parseLanguageCycleDirective(line);
+      const cycle = directives.parseLanguageCycleDirective(line);
       if (cycle) {
         languageCycles.set(cycle.name, {
           amount: cycle.amount,
@@ -1456,19 +1429,31 @@ export class SonusRuntime {
         });
       }
 
-      const parameterCycle = parseLanguageParameterCycleDirective(line, lineNumber);
+      const sampleSlices = parseLanguageSampleSlicesDirective(line);
+      if (sampleSlices) {
+        languageSampleSliceCounts.set(sampleSlices.voice, sampleSlices.count);
+        continue;
+      }
+
+      const sampleSlice = parseLanguageSampleSliceDirective(line);
+      if (sampleSlice) {
+        languageSampleSlices.push(sampleSlice);
+        continue;
+      }
+
+      const parameterCycle = directives.parseLanguageParameterCycleDirective(line, lineNumber);
       if (parameterCycle) {
         languageParameterCycles.push(parameterCycle);
         continue;
       }
 
-      const parameterDefault = parseLanguageParameterDefaultDirective(line, lineNumber);
+      const parameterDefault = directives.parseLanguageParameterDefaultDirective(line, lineNumber);
       if (parameterDefault) {
         languageParameterDefaults.push(parameterDefault);
         continue;
       }
 
-      const objectEvery = parseLanguageObjectEveryDirective(line);
+      const objectEvery = directives.parseLanguageObjectEveryDirective(line);
       if (objectEvery) {
         languageObjectEvery.set(objectEvery.name, {
           amount: objectEvery.amount,
@@ -1481,7 +1466,7 @@ export class SonusRuntime {
         continue;
       }
 
-      const driveEvery = parseLanguageDriveEvery(line);
+      const driveEvery = directives.parseLanguageDriveEvery(line);
       if (driveEvery) {
         languageDriveEvery.set(driveEvery.name, {
           amount: driveEvery.amount,
@@ -1494,7 +1479,7 @@ export class SonusRuntime {
         continue;
       }
 
-      const setCycle = parseLanguageSetCycleDirective(line);
+      const setCycle = directives.parseLanguageSetCycleDirective(line);
       if (setCycle) {
         languageSetCycles.set(setCycle.name, {
           amount: setCycle.amount,
@@ -1636,6 +1621,7 @@ export class SonusRuntime {
           timbre: 50,
           morph: 50,
           width: 50,
+          density: 50,
           geometry: 45,
           structure: 50,
           brightness: 65,
@@ -1649,6 +1635,7 @@ export class SonusRuntime {
           strike: 0,
           strikeTimbre: 50,
           drive: null,
+          sampleAlias: null, sampleRootFrequency: 130.8127826502993, sampleStart: 0, sampleEnd: 100, sampleLoop: false, sampleReverse: false, sampleSlices: 0, sampleInitialSlice: 0, sampleInitialSliceReverse: false,
           parameters: new Map(),
         };
         voices.set(name, definition);
@@ -1657,9 +1644,10 @@ export class SonusRuntime {
         continue;
       }
 
+      const modDeclaration = parseModDeclaration(line);
       const swellDeclaration = parseSwellDeclaration(line);
-      if (swellDeclaration) {
-        const { name } = swellDeclaration;
+      if (modDeclaration || swellDeclaration) {
+        const { name } = modDeclaration ?? swellDeclaration!;
         // High-level MOD objects use a compiler-generated __mod_* identifier.
         // The matching __modmeta directive is collected in the pre-pass, so
         // only those known generated objects may bypass the user identifier
@@ -1673,25 +1661,9 @@ export class SonusRuntime {
           diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` });
           continue;
         }
-        swells.set(name, {
-          model: 'swell',
-          frequency: 0.25,
-          slope: 50,
-          shape: 50,
-          smooth: 50,
-          shift: 50,
-          mode: 1,
-          outputMode: 2,
-          range: 0,
-          spread: 50,
-          bias: 50,
-          steps: 50,
-          deja: 0,
-          length: 8,
-          diversity: 50,
-          parameters: new Map(),
-        });
-        results.push({ message: `${name} = Swell` });
+        const model = modDeclaration ? 'generic' : 'swell';
+        swells.set(name, createModDefinition(model));
+        results.push({ message: `${name} = ${modDeclaration ? 'MOD' : 'Swell'}` });
         continue;
       }
 
@@ -1765,7 +1737,7 @@ export class SonusRuntime {
       if (parameter === 'freq') return voice?.frequency ?? swell?.frequency;
       if (parameter === 'level') return gain?.level;
       if (parameter === 'model') return voice?.model;
-      if (voice && (parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph' || parameter === 'width')) return voice[parameter];
+      if (voice && (parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph' || parameter === 'width' || parameter === 'density')) return voice[parameter];
       if (swell && (parameter === 'slope' || parameter === 'shape' || parameter === 'smooth' || parameter === 'shift')) return swell[parameter];
       return undefined;
     };
@@ -1897,6 +1869,23 @@ export class SonusRuntime {
       }
     };
 
+    // Sample-slice directives are collected before declarations, then attached once
+    // all VOICE objects exist. This keeps source order declarative and ensures
+    // slicing metadata is available to the audio program and waveform views.
+    for (const [voiceName, count] of languageSampleSliceCounts) {
+      const voice = voices.get(voiceName);
+      if (!voice) continue;
+      voice.sampleSlices = count;
+      voice.parameters.set('SLICES', String(count));
+    }
+    for (const definition of languageSampleSlices) {
+      const voice = voices.get(definition.voice);
+      if (!voice || definition.items.length === 0) continue;
+      const initial = definition.mode === 'reverse' ? definition.items[definition.items.length - 1] : definition.items[0];
+      voice.sampleInitialSlice = initial.index;
+      voice.sampleInitialSliceReverse = initial.reverse;
+    }
+
     const evalNumber = (expression: string, lineNumber: number, label: string): number | undefined => {
       const value = evalValue(expression, lineNumber);
       if (value === undefined) return undefined;
@@ -1911,7 +1900,7 @@ export class SonusRuntime {
     // source order. All module declarations already exist, so references between
     // modules are still independent from declaration order.
     for (const { source: line, line: lineNumber } of lines) {
-      if (parseLanguageLogicDirective(line) || parseLanguageLogicNodeDirective(line) || parseLanguageCompositePitch(line) || parseLanguageCompositeTune(line) || parseLanguageCompositeEdge(line) || parseLanguageCompositeMix(line) || parseLanguageCompositeOutput(line) || parseLanguageDrumkitDirective(line) || parseLanguageDrumkitMetaDirective(line) || parseLanguageDrumSlotDirective(line) || parseLanguageTuningDirective(line) !== null || parseLanguageClockParentDirective(line) || parseLanguageClockFeelDirective(line) || parseLanguageTuringDeclaration(line) || parseLanguageTuringView(line) || parseLanguageSeqModel(line) || parseLanguageSeqWeights(line) || parseLanguageConstellationParam(line) || parseLanguageConstellationOctaves(line) || parseLanguageConstellationReader(line) || parseLanguageSnakeSize(line) || parseLanguageSnakeMovement(line) || parseLanguageSnakeMatrix(line) || parseLanguageSnakeReader(line) || parseLanguageSeqSize(line) || parseLanguageLifeDensity(line) || parseLanguageLifeReader(line) || parseLanguageLifeEvolve(line) || parseLanguageTuringLength(line) || parseLanguageTuringChange(line) || parseLanguageTuringValues(line) || parseLanguageTuringVoice(line) || parseLanguageInlinePianoDirective(line) || parseLanguageInlineScalarDirective(line) || parseLanguageVcaDirective(line, lineNumber) || parseLanguageEnvelopeDirective(line, lineNumber) || parseLanguageFxMetadata(line) || parseLanguageDelayTime(line) || parseLanguageDelayParam(line, lineNumber) || parseLanguageDelayParamDefault(line, lineNumber) || parseLanguageDelayParamCycle(line, lineNumber) || parseLanguageFxParameterCycleDirective(line, lineNumber) || parseLanguageFxParameterDefaultDirective(line, lineNumber) || parseLanguageFxPitchSequenceDirective(line) || parseLanguageFxPitchCycleDirective(line) || parseLanguageFxModulationDirective(line, lineNumber) || parseLanguageGenerativeCycleDirective(line, lineNumber) || parseLanguageGenerativeDefaultDirective(line, lineNumber) || parseLanguageModMetadata(line) || parseLanguageModSetDirective(line, lineNumber) || parseLanguageParameterDefaultDirective(line, lineNumber) || parseLanguageObjectEveryDirective(line) || parseLanguageDriveEvery(line) || parseLanguageMasterClockDirective(line, lineNumber) || parseLanguageFilterSequenceDirective(line) || parseLanguageSequenceDirective(line) || parseLanguageCycleDirective(line) || parseLanguageSetCycleDirective(line) || parseLanguageParameterCycleDirective(line, lineNumber) || parseLanguageFromDirective(line)) continue;
+      if (directives.parseLanguageControlParameterDirective(line) || directives.parseLanguageLogicDirective(line) || directives.parseLanguageLogicNodeDirective(line) || directives.parseLanguageCompositePitch(line) || directives.parseLanguageCompositeTune(line) || directives.parseLanguageCompositeEdge(line) || directives.parseLanguageCompositeMix(line) || directives.parseLanguageCompositeOutput(line) || parseLanguageDrumkitDirective(line) || parseLanguageDrumkitMetaDirective(line) || parseLanguageDrumSlotDirective(line) || parseLanguageDrumSampleSlotDirective(line) || parseLanguageSampleSlicesDirective(line) || parseLanguageSampleSliceDirective(line) || directives.parseLanguageTuningDirective(line) !== null || directives.parseLanguageClockParentDirective(line) || directives.parseLanguageClockFeelDirective(line) || directives.parseLanguageTuringDeclaration(line) || directives.parseLanguageTuringView(line) || directives.parseLanguageSeqModel(line) || directives.parseLanguageSeqWeights(line) || directives.parseLanguageConstellationParam(line) || directives.parseLanguageConstellationOctaves(line) || directives.parseLanguageConstellationReader(line) || directives.parseLanguageSnakeSize(line) || directives.parseLanguageSnakeMovement(line) || directives.parseLanguageSnakeMatrix(line) || directives.parseLanguageSnakeReader(line) || directives.parseLanguageSeqSize(line) || directives.parseLanguageLifeDensity(line) || directives.parseLanguageLifeReader(line) || directives.parseLanguageLifeEvolve(line) || directives.parseLanguageTuringLength(line) || directives.parseLanguageTuringChange(line) || directives.parseLanguageTuringValues(line) || directives.parseLanguageTuringVoice(line) || directives.parseLanguageInlinePianoDirective(line) || directives.parseLanguageInlineScalarDirective(line) || directives.parseLanguageVcaDirective(line, lineNumber) || directives.parseLanguageEnvelopeDirective(line, lineNumber) || directives.parseLanguageFxMetadata(line) || directives.parseLanguageDelayTime(line) || directives.parseLanguageDelayParam(line, lineNumber) || directives.parseLanguageDelayParamDefault(line, lineNumber) || directives.parseLanguageDelayParamCycle(line, lineNumber) || directives.parseLanguageFxParameterCycleDirective(line, lineNumber) || directives.parseLanguageFxParameterDefaultDirective(line, lineNumber) || directives.parseLanguageFxPitchSequenceDirective(line) || directives.parseLanguageFxPitchCycleDirective(line) || directives.parseLanguageFxModulationDirective(line, lineNumber) || directives.parseLanguageGenerativeCycleDirective(line, lineNumber) || directives.parseLanguageGenerativeDefaultDirective(line, lineNumber) || directives.parseLanguageModMetadata(line) || directives.parseLanguageModSetDirective(line, lineNumber) || directives.parseLanguageParameterDefaultDirective(line, lineNumber) || directives.parseLanguageObjectEveryDirective(line) || directives.parseLanguageDriveEvery(line) || directives.parseLanguageMasterClockDirective(line, lineNumber) || directives.parseLanguageFilterSequenceDirective(line) || directives.parseLanguageSequenceDirective(line) || directives.parseLanguageCycleDirective(line) || directives.parseLanguageSetCycleDirective(line) || directives.parseLanguageParameterCycleDirective(line, lineNumber) || directives.parseLanguageFromDirective(line)) continue;
 
       const gainDeclaration = parseGainDeclaration(line);
       if (gainDeclaration) {
@@ -1929,6 +1918,12 @@ export class SonusRuntime {
           const error = applyVoiceCall(voiceDeclaration.name, definition, call, moduleViews, (expr) => evalValue(expr, lineNumber));
           if (error) diagnostics.push({ line: lineNumber, message: error });
         }
+        continue;
+      }
+      const modDeclaration = parseModDeclaration(line);
+      if (modDeclaration) {
+        // High-level MOD is generic here; the concrete backend is selected by
+        // the explicit `model` directive that follows in the compiled source.
         continue;
       }
       const swellDeclaration = parseSwellDeclaration(line);
@@ -2292,7 +2287,22 @@ export class SonusRuntime {
         continue;
       }
 
-      match = line.match(/^([A-Za-z_]\w*)\.(harmo|timbre|morph|width|geometry|structure|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)\(\s*(.+)\s*\)\s*$/);
+      match = line.match(/^([A-Za-z_]\w*)\.(sample|sampleRoot|sampleRegion)\((.*)\)\s*$/);
+      if (match && voices.has(match[1])) {
+        const voice = voices.get(match[1])!;
+        const error = applyVoiceCall(
+          match[1],
+          voice,
+          { name: match[2], argument: match[3].trim() },
+          moduleViews,
+          (expression) => evalValue(expression, lineNumber),
+        );
+        if (error) diagnostics.push({ line: lineNumber, message: error });
+        else results.push({ message: `${match[1]}.${match[2]}` });
+        continue;
+      }
+
+      match = line.match(/^([A-Za-z_]\w*)\.(harmo|timbre|morph|width|density|geometry|structure|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)\(\s*(.+)\s*\)\s*$/);
       if (match) {
         const [, name, parameter, rawValue] = match;
         const voice = voices.get(name);
@@ -2332,7 +2342,7 @@ export class SonusRuntime {
         continue;
       }
 
-      match = line.match(/^([A-Za-z_]\w*)\.(freq|harmo|timbre|morph|width|model|level|slope|shape|smooth|shift)\.view\(\s*\)\s*$/);
+      match = line.match(/^([A-Za-z_]\w*)\.(freq|harmo|timbre|morph|width|density|model|level|slope|shape|smooth|shift)\.view\(\s*\)\s*$/);
       if (match) {
         const [, name, parameter] = match;
           const voice = voices.get(name);
@@ -2345,7 +2355,7 @@ export class SonusRuntime {
           else if (swell) value = `${formatNumber(swell.frequency)} HZ`;
         } else if (parameter === 'model' && voice) {
           value = voice.engine === 'macro' ? formatVoiceModel(voice.model) : voice.soundId.toUpperCase();
-        } else if ((parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph' || parameter === 'width') && voice) {
+        } else if ((parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph' || parameter === 'width' || parameter === 'density') && voice) {
           value = `${formatNumber(voice[parameter])}%`;
         } else if (parameter === 'level' && gain) {
           value = `${formatNumber(gain.level)}%`;
@@ -2445,135 +2455,38 @@ export class SonusRuntime {
         continue;
       }
 
-      const parsedRoute = parseRouteLine(line);
-      if (parsedRoute) {
-        const { sourceName, sourcePort, amountExpression, targetName, targetPort } = parsedRoute;
-        if (sourceName !== 'Clock'
-          && !clockSources.has(sourceName)
-          && !objectExists(sourceName, gains, voices)
-          && !swells.has(sourceName)
-          && !mists.has(sourceName)
-          && !filters.has(sourceName)
-          && !languageDrumkits.has(sourceName)) {
-          diagnostics.push({ line: lineNumber, message: `unknown source object: ${sourceName}` });
-          continue;
+      const resolvedRoute = resolveRouteLine(
+        line,
+        lineNumber,
+        {
+          sourceExists: (name) => name === 'Clock'
+            || clockSources.has(name)
+            || objectExists(name, gains, voices)
+            || swells.has(name)
+            || mists.has(name)
+            || filters.has(name)
+            || languageDrumkits.has(name),
+          isClockSource: (name) => name === 'Clock' || clockSources.has(name),
+          isVoice: (name) => voices.has(name),
+          isGain: (name) => gains.has(name),
+          voiceEngine: (name) => voices.get(name)?.engine,
+          isSwell: (name) => swells.has(name),
+          isMist: (name) => mists.has(name),
+          isFilter: (name) => filters.has(name),
+          isDrumkit: (name) => languageDrumkits.has(name),
+          hasEmbeddedFilter: (name) => voices.has(name)
+            && [...filters.values()].some((filter) => filter.ownerVoice === name),
+          compositeOutputs: (name) => (languageCompositeOutputs.get(name) ?? []).map((item) => item.name),
+        },
+        evalNumber,
+        new Set(routes.keys()),
+      );
+      if (resolvedRoute) {
+        diagnostics.push(...resolvedRoute.diagnostics);
+        for (const route of resolvedRoute.routes) {
+          routes.set(`${route.source}->${route.target}`, route);
         }
-        const compositeSource = voices.get(sourceName)?.engine === 'composite';
-        const standardSourcePorts = new Set(['out','aux','out_L','out_R','out1','out2','out3','out4','t1','t2','t3','x1','x2','x3','y','lp','hp','bp','np']);
-        if (compositeSource) {
-          const exposed = (languageCompositeOutputs.get(sourceName) ?? []).map((item) => item.name);
-          if (sourcePort !== 'out' && !exposed.includes(sourcePort)) {
-            diagnostics.push({ line: lineNumber, message: `composite '${sourceName}' does not expose output '${sourcePort}'` });
-            continue;
-          }
-        } else if (!standardSourcePorts.has(sourcePort)) {
-          diagnostics.push({ line: lineNumber, message: `unknown output '${sourcePort}' on ${sourceName}` });
-          continue;
-        }
-        if (sourcePort === 'aux' && (!voices.has(sourceName) || voices.get(sourceName)?.engine === 'composite')) {
-          diagnostics.push({ line: lineNumber, message: `aux output is only available on Voice objects: ${sourceName}` });
-          continue;
-        }
-        if (sourcePort === 'lp' || sourcePort === 'hp' || sourcePort === 'bp' || sourcePort === 'np') {
-          const standaloneFilter = filters.has(sourceName);
-          const embeddedFilter = voices.has(sourceName) && [...filters.values()].some((filter) => filter.ownerVoice === sourceName);
-          if (!standaloneFilter && !embeddedFilter) {
-            diagnostics.push({ line: lineNumber, message: `${sourcePort} output requires a FILTER: ${sourceName}` });
-            continue;
-          }
-        }
-        if (/^out[1-4]$/.test(sourcePort) && !swells.has(sourceName)) {
-          diagnostics.push({ line: lineNumber, message: `${sourcePort} is only available on Swell objects: ${sourceName}` });
-          continue;
-        }
-        if ((sourcePort === 'out_L' || sourcePort === 'out_R')
-          && !mists.has(sourceName)
-          && !languageDrumkits.has(sourceName)) {
-          diagnostics.push({ line: lineNumber, message: `${sourcePort} is only available on stereo objects: ${sourceName}` });
-          continue;
-        }
-        if (targetPort === 'trig') {
-          if (!voices.has(targetName) && !swells.has(targetName) && !mists.has(targetName)) { diagnostics.push({ line: lineNumber, message: `trigger input is only available on Voice, Swell or Mist objects: ${targetName}` }); continue; }
-        } else if (targetPort === 'clock') {
-          if (!swells.has(targetName)) { diagnostics.push({ line: lineNumber, message: `clock input is only available on Swell objects: ${targetName}` }); continue; }
-        } else if (targetPort === 'v_oct') {
-          if (!voices.has(targetName) && !swells.has(targetName)) { diagnostics.push({ line: lineNumber, message: `v_oct input is only available on Voice or Swell objects: ${targetName}` }); continue; }
-        } else if (targetPort === 'harmo' || targetPort === 'timbre' || targetPort === 'morph') {
-          if (!voices.has(targetName)) { diagnostics.push({ line: lineNumber, message: `${targetPort} input is only available on Voice objects: ${targetName}` }); continue; }
-        } else if (targetPort === 'out_L' || targetPort === 'out_R') {
-          if (targetName !== 'Audio') {
-            diagnostics.push({ line: lineNumber, message: `${targetPort} is only available on Audio for now: ${targetName}` });
-            continue;
-          }
-        } else if (targetPort === 'inL' || targetPort === 'inR') {
-          if (!mists.has(targetName)) { diagnostics.push({ line: lineNumber, message: `${targetPort} is only available on Mist objects: ${targetName}` }); continue; }
-        } else if (targetPort === 'in' && mists.has(targetName)) {
-          // Mono convenience input feeding both Mist channels.
-        } else if (targetPort === 'in' && filters.has(targetName)) {
-          // Mono FILTER input.
-        } else if (targetPort === 'in' && voices.get(targetName)?.engine === 'resonator') {
-          // Rings/Resonator has one mono external excitation input.
-        } else if ((targetPort === 'in' || targetPort === 'in2') && voices.get(targetName)?.engine === 'matter') {
-          // Elements/Matter exposes its two original mono external excitation inputs.
-        } else if (!(targetName === 'Audio' && targetPort === 'out') && !gains.has(targetName)) {
-          diagnostics.push({ line: lineNumber, message: `unknown or non-input object: ${targetName}` });
-          continue;
-        }
-
-        const amount = amountExpression === null ? 100 : evalNumber(amountExpression, lineNumber, 'route amount');
-        if (amount === undefined) continue;
-        const error = routeAmountError(amount);
-        if (error) {
-          diagnostics.push({ line: lineNumber, message: error });
-          continue;
-        }
-
-        const kind: SignalKind = sourceName === 'Clock' || clockSources.has(sourceName)
-          ? 'trigger'
-          : /^t[1-3]$/.test(sourcePort)
-            ? 'gate'
-            : 'signal';
-
-        const addRoute = (source: string, target: string): void => {
-          const key = `${source}->${target}`;
-          if (routes.has(key)) {
-            diagnostics.push({ line: lineNumber, message: `duplicate audio route: ${source} -> ${target}` });
-            return;
-          }
-          routes.set(key, { source, target, amount, kind });
-        };
-
-        const sourceIsStereoShorthand =
-          (mists.has(sourceName) || languageDrumkits.has(sourceName))
-          && sourcePort === 'out';
-        const targetIsAudioStereo = targetName === 'Audio' && targetPort === 'out';
-
-        if (targetIsAudioStereo) {
-          if (sourceIsStereoShorthand) {
-            addRoute(`${sourceName}.out_L`, 'Audio.out_L');
-            addRoute(`${sourceName}.out_R`, 'Audio.out_R');
-            results.push({ message: `${sourceName}.out stereo -> Audio.out stereo @ ${formatNumber(amount)}%` });
-          } else {
-            const source = `${sourceName}.${sourcePort}`;
-            // Mono -> stereo duplicates to both channels.
-            addRoute(source, 'Audio.out_L');
-            addRoute(source, 'Audio.out_R');
-            results.push({ message: `${source} -> Audio.out stereo @ ${formatNumber(amount)}%` });
-          }
-        } else {
-          if (sourceIsStereoShorthand) {
-            diagnostics.push({
-              line: lineNumber,
-              message: `${sourceName}.out is stereo; select ${sourceName}.out_L or ${sourceName}.out_R for a mono destination`,
-            });
-            continue;
-          }
-
-          const source = `${sourceName}.${sourcePort}`;
-          const target = `${targetName}.${targetPort}`;
-          addRoute(source, target);
-          results.push({ message: `${source} -> ${target} @ ${formatNumber(amount)}%` });
-        }
+        for (const message of resolvedRoute.messages) results.push({ message });
         continue;
       }
 
@@ -2614,6 +2527,7 @@ export class SonusRuntime {
     }
 
 
+
     for (const cycle of languageParameterCycles) {
       if (!voices.has(cycle.voice)) {
         diagnostics.push({ line: cycle.line, message: `parameter cycle references unknown Voice: ${cycle.voice}` });
@@ -2646,96 +2560,19 @@ export class SonusRuntime {
         continue;
       }
 
-      const parameter = directive.parameter;
-      if (parameter === 'model') {
-        const model = directive.value.toLowerCase();
-        if (model !== 'swell' && model !== 'dices' && model !== 'composite') {
-          diagnostics.push({ line: directive.line, message: 'MOD model expects swell, dices, or composite' });
-          continue;
-        }
-        swell.model = model;
-        swell.parameters.set('MODEL', model.toUpperCase());
-        continue;
-      }
-
-      if (parameter === 'ratebeat') {
-        const beats = Number(directive.value);
-        if (!Number.isFinite(beats) || beats <= 0) {
-          diagnostics.push({ line: directive.line, message: 'MOD rate beat value must be greater than 0' });
-          continue;
-        }
-        swell.frequency = Math.max(0.001, clockBpm / 60 / beats);
-        swell.parameters.set('RATE', `${formatNumber(beats)} BEAT`);
-        continue;
-      }
-
-      if (parameter === 'freq') {
-        const value = Number(directive.value);
-        if (!Number.isFinite(value) || value <= 0 || value > 10000) {
-          diagnostics.push({ line: directive.line, message: 'MOD rate resolves outside the supported frequency range' });
-          continue;
-        }
-        swell.frequency = value;
-        swell.parameters.set('RATE', `${formatNumber(value)} HZ`);
-        continue;
-      }
-
-      if (parameter === 'slope' || parameter === 'shape' || parameter === 'smooth' || parameter === 'shift') {
-        const value = Number(directive.value);
-        if (!Number.isFinite(value) || value < 0 || value > 100) {
-          diagnostics.push({ line: directive.line, message: `MOD ${parameter} expects 0..100` });
-          continue;
-        }
-        swell[parameter] = value;
-        swell.parameters.set(parameter.toUpperCase(), `${formatNumber(value)}%`);
-        continue;
-      }
-
-      if (parameter === 'spread' || parameter === 'bias' || parameter === 'steps' || parameter === 'deja' || parameter === 'diversity') {
-        const value = Number(directive.value);
-        if (!Number.isFinite(value) || value < 0 || value > 100) {
-          diagnostics.push({ line: directive.line, message: `MOD dices ${parameter} expects 0..100` });
-          continue;
-        }
-        swell[parameter] = value;
-        swell.parameters.set(parameter.toUpperCase(), `${formatNumber(value)}%`);
-        continue;
-      }
-
-      if (parameter === 'length') {
-        const value = Number(directive.value);
-        if (!Number.isInteger(value) || value < 1 || value > 16) {
-          diagnostics.push({ line: directive.line, message: 'MOD dices length expects 1..16' });
-          continue;
-        }
-        swell.length = value;
-        swell.parameters.set('LENGTH', `${value}`);
-        continue;
-      }
-
-      if (parameter === 'output') {
-        const modes: Record<string, number> = { different: 0, amplitude: 1, phase: 2, frequency: 3 };
-        const mode = modes[directive.value.toLowerCase()];
-        if (mode === undefined) {
-          diagnostics.push({ line: directive.line, message: 'MOD relation expects phase, amplitude, frequency, or different' });
-          continue;
-        }
-        swell.outputMode = mode;
-        swell.parameters.set('RELATION', directive.value.toUpperCase());
-        continue;
-      }
-
-      if (parameter === 'range') {
-        const normalized = directive.value.toLowerCase();
-        if (normalized !== 'control' && normalized !== 'audio') {
-          diagnostics.push({ line: directive.line, message: 'MOD range expects control or audio' });
-          continue;
-        }
-        swell.range = normalized === 'audio' ? 1 : 0;
-        swell.parameters.set('RANGE', normalized.toUpperCase());
-      }
+      const error = applyModSetDirective(swell, directive, clockBpm, formatNumber);
+      if (error) diagnostics.push({ line: directive.line, message: error });
     }
 
+    for (const [name, metadata] of languageMods) {
+      const mod = swells.get(name);
+      if (mod?.model === 'generic') {
+        diagnostics.push({
+          line: 1,
+          message: `MOD '${metadata.displayName}' requires an explicit model (for example: model lfo, model swell, or model dices)`,
+        });
+      }
+    }
 
     const variableViews: VariableViewState[] = [];
     const seenVariableViews = new Set<string>();
@@ -2807,7 +2644,7 @@ export class SonusRuntime {
 
           if (parameter === 'freq') continue;
           if (parameter === 'model') continue;
-          if (parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph') continue;
+          if (parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph' || parameter === 'density') continue;
         }
 
         match = bodyLine.match(/^([A-Za-z_]\w*)\s*=\s*(.+)$/);
@@ -2874,7 +2711,7 @@ export class SonusRuntime {
         else if (swell) value = `${formatNumber(swell.frequency)} HZ`;
       } else if (parameter === 'model' && voice) {
         value = voice.engine === 'macro' ? formatVoiceModel(voice.model) : voice.soundId.toUpperCase();
-      } else if ((parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph' || parameter === 'width') && voice) {
+      } else if ((parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph' || parameter === 'width' || parameter === 'density') && voice) {
         value = `${formatNumber(voice[parameter])}%`;
       } else if (parameter === 'level' && gain) {
         value = `${formatNumber(gain.level)}%`;
@@ -2926,11 +2763,11 @@ export class SonusRuntime {
     const moduleModViewSignals = (name: string): string[] => {
       const mod = swells.get(name);
       if (!mod) return [];
-      if (mod.model === 'dices') return [`${name}.x1`, `${name}.x2`, `${name}.x3`, `${name}.y`];
-      if (mod.model === 'composite') {
-        return (languageCompositeOutputs.get(name) ?? []).map((output) => `${name}.${output.name}`);
-      }
-      return [1, 2, 3, 4].map((port) => `${name}.out${port}`);
+      return modViewSignals(
+        name,
+        mod,
+        (languageCompositeOutputs.get(name) ?? []).map((output) => output.name),
+      );
     };
 
     for (const name of moduleViews) {
@@ -2942,19 +2779,28 @@ export class SonusRuntime {
           signal: signals[0],
           signals,
           signalKind: 'signal',
-          port: mod.model === 'dices'
+          port: mod.model === 'lfo'
+            ? signals.map((signal) => signal.slice(signal.lastIndexOf('.') + 1).toUpperCase()).join(' / ')
+            : mod.model === 'dices'
             ? 'X1 / X2 / X3 / Y'
             : mod.model === 'composite'
               ? signals.map((signal) => signal.slice(signal.lastIndexOf('.') + 1).toUpperCase()).join(' / ')
-              : 'OUT 1-4',
+              : mod.model === 'swell'
+                ? 'OUT 1-4'
+                : 'MOD',
         });
       } else if (voices.has(name)) {
-        ownerViews.push({
-          signal: `${name}.out`,
-          signals: [`${name}.out`, `${name}.aux`],
-          signalKind: 'signal',
-          port: 'OUT / AUX',
-        });
+        const voice = voices.get(name)!;
+        if (voice.engine === 'sample') {
+          ownerViews.push({ signal: `${name}.out_L`, signalKind: 'signal', port: 'SAMPLE', display: 'sample', owner: name, sampleAlias: voice.sampleAlias ?? '', sampleStart: voice.sampleStart, sampleEnd: voice.sampleEnd, sampleSlices: voice.sampleSlices });
+        } else {
+          ownerViews.push({
+            signal: `${name}.out`,
+            signals: [`${name}.out`, `${name}.aux`],
+            signalKind: 'signal',
+            port: 'OUT / AUX',
+          });
+        }
       } else if (mists.has(name)) {
         ownerViews.push({
           signal: `${name}.out_L`,
@@ -3065,7 +2911,7 @@ export class SonusRuntime {
       }),
       ...[...languageDrumkits.entries()].map(([name, definition]) => ({
         id: name, label: `${name.toUpperCase()} : DRUMKIT`, kind: 'module' as const,
-        parameters: [{ name: 'KIT', value: definition.kit.toUpperCase() }, ...(definition.disabled ? [{ name: 'STATE', value: 'DISABLED' }] : []), ...languageDrumSlots.filter((slot) => slot.drumkit === name).map((slot) => ({ name: slot.alias.toUpperCase(), value: `${slot.voice}${slot.amount > 0 ? ` · every ${slot.amount} ${slot.unit}` : ''}` }))],
+        parameters: [...(definition.kit ? [{ name: 'KIT', value: definition.kit.toUpperCase() }] : []), ...(definition.disabled ? [{ name: 'STATE', value: 'DISABLED' }] : []), ...languageDrumSlots.filter((slot) => slot.drumkit === name).map((slot) => ({ name: slot.alias.toUpperCase(), value: `${slot.voice === 'sample' ? `sample ${slot.sampleAlias}` : slot.voice}${slot.amount > 0 ? ` · every ${slot.amount} ${slot.unit}` : ''}` }))],
         views: embeddedViews.get(name),
       })),
       ...[...mists.entries()].map(([name, definition]) => {
@@ -3265,6 +3111,11 @@ export class SonusRuntime {
       }
     }
 
+    for (const [name, definition] of voices) {
+      if (definition.engine === 'sample' && !definition.sampleAlias) diagnostics.push({ line: 0, message: `sample VOICE '${name}' requires SAMPLE <asset>` });
+    }
+    if (diagnostics.length > 0) throw new SonusEvaluationError(diagnostics);
+
     const program: AudioProgram = {
       clock: { bpm: clockBpm, jitter: masterJitter, drift: masterTimingDrift },
       mainLevel,
@@ -3332,11 +3183,13 @@ export class SonusRuntime {
           .map(([name]) => buildCompositeDefinition(name, 'mod', true, 100, null, false)),
       ],
       basicVoices: [...voices.entries()]
-        .filter(([, definition]) => definition.engine === 'oscillator')
+        .filter(([, definition]) => definition.engine === 'oscillator' || definition.engine === 'noise')
         .map(([name, definition]) => ({
           name,
           enabled: !definition.disabled,
-          waveform: definition.soundId as 'sine' | 'triangle' | 'sawtooth' | 'ramp' | 'square',
+          waveform: (definition.engine === 'noise' ? 'noise' : definition.soundId) as 'sine' | 'triangle' | 'sawtooth' | 'ramp' | 'square' | 'noise',
+          noiseModel: definition.engine === 'noise' ? definition.soundId.replace(/^noise\./, '') as 'white' | 'dust' | 'clocked' | 'fractal' : null,
+          density: definition.density,
           level: definition.level,
           frequency: definition.frequency,
           dynamicPitch: languageSequences.has(name) || languageTuringVoiceSources.has(name) || languageConstellationReaders.has(name) || languageSnakeReaders.has(name),
@@ -3356,6 +3209,16 @@ export class SonusRuntime {
           timbre: definition.timbre,
           morph: definition.morph,
         })),
+      lfos: [...swells.entries()]
+        .filter(([, definition]) => definition.model === 'lfo')
+        .map(([name, definition]) => ({
+          name,
+          frequency: definition.frequency,
+          outputs: [...definition.outputs],
+        })),
+      noiseMods: [...swells.entries()]
+        .filter(([, definition]) => definition.model === 'noise')
+        .map(([name, definition]) => ({ name, noiseModel: definition.noiseModel, frequency: definition.frequency, density: definition.density })),
       swells: [...swells.entries()]
         .filter(([, definition]) => definition.model === 'swell')
         .map(([name, definition]) => ({
@@ -3370,6 +3233,7 @@ export class SonusRuntime {
           range: definition.range,
         })),
       drumkits: [...languageDrumkits.keys()].map((name) => ({ name })),
+      samples: [...voices.entries()].filter(([, definition]) => definition.engine === 'sample').map(([name, definition]) => ({ name, alias: definition.sampleAlias ?? '', enabled: !definition.disabled, level: definition.level, frequency: definition.frequency, rootFrequency: definition.sampleRootFrequency, start: definition.sampleStart, end: definition.sampleEnd, loop: definition.sampleLoop, reverse: definition.sampleReverse, slices: definition.sampleSlices, initialSlice: definition.sampleInitialSlice, initialSliceReverse: definition.sampleInitialSliceReverse })),
       dices: [...swells.entries()]
         .filter(([, definition]) => definition.model === 'dices')
         .map(([name, definition]) => ({
@@ -3458,9 +3322,14 @@ export class SonusRuntime {
             for (const signal of moduleModViewSignals(name)) monitors.set(signal, 'signal');
           } else if (voices.has(name)) {
             const voice = voices.get(name)!;
-            monitors.set(`${name}.out`, 'signal');
-            if (voice.engine !== 'composite') monitors.set(`${name}.aux`, 'signal');
-            else for (const output of languageCompositeOutputs.get(name) ?? []) monitors.set(`${name}.${output.name}`, 'signal');
+            if (voice.engine === 'sample') {
+              // The sample module view renders directly from asset PCM and the
+              // worklet playhead, so it does not need analyser monitor taps.
+            } else {
+              monitors.set(`${name}.out`, 'signal');
+              if (voice.engine !== 'composite') monitors.set(`${name}.aux`, 'signal');
+              else for (const output of languageCompositeOutputs.get(name) ?? []) monitors.set(`${name}.${output.name}`, 'signal');
+            }
           } else if (mists.has(name)) {
             monitors.set(`${name}.out_L`, 'signal');
             monitors.set(`${name}.out_R`, 'signal');
@@ -3698,6 +3567,16 @@ export class SonusRuntime {
         [...languageDrumkits.entries()].filter(([, definition]) => definition.disabled).map(([name]) => name),
       );
       this.audio.applyProgram(program, { hotReload });
+      if (applyAudio) {
+        const preparedSamples = new Set<string>();
+        for (const slot of languageDrumSlots) {
+          if (slot.voice !== 'sample' || !slot.sampleAlias) continue;
+          const key = `${slot.drumkit}:${slot.sampleAlias}`;
+          if (preparedSamples.has(key)) continue;
+          this.audio.prepareDrumkitSample(slot.drumkit, slot.sampleAlias);
+          preparedSamples.add(key);
+        }
+      }
 
     for (const slot of languageDrumSlots) {
       if (slot.amount <= 0) continue;
@@ -3744,10 +3623,19 @@ export class SonusRuntime {
           laneView.revision += 1;
         }
 
-        this.audio.triggerDrumkit(slot.drumkit, slot.voice, {
-          ...slot.params,
-          level,
-        });
+        if (slot.voice === 'sample' && slot.sampleAlias) {
+          this.audio.triggerDrumkitSample(slot.drumkit, slot.sampleAlias, {
+            level,
+            pan: slot.params.pan,
+            tune: slot.params.tune,
+            decay: slot.params.decay,
+          });
+        } else if (slot.voice !== 'sample') {
+          this.audio.triggerDrumkit(slot.drumkit, slot.voice, {
+            ...slot.params,
+            level,
+          });
+        }
       };
 
       if (slot.unit === 'beat') this.scheduler.addBeatJob(humanizeStateKey, slot.amount, fire, slot.loose, slot.clockSource);
@@ -4051,12 +3939,65 @@ export class SonusRuntime {
     const triggerVoiceEvent = (name: string): void => {
       for (const trigger of envelopeTriggers.get(name) ?? []) trigger();
       const voice = voices.get(name);
-      if (voice && (voice.lpg || voice.engine === 'resonator' || (voice.engine === 'matter' && !languageDriveEvery.has(name)))) this.audio.triggerVoice(name);
+      if (voice && (voice.lpg || voice.engine === 'resonator' || voice.engine === 'sample' || (voice.engine === 'matter' && !languageDriveEvery.has(name)))) this.audio.triggerVoice(name);
     };
 
     if (!hotReload) {
       for (const [name] of voices) {
         triggerVoiceEvent(name);
+      }
+    }
+
+
+    for (const definition of languageSampleSlices) {
+      const voice = voices.get(definition.voice);
+      if (definition.amount <= 0 || !voice || voice.engine !== 'sample' || voice.sampleSlices < 1 || definition.items.length === 0) continue;
+      let cursor = definition.mode === 'reverse' ? definition.items.length - 1 : 0;
+      let direction = 1;
+      let driftRatio = 1;
+
+      const choose = (): LanguageSampleSliceItem => {
+        if (definition.mode === 'random') {
+          const total = definition.items.reduce((sum, item) => sum + item.weight, 0);
+          let pick = random() * total;
+          for (const item of definition.items) { pick -= item.weight; if (pick < 0) return item; }
+          return definition.items[definition.items.length - 1];
+        }
+        const item = definition.items[Math.max(0, Math.min(definition.items.length - 1, cursor))];
+        if (definition.mode === 'forward') cursor = (cursor + 1) % definition.items.length;
+        else if (definition.mode === 'reverse') cursor = (cursor - 1 + definition.items.length) % definition.items.length;
+        else if (definition.mode === 'pendulum') {
+          if (definition.items.length > 1) {
+            cursor += direction;
+            if (cursor >= definition.items.length) { direction = -1; cursor = definition.items.length - 2; }
+            else if (cursor < 0) { direction = 1; cursor = 1; }
+          }
+        } else if (definition.mode === 'walk') {
+          if (definition.items.length > 1) {
+            cursor += random() < 0.5 ? -1 : 1;
+            if (cursor < 0) cursor = 1;
+            else if (cursor >= definition.items.length) cursor = definition.items.length - 2;
+          }
+        }
+        return item;
+      };
+
+      const fire = (): void => {
+        if (definition.chance < 100 && random() * 100 >= definition.chance) return;
+        const item = choose();
+        this.audio.triggerSampleSlice(definition.voice, item.index, voice.sampleSlices, voice.sampleStart, voice.sampleEnd, item.reverse);
+      };
+
+      if (definition.unit === 'beat') {
+        this.scheduler.addBeatJob(`sample-slice:${definition.voice}`, definition.amount, fire, definition.loose, definition.clockSource);
+      } else {
+        const baseMs = definition.unit === 'sec' ? definition.amount * 1000 : definition.amount;
+        this.scheduler.addWallJob(`sample-slice:${definition.voice}`, baseMs, fire, () => {
+          if (definition.drift) { driftRatio += (random() - 0.5) * 0.06; driftRatio = Math.min(1.2, Math.max(0.8, driftRatio)); }
+          else driftRatio = 1;
+          const looseRatio = definition.loose ? 0.94 + random() * 0.12 : 1;
+          return baseMs * driftRatio * looseRatio;
+        });
       }
     }
 
@@ -4759,13 +4700,14 @@ export class SonusRuntime {
         voice.frequency = frequency;
         this.audio.setVoiceParameter(name, 'freq', frequency);
         updateInlinePiano('voice', name, frequency);
-        triggerVoiceEvent(name);
+        const sliceOwnsTrigger = voice.engine === 'sample' && languageSampleSlices.some((definition) => definition.voice === name && definition.amount > 0);
+        if (!sliceOwnsTrigger) triggerVoiceEvent(name);
 
         const retrig = sequence
           ? sequenceFavorForValue(frequency, sequence.favor, 'frequency')
               .find((entry) => entry.operator === 'retrig')
           : undefined;
-        if ((voice.lpg || voice.engine === 'resonator' || (voice.engine === 'matter' && !languageDriveEvery.has(name))) && retrig && retrig.amount > 1) {
+        if ((voice.lpg || voice.engine === 'sample' || voice.engine === 'resonator' || (voice.engine === 'matter' && !languageDriveEvery.has(name))) && retrig && retrig.amount > 1) {
           const count = Math.round(retrig.amount);
           const stepMs = cycle.unit === 'beat'
             ? Math.max(1, 60000 / Math.max(1, this.audio.getClockStatus().bpm) * cycle.amount)
@@ -4960,6 +4902,126 @@ export class SonusRuntime {
       }
     }
 
+    if (languageControlParameters.length > 0) {
+      const parsedControls = languageControlParameters.map((definition) => ({
+        ...definition,
+        ast: parseControlExpression(definition.expression),
+        statePrefix: `${definition.ownerKind}:${definition.owner}.${definition.parameter}:${definition.expression}`,
+      }));
+      const applyControlValue = (control: typeof parsedControls[number], rawValue: number): void => {
+        const value = Math.max(control.min, Math.min(control.max, rawValue));
+        if (control.ownerKind === 'voice') {
+          if (control.parameter === 'level') this.audio.setVoiceLevel(control.owner, value);
+          else this.audio.setVoiceParameter(
+            control.owner,
+            control.parameter as Parameters<AudioEngine['setVoiceParameter']>[1],
+            value,
+          );
+          return;
+        }
+        if (control.ownerKind === 'filter') {
+          if (control.parameter === 'cutoff') {
+            this.audio.setFilterCutoff(control.owner, 20 * (1000 ** (value / 100)));
+          } else if (control.parameter === 'resonance') this.audio.setFilterResonance(control.owner, value);
+          else if (control.parameter === 'drive') this.audio.setFilterDrive(control.owner, value);
+          return;
+        }
+        this.audio.setMistParameter(
+          control.owner,
+          control.parameter as Parameters<AudioEngine['setMistParameter']>[1],
+          value,
+        );
+      };
+      this.scheduler.addWallJob('continuous-control-expressions', 1000 / 60, () => {
+        const nowSeconds = performance.now() / 1000;
+        const bpm = Math.max(1e-9, this.audio.getClockStatus().bpm || clockBpm || 120);
+        for (const control of parsedControls) {
+          try {
+            const value = evaluateControlExpression(control.ast, {
+              resolveScalar: (path) => {
+                if (path.length === 1) {
+                  const scalar = variables.get(path[0]);
+                  return typeof scalar === 'number' && Number.isFinite(scalar) ? scalar : undefined;
+                }
+                const scalar = resolveMember(path);
+                return typeof scalar === 'number' && Number.isFinite(scalar) ? scalar : undefined;
+              },
+              resolveMod: (path) => {
+                if (path.length !== 2 || !swells.has(path[0])) return undefined;
+                const port = path[1].toLowerCase();
+                const channel = port === 'out' || port === 'out1' || port === 'x1' ? 1
+                  : port === 'out2' || port === 'x2' ? 2
+                  : port === 'out3' || port === 'x3' ? 3
+                  : port === 'out4' || port === 'y' ? 4 : 0;
+                if (channel === 0) return undefined;
+                const sample = this.audio.readModOutput(path[0], channel);
+                return sample === null || !Number.isFinite(sample) ? undefined : Math.max(-1, Math.min(1, sample));
+              },
+              nowSeconds,
+              bpm,
+              random: () => this.nextRandom(),
+              state: this.inlineControlState,
+              statePrefix: control.statePrefix,
+            });
+            applyControlValue(control, value);
+          } catch (error) {
+            if (!(error instanceof ControlExpressionError)) console.error(error);
+          }
+        }
+      });
+    }
+
+    const dynamicLfoLevels = [...swells.entries()]
+      .filter(([, definition]) => definition.model === 'lfo')
+      .flatMap(([name, definition]) => definition.outputs.flatMap((output, index) =>
+        output?.levelExpression ? [{ name, channel: index + 1, expression: output.levelExpression }] : [],
+      ));
+
+    if (dynamicLfoLevels.length > 0) {
+      const parsedControls = dynamicLfoLevels.map((definition) => ({
+        ...definition,
+        ast: parseControlExpression(definition.expression),
+        statePrefix: `mod:${definition.name}.out${definition.channel}:level:${definition.expression}`,
+      }));
+      this.scheduler.addWallJob('control-expressions', 1000 / 60, () => {
+        const nowSeconds = performance.now() / 1000;
+        const bpm = Math.max(1e-9, this.audio.getClockStatus().bpm || clockBpm || 120);
+        for (const control of parsedControls) {
+          try {
+            const value = evaluateControlExpression(control.ast, {
+              resolveScalar: (path) => {
+                if (path.length === 1) {
+                  const scalar = variables.get(path[0]);
+                  return typeof scalar === 'number' && Number.isFinite(scalar) ? scalar : undefined;
+                }
+                const scalar = resolveMember(path);
+                return typeof scalar === 'number' && Number.isFinite(scalar) ? scalar : undefined;
+              },
+              resolveMod: (path) => {
+                if (path.length !== 2 || !swells.has(path[0])) return undefined;
+                const port = path[1].toLowerCase();
+                const channel = port === 'out' || port === 'out1' || port === 'x1' ? 1
+                  : port === 'out2' || port === 'x2' ? 2
+                  : port === 'out3' || port === 'x3' ? 3
+                  : port === 'out4' || port === 'y' ? 4 : 0;
+                if (channel === 0) return undefined;
+                const value = this.audio.readModOutput(path[0], channel);
+                return value === null || !Number.isFinite(value) ? undefined : Math.max(-1, Math.min(1, value));
+              },
+              nowSeconds,
+              bpm,
+              random: () => this.nextRandom(),
+              state: this.inlineControlState,
+              statePrefix: control.statePrefix,
+            });
+            this.audio.setBasicModOutputLevel(control.name, control.channel, Math.max(0, Math.min(100, value)));
+          } catch (error) {
+            if (!(error instanceof ControlExpressionError)) console.error(error);
+          }
+        }
+      });
+    }
+
     this.scheduler.start();
 
       for (const handler of whenHandlers) {
@@ -5143,7 +5205,7 @@ function parseWhenHeader(header: string): { rate: number; cycle: CycleCondition 
 
   const source = args[0].match(/^Clock\.out(?:\(\s*["']([^"']+)["']\s*\))?$/);
   if (!source) return null;
-  const rate = source[1] ? parseClockRate(source[1])?.rate : 1;
+  const rate = source[1] ? directives.parseClockRate(source[1])?.rate : 1;
   if (rate === undefined) return null;
 
   let cycle: CycleCondition | null = null;
@@ -5187,694 +5249,6 @@ function matchesCycle(condition: CycleCondition | null, eventIndex: number): boo
   return ((eventIndex - 1) % condition.length!) + 1 === condition.position;
 }
 
-function parseLanguageLogicDirective(line: string): { name: string; view: boolean } | null {
-  const match = line.match(/^__logic\("([A-Za-z_]\w*)",(true|false)\)$/);
-  if (!match) return null;
-  return { name: match[1], view: match[2] === 'true' };
-}
-
-function parseLanguageLogicNodeDirective(line: string): LanguageLogicNodeDefinition | null {
-  const match = line.match(/^__logicnode\("([A-Za-z_]\w*)","([A-Za-z_]\w*)","(and|or|xor|nand|nor|divider|counter|flipflop)","((?:[^"\\]|\\.)*)",(\d+)\)$/);
-  if (!match) return null;
-  try {
-    const inputs = JSON.parse(JSON.parse(`"${match[4]}"`)) as LanguageLogicInput[];
-    return { owner: match[1], name: match[2], operator: match[3] as LanguageLogicOperator, inputs, parameter: Number(match[5]) };
-  } catch {
-    return null;
-  }
-}
-
-function parseLanguageRegisterDeclaration(line: string): string | null {
-  return line.match(/^__register\("([A-Za-z_]\w*)"\)$/)?.[1] ?? null;
-}
-
-function parseLanguageRegisterModel(line: string): { name: string; model: 'shift' } | null {
-  const match = line.match(/^__registermodel\("([A-Za-z_]\w*)","shift"\)$/);
-  return match ? { name: match[1], model: 'shift' } : null;
-}
-
-function parseLanguageRegisterSize(line: string): { name: string; size: number } | null {
-  const match = line.match(/^__registersize\("([A-Za-z_]\w*)",(\d+)\)$/);
-  return match ? { name: match[1], size: Number(match[2]) } : null;
-}
-
-function parseLanguageRegisterSource(
-  line: string,
-): { name: string; source: string; mode: 'direct' | LifeReaderMode; amount: number } | null {
-  const match = line.match(/^__registersource\("([A-Za-z_]\w*)","([A-Za-z_]\w*)","(direct|order|random|walk|reverse|pendulum|first|last)",(\d+(?:\.\d+)?)\)$/);
-  return match ? {
-    name: match[1],
-    source: match[2],
-    mode: match[3] as 'direct' | LifeReaderMode,
-    amount: Number(match[4]),
-  } : null;
-}
-
-function parseLanguageRegisterWrite(line: string): { name: string; timing: LanguageCycleDefinition } | null {
-  const match = line.match(/^__registerwrite\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/);
-  if (!match) return null;
-  return {
-    name: match[1],
-    timing: {
-      amount: Number(match[2]),
-      unit: match[3] as 'ms' | 'sec' | 'beat',
-      chance: Number(match[4]),
-      drift: match[5] === 'true',
-      loose: match[6] === 'true',
-      clockSource: match[7],
-    },
-  };
-}
-
-function parseLanguageCompositePitch(line: string): { name: string } | null {
-  const match = line.match(/^__compositepitch\("([A-Za-z_]\w*)"\)$/);
-  return match ? { name: match[1] } : null;
-}
-
-function parseLanguageCompositeTune(line: string): LanguageCompositeTuneDefinition | null {
-  const match = line.match(/^__compositetune\("([A-Za-z_]\w*)","([A-Za-z_]\w*)","((?:[^"\\]|\\.)*)"\)$/);
-  if (!match) return null;
-  try {
-    const payload = JSON.parse(JSON.parse(`"${match[3]}"`));
-    if (payload?.mode === 'relative') {
-      return {
-        owner: match[1], node: match[2], mode: 'relative', octave: Number(payload.octave ?? 0), detune: Number(payload.detune ?? 0), ratio: Number(payload.ratio ?? 1),
-        values: [], selectionMode: 'order', selectionAmount: 0, favor: [], timing: null,
-      };
-    }
-    if (payload?.mode === 'absolute' && Array.isArray(payload.values) && payload.values.length > 0) {
-      const timing = payload.timing ? {
-        amount: Number(payload.timing.amount), unit: payload.timing.unit as 'ms'|'sec'|'beat', chance: Number(payload.timing.chance ?? 100),
-        drift: Boolean(payload.timing.drift), loose: Boolean(payload.timing.loose), clockSource: String(payload.timing.clockSource ?? 'Clock'),
-      } : null;
-      return {
-        owner: match[1], node: match[2], mode: 'absolute', octave: 0, detune: 0, ratio: 1,
-        values: payload.values.map(Number), selectionMode: payload.selectionMode ?? 'order', selectionAmount: Number(payload.selectionAmount ?? 0), favor: Array.isArray(payload.favor) ? payload.favor : [], timing,
-      };
-    }
-  } catch { return null; }
-  return null;
-}
-
-function parseLanguageCompositeEdge(line: string): { name: string; relation: 'fm'|'pm'|'am'|'ring'|'sync'; source: string; target: string; params: Record<string, number | boolean> } | null {
-  const match = line.match(/^__compositeedge\("([A-Za-z_]\w*)","(fm|pm|am|ring|sync)","([A-Za-z_]\w*)","([A-Za-z_]\w*)","((?:[^"\\]|\\.)*)"\)$/);
-  if (!match) return null;
-  let params: Record<string, number | boolean> = {};
-  try { params = JSON.parse(JSON.parse(`"${match[5]}"`)); } catch { return null; }
-  return { name: match[1], relation: match[2] as 'fm'|'pm'|'am'|'ring'|'sync', source: match[3], target: match[4], params };
-}
-
-function parseLanguageCompositeMix(line: string): { name: string; mix: string; inputs: Array<{ source: string; level: number; octave: number; detune: number }> } | null {
-  const match = line.match(/^__compositemix\("([A-Za-z_]\w*)","([A-Za-z_]\w*)","((?:[^"\\]|\\.)*)"\)$/);
-  if (!match) return null;
-  try {
-    const inputs = JSON.parse(JSON.parse(`"${match[3]}"`));
-    if (!Array.isArray(inputs)) return null;
-    return { name: match[1], mix: match[2], inputs };
-  } catch { return null; }
-}
-
-function parseLanguageCompositeOutput(line: string): { name: string; outputs: Array<{ name: string; level: number }> } | null {
-  const match = line.match(/^__compositeoutput\("([A-Za-z_]\w*)","((?:[^"\\]|\\.)*)"\)$/);
-  if (!match) return null;
-  try {
-    const outputs = JSON.parse(JSON.parse(`"${match[2]}"`));
-    if (!Array.isArray(outputs)) return null;
-    return { name: match[1], outputs };
-  } catch { return null; }
-}
-
-function parseLanguageRegisterPitch(line: string): LanguageRegisterVoiceDefinition | null {
-  const match = line.match(/^__registerpitch\("([A-Za-z_]\w*)","([A-Za-z_]\w*)",(\d+)\)$/);
-  return match ? { voice: match[1], register: match[2], stage: Number(match[3]) } : null;
-}
-
-function parseLanguageTuringDeclaration(line: string): string | null {
-  return line.match(/^__seq\("([A-Za-z_]\w*)"\)$/)?.[1] ?? null;
-}
-function parseLanguageTuringView(line: string): string | null {
-  return line.match(/^__seqview\("([A-Za-z_]\w*)"\)$/)?.[1] ?? null;
-}
-
-function parseLanguageSeqModel(line: string): { name: string; model: 'turing' | 'life' | 'constellation' | 'snake'; variant: LifeVariant } | null {
-  const match = line.match(/^__seqmodel\("([A-Za-z_]\w*)","(turing|life|constellation|snake)","(conway|highlife|seeds|day-night|morley)"\)$/);
-  return match ? { name: match[1], model: match[2] as 'turing' | 'life' | 'constellation' | 'snake', variant: match[3] as LifeVariant } : null;
-}
-function parseLanguageSnakeSize(line: string): { name: string; width: number; height: number } | null {
-  const match = line.match(/^__snakesize\("([A-Za-z_]\w*)",(\d+),(\d+)\)$/);
-  return match ? { name: match[1], width: Number(match[2]), height: Number(match[3]) } : null;
-}
-function parseLanguageSnakeMovement(line: string): { name: string; movement: SnakeMovement } | null {
-  const match = line.match(/^__snakemovement\("([A-Za-z_]\w*)","(snake|rows|columns|spiral|diagonal|bounce|random|walk)"\)$/);
-  return match ? { name: match[1], movement: match[2] as SnakeMovement } : null;
-}
-function parseLanguageSnakeMatrix(line: string): { name: string; explicit: boolean } | null {
-  const match = line.match(/^__snakematrix\("([A-Za-z_]\w*)",(true|false)\)$/);
-  return match ? { name: match[1], explicit: match[2] === 'true' } : null;
-}
-function parseLanguageSnakeReader(line: string): LanguageSnakeReaderDefinition | null {
-  const match = line.match(/^__snakereader\("([A-Za-z_]\w*)","([A-Za-z_]\w*)"\)$/);
-  return match ? { voice: match[1], seq: match[2] } : null;
-}
-function parseLanguageSeqSize(line: string): { name: string; size: 8 | 16 } | null {
-  const match = line.match(/^__seqsize\("([A-Za-z_]\w*)",(8|16)\)$/);
-  return match ? { name: match[1], size: Number(match[2]) as 8 | 16 } : null;
-}
-function parseLanguageLifeDensity(line: string): { name: string; density: number; maxDensity: number | null; respawn: boolean } | null {
-  const match = line.match(/^__lifedensity\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?),(true|false)\)$/);
-  if (!match) return null;
-  const maxDensity = Number(match[3]);
-  return { name: match[1], density: Number(match[2]), maxDensity: maxDensity < 0 ? null : maxDensity, respawn: match[4] === 'true' };
-}
-function parseLanguageTuringLength(line: string): { name: string; length: number } | null {
-  const match = line.match(/^__seqlength\("([A-Za-z_]\w*)",(\d+)\)$/);
-  return match ? { name: match[1], length: Number(match[2]) } : null;
-}
-function parseLanguageTuringChange(line: string): { name: string; change: number } | null {
-  const match = line.match(/^__seqchange\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?)\)$/);
-  return match ? { name: match[1], change: Number(match[2]) } : null;
-}
-function parseLanguageTuringValues(line: string): { name: string; values: number[] } | null {
-  const match = line.match(/^__seqvalues\("([A-Za-z_]\w*)","([^"]*)"\)$/);
-  return match ? { name: match[1], values: match[2].split('|').filter(Boolean).map(Number) } : null;
-}
-function parseLanguageSeqWeights(line: string): { name: string; weights: number[] } | null {
-  const match = line.match(/^__seqweights\("([A-Za-z_]\w*)","([^"]*)"\)$/);
-  return match ? { name: match[1], weights: match[2].split('|').filter(Boolean).map(Number) } : null;
-}
-function parseLanguageConstellationParam(line: string): { name: string; param: 'stepwise' | 'leap' | 'repeat' | 'memory' | 'phrase' | 'mutation'; value: number } | null {
-  const match = line.match(/^__constellationparam\("([A-Za-z_]\w*)","(stepwise|leap|repeat|memory|phrase|mutation)",(-?\d+(?:\.\d+)?)\)$/);
-  return match ? { name: match[1], param: match[2] as 'stepwise' | 'leap' | 'repeat' | 'memory' | 'phrase' | 'mutation', value: Number(match[3]) } : null;
-}
-function parseLanguageConstellationOctaves(line: string): { name: string; octaves: Array<{ octave: number; weight: number }> } | null {
-  const match = line.match(/^__constellationoctaves\("([A-Za-z_]\w*)","((?:[^"\\]|\\.)*)"\)$/);
-  if (!match) return null;
-  try {
-    return { name: match[1], octaves: JSON.parse(JSON.parse(`"${match[2]}"`) as string) as Array<{ octave: number; weight: number }> };
-  } catch { return null; }
-}
-function parseLanguageConstellationReader(line: string): LanguageConstellationReaderDefinition | null {
-  const match = line.match(/^__constellationreader\("([A-Za-z_]\w*)","([A-Za-z_]\w*)"\)$/);
-  return match ? { voice: match[1], seq: match[2] } : null;
-}
-function parseLanguageTuringVoice(line: string): { voice: string; seq: string } | null {
-  const match = line.match(/^__seqvoice\("([A-Za-z_]\w*)","([A-Za-z_]\w*)"\)$/);
-  return match ? { voice: match[1], seq: match[2] } : null;
-}
-function parseLanguageLifeReader(line: string): LanguageLifeReaderDefinition | null {
-  const match = line.match(/^__lifereader\("([A-Za-z_]\w*)","([A-Za-z_]\w*)","(order|random|walk|reverse|pendulum|first|last)",(\d+(?:\.\d+)?),(true|false)\)$/);
-  return match ? { voice: match[1], seq: match[2], mode: match[3] as LifeReaderMode, amount: Number(match[4]), view: match[5] === 'true' } : null;
-}
-function parseLanguageLifeEvolve(line: string): { name: string; timing: LanguageCycleDefinition } | null {
-  const match = line.match(/^__lifeevolve\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/);
-  if (!match) return null;
-  return { name: match[1], timing: { amount: Number(match[2]), unit: match[3] as 'ms'|'sec'|'beat', chance: Number(match[4]), drift: match[5] === 'true', loose: match[6] === 'true', clockSource: match[7] } };
-}
-
-function parseLanguageSequenceDirective(
-  line: string,
-): ({ name: string; values: number[]; mode: LanguageSequenceDefinition['mode']; amount: number; favor: LanguageSequenceFavorEntry[] }) | null {
-  const match = line.match(
-    /^__sequence\("([A-Za-z_]\w*)","([^"]*)","(order|random|walk|shuffle|reverse|pendulum)",(\d+(?:\.\d+)?),"((?:[^"\\]|\\.)*)"\)$/,
-  );
-  if (!match) return null;
-  let favor: LanguageSequenceFavorEntry[] = [];
-  try {
-    favor = JSON.parse(JSON.parse(`"${match[5]}"`) as string) as LanguageSequenceFavorEntry[];
-  } catch {
-    return null;
-  }
-  return {
-    name: match[1],
-    values: match[2].split('|').filter(Boolean).map(Number),
-    mode: match[3] as LanguageSequenceDefinition['mode'],
-    amount: Number(match[4]),
-    favor,
-  };
-}
-
-function parseLanguageFilterSequenceDirective(line: string): LanguageFilterSequenceDefinition | null {
-  const match = line.match(
-    /^__filtersequence\("([A-Za-z_]\w*)","([^"]*)","(order|random|walk|shuffle|reverse|pendulum)",(\d+(?:\.\d+)?),"((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/,
-  );
-  if (!match) return null;
-  let favor: LanguageSequenceFavorEntry[] = [];
-  try { favor = JSON.parse(JSON.parse(`"${match[5]}"`) as string) as LanguageSequenceFavorEntry[]; }
-  catch { return null; }
-  return {
-    filter: match[1],
-    values: match[2].split('|').filter(Boolean).map(Number),
-    mode: match[3] as LanguageSequenceDefinition['mode'],
-    amount: Number(match[4]),
-    favor,
-    interval: Number(match[6]),
-    unit: match[7] as LanguageFilterSequenceDefinition['unit'],
-    chance: Number(match[8]),
-    drift: match[9] === 'true',
-    loose: match[10] === 'true',
-    clockSource: match[11],
-  };
-}
-
-function parseLanguageCycleDirective(
-  line: string,
-): ({ name: string } & LanguageCycleDefinition) | null {
-  const match = line.match(
-    /^__cycle\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([^"]+)"\)$/,
-  );
-  if (!match) return null;
-  return {
-    name: match[1],
-    amount: Number(match[2]),
-    unit: match[3] as LanguageCycleDefinition['unit'],
-    chance: Number(match[4]),
-    drift: match[5] === 'true',
-    loose: match[6] === 'true',
-    clockSource: match[7],
-  };
-}
-
-function parseLanguageInlinePianoDirective(line: string): LanguageInlinePianoDefinition | null {
-  const match = line.match(
-    /^__inlinepiano\("(voice|fx|filter)","([A-Za-z_]\w*)","(note|scale)",(\d+),"([^"]*)"\)$/,
-  );
-  if (!match) return null;
-  return {
-    ownerKind: match[1] as 'voice' | 'fx' | 'filter',
-    owner: match[2],
-    property: match[3] as 'note' | 'scale',
-    line: Number(match[4]),
-    values: match[5].split('|').filter(Boolean).map(Number),
-  };
-}
-
-function parseLanguageInlineScalarDirective(line: string): LanguageInlineScalarDefinition | null {
-  const match = line.match(
-    /^__inlinescalar\("(voice|fx|filter)","([A-Za-z_]\w*)","([A-Za-z_]\w*)",(\d+),"((?:[^"\\]|\\.)*)"\)$/,
-  );
-  if (!match) return null;
-  let expression: string;
-  try { expression = JSON.parse(`"${match[5]}"`) as string; } catch { return null; }
-  return {
-    ownerKind: match[1] as 'voice' | 'fx' | 'filter',
-    owner: match[2],
-    property: match[3],
-    line: Number(match[4]),
-    expression,
-  };
-}
-
-function parseLanguageDelayTime(line: string): LanguageDelayTimeDefinition | null {
-  const match = line.match(/^__delaytime\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)"\)$/);
-  return match ? { name: match[1], amount: Number(match[2]), unit: match[3] as 'ms'|'sec'|'beat' } : null;
-}
-function parseLanguageDelayParam(line: string, lineNumber: number): LanguageDelayParamDefaultDefinition | null {
-  const match = line.match(/^__delayparam\("([A-Za-z_]\w*)","(lines|spread|spreadloose|reverse|pitchprob|pitchcount|pitch0|pitch1|pitch2|pitch3|pitch4|pitch5|pitch6|pitch7|pitch8|pitch9|pitch10|pitch11|pitch12|pitch13|pitch14|pitch15|tape|diffusion|pingpong)",(\d+(?:\.\d+)?)\)$/);
-  return match ? { name: match[1], parameter: match[2] as LanguageDelayParameter, expression: match[3], line: lineNumber } : null;
-}
-function parseLanguageDelayParamDefault(line: string, lineNumber: number): LanguageDelayParamDefaultDefinition | null {
-  const match = line.match(/^__delayparamdefault\("([A-Za-z_]\w*)","(lines|spread|spreadloose|reverse|pitchprob|pitchcount|pitch0|pitch1|pitch2|pitch3|pitch4|pitch5|pitch6|pitch7|pitch8|pitch9|pitch10|pitch11|pitch12|pitch13|pitch14|pitch15|tape|diffusion|pingpong)","((?:[^"\\]|\\.)*)"\)$/);
-  if (!match) return null; let expression: string; try { expression = JSON.parse(`"${match[3]}"`) as string; } catch { return null; }
-  return { name: match[1], parameter: match[2] as LanguageDelayParameter, expression, line: lineNumber };
-}
-function parseLanguageDelayParamCycle(line: string, lineNumber: number): LanguageDelayParamCycleDefinition | null {
-  const match = line.match(/^__delayparamcycle\("([A-Za-z_]\w*)","(lines|spread|spreadloose|reverse|pitchprob|pitchcount|pitch0|pitch1|pitch2|pitch3|pitch4|pitch5|pitch6|pitch7|pitch8|pitch9|pitch10|pitch11|pitch12|pitch13|pitch14|pitch15|tape|diffusion|pingpong)","((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/);
-  if (!match) return null; let expression: string; try { expression = JSON.parse(`"${match[3]}"`) as string; } catch { return null; }
-  return { name: match[1], parameter: match[2] as LanguageDelayParameter, expression, line: lineNumber, amount: Number(match[4]), unit: match[5] as 'ms'|'sec'|'beat', chance: Number(match[6]), drift: match[7] === 'true', loose: match[8] === 'true', clockSource: match[9] };
-}
-
-function parseLanguageFxMetadata(line: string): LanguageFxMetadata | null {
-  const match = line.match(/^__fxmeta\("([A-Za-z_]\w*)"(?:,"([^"]+)")?\)$/);
-  return match ? { name: match[1], modelId: match[2] ?? null } : null;
-}
-
-function parseLanguageFxParameterCycleDirective(
-  line: string,
-  lineNumber: number,
-): LanguageFxParameterCycleDefinition | null {
-  const match = line.match(
-    /^__fxparamcycle\("([A-Za-z_]\w*)","(position|size|pitch|density|texture|mix|spread|feedback|reverb)","((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/,
-  );
-  if (!match) return null;
-  let expression: string;
-  try { expression = JSON.parse(`"${match[3]}"`) as string; } catch { return null; }
-  return {
-    fx: match[1],
-    parameter: match[2] as LanguageFxParameter,
-    expression,
-    amount: Number(match[4]),
-    unit: match[5] as LanguageFxParameterCycleDefinition['unit'],
-    chance: Number(match[6]),
-    drift: match[7] === 'true',
-    loose: match[8] === 'true',
-    clockSource: match[9],
-    line: lineNumber,
-  };
-}
-
-function parseLanguageFxParameterDefaultDirective(
-  line: string,
-  lineNumber: number,
-): LanguageFxParameterDefaultDefinition | null {
-  const match = line.match(
-    /^__fxparamdefault\("([A-Za-z_]\w*)","(position|size|pitch|density|texture|mix|spread|feedback|reverb)","((?:[^"\\]|\\.)*)"\)$/,
-  );
-  if (!match) return null;
-  let expression: string;
-  try { expression = JSON.parse(`"${match[3]}"`) as string; } catch { return null; }
-  return { fx: match[1], parameter: match[2] as LanguageFxParameter, expression, line: lineNumber };
-}
-
-function parseLanguageFxPitchSequenceDirective(
-  line: string,
-): ({ name: string } & LanguageFxPitchSequenceDefinition) | null {
-  const match = line.match(
-    /^__fxsequence\("([A-Za-z_]\w*)","([^"]*)","(order|random|walk|shuffle|reverse|pendulum)",(\d+(?:\.\d+)?),"((?:[^"\\]|\\.)*)"\)$/,
-  );
-  if (!match) return null;
-  let favor: LanguageSequenceFavorEntry[] = [];
-  try {
-    favor = JSON.parse(JSON.parse(`"${match[5]}"`) as string) as LanguageSequenceFavorEntry[];
-  } catch {
-    return null;
-  }
-  return {
-    name: match[1],
-    values: match[2].split('|').filter(Boolean).map(Number),
-    mode: match[3] as LanguageFxPitchSequenceDefinition['mode'],
-    amount: Number(match[4]),
-    favor,
-  };
-}
-
-function parseLanguageFxPitchCycleDirective(
-  line: string,
-): { name: string; timing: LanguageCycleDefinition } | null {
-  const match = line.match(
-    /^__fxpitchcycle\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/,
-  );
-  if (!match) return null;
-  return {
-    name: match[1],
-    timing: {
-      amount: Number(match[2]),
-      unit: match[3] as LanguageCycleDefinition['unit'],
-      chance: Number(match[4]),
-      drift: match[5] === 'true',
-      loose: match[6] === 'true',
-      clockSource: match[7],
-    },
-  };
-}
-
-function parseLanguageFxModulationDirective(
-  line: string,
-  lineNumber: number,
-): LanguageFxModulationDefinition | null {
-  const match = line.match(
-    /^__fxmod\("([A-Za-z_]\w*)","(position|size|pitch|density|texture|mix|spread|feedback|reverb)","([A-Za-z_]\w*)",([1-4]),(-?\d+(?:\.\d+)?)\)$/,
-  );
-  if (!match) return null;
-  return {
-    fx: match[1],
-    parameter: match[2] as LanguageFxParameter,
-    mod: match[3],
-    channel: Number(match[4]) as 1 | 2 | 3 | 4,
-    depth: Number(match[5]),
-    line: lineNumber,
-  };
-}
-
-function parseLanguageModSetDirective(line: string, lineNumber: number): LanguageModSetDirective | null {
-  const match = line.match(
-    /^__modset\("([A-Za-z_]\w*)","(model|freq|ratebeat|slope|shape|smooth|shift|output|range|spread|bias|steps|deja|length|diversity)","((?:[^"\\]|\\.)*)"\);?$/,
-  );
-  if (!match) return null;
-
-  let value: string;
-  try {
-    value = JSON.parse(`"${match[3]}"`) as string;
-  } catch {
-    return null;
-  }
-
-  return {
-    internalName: match[1],
-    parameter: match[2] as LanguageModSetDirective['parameter'],
-    value,
-    line: lineNumber,
-  };
-}
-
-function parseLanguageModMetadata(line: string): LanguageModMetadata | null {
-  const match = line.match(/^__modmeta\("([A-Za-z_]\w*)","([A-Za-z_]\w*)","([A-Za-z_]\w*)?"\)$/);
-  if (!match) return null;
-  return { internalName: match[1], displayName: match[2], ownerVoice: match[3] || null };
-}
-
-function parseLanguageTuningDirective(line: string): number | null {
-  const match = line.match(/^__tuning\((\d+(?:\.\d+)?)\);?$/);
-  if (!match) return null;
-  const value = Number(match[1]);
-  return Number.isFinite(value) ? value : null;
-}
-
-function parseLanguageClockParentDirective(line: string): { name: string; parent: string; rate: number; rateLabel: string } | null {
-  const match = line.match(/^__clockparent\("([A-Za-z_]\w*)","([A-Za-z_]\w*)","([/*]\d+(?:\.\d+)?)"\)$/);
-  if (!match) return null;
-  const parsed = parseClockRate(match[3]);
-  return parsed ? { name: match[1], parent: match[2], rate: parsed.rate, rateLabel: parsed.label } : null;
-}
-
-function parseLanguageClockFeelDirective(line: string): { name: string; kind: 'jitter' | 'drift'; amount: number } | null {
-  const match = line.match(/^__clockfeel\("([A-Za-z_]\w*)","(jitter|drift)",(\d+(?:\.\d+)?)\)$/);
-  if (!match) return null;
-  return { name: match[1], kind: match[2] as 'jitter' | 'drift', amount: Number(match[3]) };
-}
-
-function parseLanguageMasterClockDirective(line: string, lineNumber: number): LanguageMasterClockDefinition | null {
-  const match = line.match(/^__masterclock\("((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(true|false),(\d+(?:\.\d+)?),(\d+(?:\.\d+)?)(?:,(true|false))?\)$/);
-  if (!match) return null;
-  let expression: string;
-  try { expression = JSON.parse(`"${match[1]}"`) as string; } catch { return null; }
-  return {
-    expression,
-    amount: Number(match[2]),
-    unit: match[3] as LanguageMasterClockDefinition['unit'],
-    drift: match[4] === 'true',
-    jitter: Number(match[5]),
-    timingDrift: Number(match[6]),
-    disabled: match[7] === 'true',
-    line: lineNumber,
-  };
-}
-
-function parseLanguageVcaDirective(line: string, lineNumber: number): LanguageVcaDefinition | null {
-  const match = line.match(/^__voicevca\("([A-Za-z_]\w*)","([A-Za-z_]\w*)","((?:[^"\\]|\\.)*)",(\d+)\)$/);
-  if (!match) return null;
-  try {
-    const raw = JSON.parse(`"${match[3]}"`) as string;
-    const spec = JSON.parse(raw) as LanguageEnvelopeSpec;
-    return { owner: match[1], output: match[2], spec, line: Number(match[4]) || lineNumber };
-  } catch {
-    return null;
-  }
-}
-
-function parseLanguageEnvelopeDirective(line: string, lineNumber: number): LanguageEnvelopeDefinition | null {
-  const match = line.match(/^__envelopeparam\("(voice|fx|filter)","([A-Za-z_]\w*)","([A-Za-z_]\w*)","((?:[^"\\]|\\.)*)",(\d+),(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/);
-  if (!match) return null;
-  let raw: string;
-  let spec: LanguageEnvelopeSpec;
-  try {
-    raw = JSON.parse(`"${match[4]}"`) as string;
-    spec = JSON.parse(raw) as LanguageEnvelopeSpec;
-  } catch {
-    return null;
-  }
-  return {
-    ownerKind: match[1] as LanguageEnvelopeDefinition['ownerKind'],
-    owner: match[2],
-    parameter: match[3],
-    spec,
-    line: Number(match[5]) || lineNumber,
-    interval: Number(match[6]),
-    unit: match[7] as LanguageEnvelopeDefinition['unit'],
-    chance: Number(match[8]),
-    drift: match[9] === 'true',
-    loose: match[10] === 'true',
-    clockSource: match[11],
-  };
-}
-
-function parseLanguageGenerativeDefaultDirective(
-  line: string,
-  lineNumber: number,
-): LanguageGenerativeDefaultDefinition | null {
-  const match = line.match(
-    /^__genparamdefault\("(voice|fx|filter)","([A-Za-z_]\w*)","([A-Za-z_]\w*)","((?:[^"\\]|\\.)*)","(wander|trend|scatter|flutter)",(\d+(?:\.\d+)?)\)$/,
-  );
-  if (!match) return null;
-  let expression: string;
-  try { expression = JSON.parse(`"${match[4]}"`) as string; } catch { return null; }
-  return {
-    ownerKind: match[1] as 'voice' | 'fx' | 'filter',
-    owner: match[2],
-    parameter: match[3],
-    expression,
-    mode: match[5] as LanguageGenerativeMode,
-    amount: Number(match[6]),
-    line: lineNumber,
-  };
-}
-
-function parseLanguageGenerativeCycleDirective(
-  line: string,
-  lineNumber: number,
-): LanguageGenerativeCycleDefinition | null {
-  const match = line.match(
-    /^__genparamcycle\("(voice|fx|filter)","([A-Za-z_]\w*)","([A-Za-z_]\w*)","((?:[^"\\]|\\.)*)","(wander|trend|scatter|flutter)",(\d+(?:\.\d+)?),(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/,
-  );
-  if (!match) return null;
-  let expression: string;
-  try { expression = JSON.parse(`"${match[4]}"`) as string; } catch { return null; }
-  return {
-    ownerKind: match[1] as 'voice' | 'fx' | 'filter',
-    owner: match[2],
-    parameter: match[3],
-    expression,
-    mode: match[5] as LanguageGenerativeMode,
-    amount: Number(match[6]),
-    interval: Number(match[7]),
-    unit: match[8] as LanguageGenerativeCycleDefinition['unit'],
-    chance: Number(match[9]),
-    drift: match[10] === 'true',
-    loose: match[11] === 'true',
-    clockSource: match[12],
-    line: lineNumber,
-  };
-}
-
-function parseLanguageParameterCycleDirective(
-  line: string,
-  lineNumber: number,
-): LanguageParameterCycleDefinition | null {
-  const match = line.match(
-    /^__paramcycle\("([A-Za-z_]\w*)","(harmo|timbre|morph|width|geometry|structure|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)","((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/,
-  );
-  if (!match) return null;
-
-  let expression: string;
-  try {
-    expression = JSON.parse(`"${match[3]}"`) as string;
-  } catch {
-    return null;
-  }
-
-  return {
-    voice: match[1],
-    parameter: match[2] as LanguageParameterCycleDefinition['parameter'],
-    expression,
-    amount: Number(match[4]),
-    unit: match[5] as LanguageParameterCycleDefinition['unit'],
-    chance: Number(match[6]),
-    drift: match[7] === 'true',
-    loose: match[8] === 'true',
-    clockSource: match[9],
-    line: lineNumber,
-  };
-}
-
-function parseLanguageParameterDefaultDirective(
-  line: string,
-  lineNumber: number,
-): LanguageParameterDefaultDefinition | null {
-  const match = line.match(
-    /^__paramdefault\("([A-Za-z_]\w*)","(harmo|timbre|morph|width|geometry|structure|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)","((?:[^"\\]|\\.)*)"\)$/,
-  );
-  if (!match) return null;
-
-  let expression: string;
-  try {
-    expression = JSON.parse(`"${match[3]}"`) as string;
-  } catch {
-    return null;
-  }
-
-  return {
-    voice: match[1],
-    parameter: match[2] as LanguageParameterDefaultDefinition['parameter'],
-    expression,
-    line: lineNumber,
-  };
-}
-
-function parseLanguageDrumkitDirective(line: string): { name: string; disabled: boolean; viewSteps: number } | null {
-  const match = line.match(/^__drumkit\("([A-Za-z_]\w*)",(true|false),(\d+)\)$/);
-  return match ? { name: match[1], disabled: match[2] === 'true', viewSteps: Number(match[3]) } : null;
-}
-function parseLanguageDrumkitMetaDirective(line: string): { name:string; kit:string } | null {
-  const match = line.match(/^__drumkitmeta\("([A-Za-z_]\w*)","([A-Za-z_]\w*)"\)$/); return match ? { name:match[1], kit:match[2] } : null;
-}
-function parseLanguageDrumSlotDirective(line: string): LanguageDrumSlotDefinition | null {
-  const match = line.match(/^__drumslot\("([A-Za-z_]\w*)","([A-Za-z_]\w*)","(kick|snare|clap|hihat|openhat|lowtom|hightom)","((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([^"]+)",(\d+),(\d+),(\d+)\)$/);
-  if (!match) return null;
-  let encoded=''; try { encoded = JSON.parse(`"${match[4]}"`) as string; } catch { return null; }
-  let params: LanguageDrumSlotDefinition['params']; try { params = JSON.parse(encoded) as LanguageDrumSlotDefinition['params']; } catch { return null; }
-  const hits = Number(match[11]), steps = Number(match[12]), rotate = Number(match[13]);
-  return { drumkit:match[1], alias:match[2], voice:match[3] as LanguageDrumVoiceId, params, amount:Number(match[5]), unit:match[6] as 'ms'|'sec'|'beat', chance:Number(match[7]), drift:match[8]==='true', loose:match[9]==='true', clockSource:match[10], euclidean: hits > 0 && steps > 0 ? { hits, steps, rotate } : null };
-}
-
-function parseLanguageObjectEveryDirective(
-  line: string,
-): ({ name: string } & LanguageObjectEveryDefinition) | null {
-  const match = line.match(
-    /^__objectevery\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([^"]+)"\)$/,
-  );
-  if (!match) return null;
-  return {
-    name: match[1],
-    amount: Number(match[2]),
-    unit: match[3] as LanguageObjectEveryDefinition['unit'],
-    chance: Number(match[4]),
-    drift: match[5] === 'true',
-    loose: match[6] === 'true',
-    clockSource: match[7],
-  };
-}
-
-function parseLanguageDriveEvery(line: string): ({ name: string } & LanguageObjectEveryDefinition) | null {
-  const match = line.match(/^__driveevery\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([^"]+)"\)$/);
-  if (!match) return null;
-  return {
-    name: match[1],
-    amount: Number(match[2]),
-    unit: match[3] as 'ms' | 'sec' | 'beat',
-    chance: Number(match[4]),
-    drift: match[5] === 'true',
-    loose: match[6] === 'true',
-    clockSource: match[7],
-  };
-}
-
-
-function parseLanguageSetCycleDirective(line: string): ({ name: string; amount: number; unit: LanguageSetCycleDefinition['unit']; chance: number; drift: boolean; loose: boolean }) | null {
-  const match = line.match(/^__setcycle\("([A-Za-z_]\w*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false)\)$/);
-  if (!match) return null;
-  return {
-    name: match[1],
-    amount: Number(match[2]),
-    unit: match[3] as LanguageSetCycleDefinition['unit'],
-    chance: Number(match[4]),
-    drift: match[5] === 'true',
-    loose: match[6] === 'true',
-  };
-}
-
-function parseLanguageFromDirective(line: string): ({ target: string; property: string; source: string }) | null {
-  const match = line.match(/^__from\("([A-Za-z_]\w*)","(note|freq|cycle)","([A-Za-z_]\w*)"\)$/);
-  return match ? { target: match[1], property: match[2], source: match[3] } : null;
-}
 
 function parseStatements(source: string): Array<{ source: string; line: number }> {
   const statements: Array<{ source: string; line: number }> = [];
@@ -5946,7 +5320,7 @@ function parseStatements(source: string): Array<{ source: string; line: number }
 function parseClockDeclaration(line: string): (ObjectDeclaration & { rate: number; label: string }) | null {
   const match = line.match(/^([A-Za-z_]\w*)\s*=\s*Clock\.rate\(\s*["']([^"']+)["']\s*\)(.*)$/);
   if (!match) return null;
-  const parsed = parseClockRate(match[2]);
+  const parsed = directives.parseClockRate(match[2]);
   if (!parsed) return null;
   const tail = match[3].trim();
   const calls: ChainedCall[] = [];
@@ -5959,12 +5333,6 @@ function parseClockDeclaration(line: string): (ObjectDeclaration & { rate: numbe
   return { name: match[1], calls, rate: parsed.rate, label: parsed.label };
 }
 
-function parseClockRate(value: string): { rate: number; label: string } | null {
-  const match = value.trim().match(/^([/*])(\d+(?:\.\d+)?)$/);
-  if (!match) return null;
-  const n = Number(match[2]); if (!Number.isFinite(n) || n <= 0) return null;
-  return { rate: match[1] === '/' ? 1 / n : n, label: `${match[1]}${formatNumber(n)}` };
-}
 
 function parseGainDeclaration(line: string): ObjectDeclaration | null {
   return parseDeclaration(line, 'gain');
@@ -5972,6 +5340,10 @@ function parseGainDeclaration(line: string): ObjectDeclaration | null {
 
 function parseVoiceDeclaration(line: string): ObjectDeclaration | null {
   return parseDeclaration(line, 'Voice');
+}
+
+function parseModDeclaration(line: string): ObjectDeclaration | null {
+  return parseDeclaration(line, 'Mod');
 }
 
 function parseSwellDeclaration(line: string): ObjectDeclaration | null {
@@ -6032,48 +5404,6 @@ function parseChainedCalls(tail: string): ChainedCall[] | null {
   return calls;
 }
 
-interface ParsedRoute {
-  sourceName: string;
-  sourcePort: string;
-  amountExpression: string | null;
-  targetName: string;
-  targetPort: 'out' | 'out_L' | 'out_R' | 'in' | 'in2' | 'inL' | 'inR' | 'trig' | 'clock' | 'v_oct' | 'harmo' | 'timbre' | 'morph';
-}
-
-function parseRouteLine(line: string): ParsedRoute | null {
-  const arrow = line.indexOf('->');
-  if (arrow < 0 || line.indexOf('->', arrow + 2) >= 0) return null;
-
-  const left = line.slice(0, arrow).trim();
-  const right = line.slice(arrow + 2).trim();
-
-  const target = right.match(
-    /^([A-Za-z_]\w*)\.(out|out_L|out_R|inL|inR|in2|in|trig|clock|v_oct|harmo|timbre|morph)$/,
-  );
-  if (!target) return null;
-
-  const source = left.match(
-    /^([A-Za-z_]\w*)\.([A-Za-z_]\w*)(.*)$/,
-  );
-  if (!source) return null;
-
-  const suffix = source[3].trim();
-  let amountExpression: string | null = null;
-
-  if (suffix) {
-    if (!suffix.startsWith('(') || !suffix.endsWith(')')) return null;
-    amountExpression = suffix.slice(1, -1).trim();
-    if (!amountExpression) return null;
-  }
-
-  return {
-    sourceName: source[1],
-    sourcePort: source[2] as ParsedRoute['sourcePort'],
-    amountExpression,
-    targetName: target[1],
-    targetPort: target[2] as ParsedRoute['targetPort'],
-  };
-}
 
 function identifierReservationError(name: string): string | null {
   if (name.startsWith('__')) {
@@ -6112,460 +5442,6 @@ function objectExists(
   return gains.has(name) || voices.has(name);
 }
 
-function applyFilterCall(
-  definition: FilterDefinition,
-  call: ChainedCall,
-  evaluate: (expression: string) => ScalarValue | undefined,
-): string | null {
-  switch (call.name) {
-    case 'disabled': {
-      const value = evaluate(call.argument);
-      if (typeof value !== 'boolean') return 'disabled expects true or false';
-      definition.disabled = value;
-      return null;
-    }
-    case 'model': {
-      const value = evaluate(call.argument);
-      if (value !== 'svf') return 'FILTER model expects svf';
-      definition.model = 'svf';
-      definition.parameters.set('MODEL', 'SVF');
-      return null;
-    }
-    case 'owner': {
-      const value = evaluate(call.argument);
-      if (typeof value !== 'string') return 'owner expects a string';
-      definition.ownerVoice = value || null;
-      return null;
-    }
-    case 'displayName': {
-      const value = evaluate(call.argument);
-      if (typeof value !== 'string') return 'displayName expects a string';
-      definition.displayName = value;
-      return null;
-    }
-    case 'cutoff': {
-      const value = evaluate(call.argument);
-      if (typeof value !== 'number' || !Number.isFinite(value) || value < 20 || value > 20000) return 'cutoff expects 20..20000 Hz';
-      definition.cutoff = value;
-      definition.cutoffPercent = null;
-      definition.parameters.set('CUTOFF', `${formatNumber(value)} HZ`);
-      return null;
-    }
-    case 'cutoffPercent': {
-      const value = evaluate(call.argument);
-      if (typeof value !== 'number' || value < 0 || value > 100) return 'cutoff expects 0..100';
-      definition.cutoffPercent = value;
-      definition.cutoff = 20 * (1000 ** (value / 100));
-      definition.parameters.set('CUTOFF', `${formatNumber(value)}%`);
-      return null;
-    }
-    case 'resonance': {
-      const value = evaluate(call.argument);
-      if (typeof value !== 'number' || value < 0 || value > 100) return 'resonance expects 0..100';
-      definition.resonance = value;
-      definition.parameters.set('RESONANCE', `${formatNumber(value)}%`);
-      return null;
-    }
-    case 'drive': {
-      const value = evaluate(call.argument);
-      if (typeof value !== 'number' || value < 0 || value > 100) return 'drive expects 0..100';
-      definition.drive = value;
-      definition.parameters.set('DRIVE', `${formatNumber(value)}%`);
-      return null;
-    }
-    default: return `unknown Filter method: ${call.name}`;
-  }
-}
-
-function applyMistCall(
-  objectName: string,
-  definition: MistDefinition,
-  call: ChainedCall,
-  moduleViews: Set<string>,
-  evaluate: (expression: string) => ScalarValue | undefined,
-): string | null {
-  const percent = (
-    parameter: 'position' | 'size' | 'density' | 'texture' | 'mix' | 'spread' | 'feedback' | 'reverb',
-  ): string | null => {
-    const value = evaluate(call.argument);
-    if (typeof value !== 'number') return `${call.name} expects one numeric expression`;
-    const error = percentError(value, call.name);
-    if (error) return error;
-    definition[parameter] = value;
-    definition.parameters.set(call.name.toUpperCase(), `${formatNumber(value)}%`);
-    return null;
-  };
-
-  switch (call.name) {
-    case 'disabled': {
-      const value = evaluate(call.argument);
-      if (typeof value !== 'boolean') return 'disabled expects true or false';
-      definition.disabled = value;
-      return null;
-    }
-    case 'position': return percent('position');
-    case 'size': return percent('size');
-    case 'density': return percent('density');
-    case 'texture': return percent('texture');
-    case 'mix': return percent('mix');
-    case 'spread': return percent('spread');
-    case 'feedback': return percent('feedback');
-    case 'reverb': return percent('reverb');
-    case 'pitch': {
-      const value = evaluate(call.argument);
-      if (typeof value !== 'number' || value < -48 || value > 48) return 'pitch expects -48..48 semitones';
-      definition.pitch = value;
-      definition.parameters.set('PITCH', `${formatNumber(value)} ST`);
-      return null;
-    }
-    case 'freeze': {
-      const value = evaluate(call.argument);
-      if (typeof value !== 'boolean') return 'freeze expects true or false';
-      definition.freeze = value;
-      definition.parameters.set('FREEZE', value ? 'ON' : 'OFF');
-      return null;
-    }
-    case 'mode': {
-      const value = evaluate(call.argument);
-      if (typeof value !== 'string') return 'mode expects a mode name';
-
-      const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, '_');
-      const modes: Record<string, { id: number; label: string }> = {
-        granular: { id: 0, label: 'GRANULAR' },
-        stretch: { id: 1, label: 'STRETCH' },
-        looping_delay: { id: 2, label: 'LOOPING DELAY' },
-        delay: { id: 2, label: 'LOOPING DELAY' },
-        spectral: { id: 3, label: 'SPECTRAL' },
-        oliverb: { id: 4, label: 'OLIVERB' },
-        resonestor: { id: 5, label: 'RESONESTOR' },
-        beat_repeat: { id: 6, label: 'BEAT REPEAT' },
-        kammerl: { id: 6, label: 'BEAT REPEAT' },
-        spectral_clouds: { id: 7, label: 'SPECTRAL CLOUDS' },
-        spectral_cloud: { id: 7, label: 'SPECTRAL CLOUDS' },
-        sky: { id: 8, label: 'SKY / CLOUDSEEDCORE' },
-      };
-
-      const mode = modes[normalized];
-      if (!mode) {
-        return 'mode expects granular, stretch, looping_delay, spectral, oliverb, resonestor, beat_repeat, spectral_clouds, or sky';
-      }
-
-      definition.mode = mode.id;
-      definition.parameters.set('MODE', mode.label);
-      return null;
-    }
-    case 'reverse': {
-      const value = evaluate(call.argument);
-      if (typeof value !== 'boolean') return 'reverse expects true or false';
-      definition.reverse = value;
-      definition.parameters.set('REVERSE', value ? 'ON' : 'OFF');
-      return null;
-    }
-    case 'view':
-      if (call.argument.length > 0) return 'view does not accept parameters yet';
-      moduleViews.add(objectName);
-      return null;
-    default:
-      return `unknown Mist method: ${call.name}`;
-  }
-}
-
-
-function applySwellCall(
-  objectName: string,
-  swell: SwellDefinition,
-  call: ChainedCall,
-  moduleViews: Set<string>,
-  evaluate: (expression: string) => ScalarValue | undefined,
-): string | null {
-  switch (call.name) {
-    case 'freq': {
-      const value = evaluate(call.argument);
-      if (value === undefined) return null;
-      if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > 10000) return 'freq expects > 0 and <= 10000 Hz';
-      swell.frequency = value;
-      swell.parameters.set('FREQ', `${formatNumber(value)} HZ`);
-      return null;
-    }
-    case 'slope':
-    case 'shape':
-    case 'smooth':
-    case 'shift': {
-      const value = evaluate(call.argument);
-      if (value === undefined) return null;
-      if (typeof value !== 'number') return `${call.name} expects one numeric expression`;
-      const error = percentError(value, call.name);
-      if (error) return error;
-      swell[call.name] = value;
-      swell.parameters.set(call.name.toUpperCase(), `${formatNumber(value)}%`);
-      return null;
-    }
-    case 'mode': {
-      const value = evaluate(call.argument);
-      if (typeof value !== 'string') return 'mode expects "ad", "loop", or "ar"';
-      const normalized = value.toLowerCase();
-      const modes: Record<string, number> = { ad: 0, loop: 1, looping: 1, ar: 2 };
-      const mode = modes[normalized];
-      if (mode === undefined) return 'mode expects "ad", "loop", or "ar"';
-      swell.mode = mode;
-      swell.parameters.set('MODE', normalized === 'looping' ? 'LOOP' : normalized.toUpperCase());
-      return null;
-    }
-    case 'output': {
-      const value = evaluate(call.argument);
-      if (typeof value !== 'string') return 'output expects "different", "amplitude", "phase", or "frequency"';
-      const normalized = value.toLowerCase();
-      const modes: Record<string, number> = {
-        different: 0,
-        shapes: 0,
-        amplitude: 1,
-        phase: 2,
-        time: 2,
-        frequency: 3,
-      };
-      const outputMode = modes[normalized];
-      if (outputMode === undefined) return 'output expects "different", "amplitude", "phase", or "frequency"';
-      swell.outputMode = outputMode;
-      swell.parameters.set('OUTPUT', normalized.toUpperCase());
-      return null;
-    }
-    case 'range': {
-      const value = evaluate(call.argument);
-      if (typeof value !== 'string') return 'range expects "control" or "audio"';
-      const normalized = value.toLowerCase();
-      if (normalized === 'control' || normalized === 'low' || normalized === 'medium') {
-        swell.range = 0;
-        swell.parameters.set('RANGE', normalized === 'control' ? 'CONTROL' : normalized.toUpperCase());
-        return null;
-      }
-      if (normalized === 'audio' || normalized === 'high') {
-        swell.range = 1;
-        swell.parameters.set('RANGE', normalized === 'high' ? 'HIGH' : 'AUDIO');
-        return null;
-      }
-      return 'range expects "control" or "audio"';
-    }
-    case 'view':
-      if (call.argument) return 'view expects no arguments';
-      moduleViews.add(objectName);
-      return null;
-    default:
-      return `unknown Swell method: ${call.name}`;
-  }
-}
-
-function applyGainCall(
-  objectName: string,
-  gain: GainDefinition,
-  call: ChainedCall,
-  views: Map<string, ViewKind>,
-  evaluate: (expression: string) => ScalarValue | undefined,
-): string | null {
-  switch (call.name) {
-    case 'level': {
-      const value = evaluate(call.argument);
-      if (value === undefined) return null;
-      if (typeof value !== 'number') return 'level expects one numeric expression';
-      const error = gainLevelError(value);
-      if (error) return error;
-      gain.level = value;
-      gain.parameters.set('LEVEL', `${formatNumber(value)}%`);
-      return null;
-    }
-    case 'view':
-      if (call.argument.length > 0) return 'view does not accept parameters yet';
-      views.set(`${objectName}.out`, 'signal');
-      return null;
-    default:
-      return `unknown gain method: ${call.name}`;
-  }
-}
-
-const VOICE_MODEL_BACKEND_NAMES = [
-  'analog', 'waves', 'fm', 'grain', 'additive', 'wavetable', 'chord', 'speech',
-  'swarm', 'noise', 'particle', 'string', 'modal', 'kick', 'snare', 'hat',
-  'analog-vcf', 'phase', 'fm6-a', 'fm6-b', 'fm6-c', 'terrain', 'strings', 'chiptune',
-] as const;
-
-const MACRO_MODEL_IDS = new Map<string, number>([
-  ['analog', 1],
-  ['waves', 2],
-  ['fm', 3],
-  ['grain', 4],
-  ['additive', 5],
-  ['wavetable', 6],
-  ['chord', 7],
-  ['speech', 8],
-  ['swarm', 9],
-  ['noise', 10],
-  ['particle', 11],
-  ['string', 12],
-  // Backend slots 13..16 are intentionally not part of the public macro family:
-  // modal synthesis and the three percussion engines are reserved for future
-  // dedicated resonator/physical/drum families.
-  ['analog-vcf', 17],
-  ['phase', 18],
-  ['terrain', 22],
-  ['strings', 23],
-  ['chiptune', 24],
-]);
-
-function applyVoiceCall(
-  objectName: string,
-  voice: VoiceDefinition,
-  call: ChainedCall,
-  moduleViews: Set<string>,
-  evaluate: (expression: string) => ScalarValue | undefined,
-): string | null {
-  switch (call.name) {
-    case 'disabled': {
-      const value = evaluate(call.argument);
-      if (typeof value !== 'boolean') return 'disabled expects true or false';
-      voice.disabled = value;
-      return null;
-    }
-    case 'model': {
-      const value = evaluate(call.argument);
-      if (value === undefined) return null;
-      return applyVoiceModelValue(voice, value);
-    }
-    case 'freq': {
-      const value = evaluate(call.argument);
-      if (value === undefined) return null;
-      if (typeof value !== 'number') return 'freq expects one numeric expression';
-      const error = frequencyError(value);
-      if (error) return error;
-      voice.frequency = value;
-      voice.parameters.set('FREQ', `${formatNumber(value)} HZ`);
-      return null;
-    }
-    case 'harmo':
-    case 'timbre':
-    case 'morph':
-    case 'width':
-    case 'geometry':
-    case 'structure':
-    case 'brightness':
-    case 'damping':
-    case 'position':
-    case 'space':
-    case 'bow':
-    case 'bowTimbre':
-    case 'blow':
-    case 'blowTimbre':
-    case 'strike':
-    case 'strikeTimbre': {
-      const value = evaluate(call.argument);
-      if (value === undefined) return null;
-      if (typeof value !== 'number') return `${call.name} expects one numeric expression`;
-      const error = percentError(value, call.name);
-      if (error) return error;
-      const parameter = call.name as VoiceParameterName;
-      voice[parameter] = value;
-      voice.parameters.set(call.name.toUpperCase(), `${formatNumber(value)}%`);
-      return null;
-    }
-    case 'polyphony': {
-      const value = evaluate(call.argument);
-      if (value === undefined) return null;
-      if (typeof value !== 'number' || ![1, 2, 4].includes(value)) return 'polyphony expects 1, 2, or 4';
-      voice.polyphony = value as 1 | 2 | 4;
-      voice.parameters.set('POLYPHONY', `${value} NOTES`);
-      return null;
-    }
-    case 'drive': {
-      if (typeof call.argument !== 'string') return 'drive expects an envelope descriptor';
-      try {
-        const parsed = JSON.parse(call.argument);
-        if (!parsed || typeof parsed.kind !== 'string' || !Array.isArray(parsed.values)) return 'invalid drive envelope';
-        voice.drive = { kind: parsed.kind, values: parsed.values.map(Number) };
-        voice.parameters.set('DRIVE', parsed.kind);
-        return null;
-      } catch { return 'invalid drive envelope'; }
-    }
-    case 'view':
-      if (call.argument.length > 0) return 'view does not accept parameters yet';
-      moduleViews.add(objectName);
-      return null;
-    default:
-      return `unknown Voice method: ${call.name}`;
-  }
-}
-
-function applyVoiceModelValue(voice: VoiceDefinition, value: ScalarValue): string | null {
-  if (typeof value === 'string') {
-    const normalized = value.trim().toLowerCase();
-    if (normalized === 'composite') {
-      voice.engine = 'composite';
-      voice.soundId = normalized;
-      voice.lpg = false;
-      voice.parameters.set('MODEL', 'COMPOSITE');
-      return null;
-    }
-    if (normalized === 'matter') {
-      voice.engine = 'matter';
-      voice.soundId = normalized;
-      voice.lpg = false;
-      voice.parameters.set('MODEL', normalized.toUpperCase());
-      return null;
-    }
-    if (normalized === 'sine' || normalized === 'triangle' || normalized === 'sawtooth' || normalized === 'ramp' || normalized === 'square') {
-      voice.engine = 'oscillator';
-      voice.soundId = normalized;
-      voice.lpg = false;
-      voice.parameters.set('MODEL', normalized.toUpperCase());
-      return null;
-    }
-    const resonatorModels: Record<string, number> = {
-      'resonator.modal': 0,
-      'resonator.sympathetic': 1,
-      'resonator.strings': 1,
-      'resonator.string': 2,
-    };
-    if (normalized in resonatorModels) {
-      voice.engine = 'resonator';
-      voice.soundId = normalized;
-      voice.model = resonatorModels[normalized];
-      voice.lpg = false;
-      voice.parameters.set('MODEL', normalized.toUpperCase());
-      return null;
-    }
-  }
-  const model = parseVoiceModelValue(value);
-  if (model === null) return 'model expects macro.*, matter, resonator.*, sine, triangle, sawtooth, ramp, square, or composite';
-  voice.engine = 'macro';
-  voice.model = model;
-  voice.soundId = formatVoiceModelId(model);
-  voice.parameters.set('MODEL', formatVoiceModel(model));
-  return null;
-}
-
-function formatVoiceModelId(model: number): string {
-  for (const [algorithm, id] of MACRO_MODEL_IDS) if (id === model) return `macro.${algorithm}`;
-  return `internal.${model}`;
-}
-
-function parseVoiceModelValue(value: ScalarValue): number | null {
-  if (typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 24) return value;
-  if (typeof value !== 'string') return null;
-
-  const normalized = value.trim().toLowerCase();
-  const macro = normalized.match(/^macro\.([a-z0-9_-]+)$/);
-  if (macro) return MACRO_MODEL_IDS.get(macro[1]) ?? null;
-
-  // Low-level compatibility: backend model names remain accepted internally,
-  // but the high-level language exposes only engine.algorithm identifiers.
-  const backendIndex = VOICE_MODEL_BACKEND_NAMES.indexOf(normalized as typeof VOICE_MODEL_BACKEND_NAMES[number]);
-  return backendIndex >= 0 ? backendIndex + 1 : null;
-}
-
-function formatVoiceModel(model: number): string {
-  for (const [algorithm, id] of MACRO_MODEL_IDS) {
-    if (id === model) return `${model} MACRO.${algorithm.toUpperCase()}`;
-  }
-  return `${model} INTERNAL`;
-}
-
 function percentError(value: number, name: string): string | null {
   return !Number.isFinite(value) || value < 0 || value > 100
     ? `${name} must be between 0 and 100`
@@ -6589,11 +5465,6 @@ function gainLevelError(value: number): string | null {
     : null;
 }
 
-function routeAmountError(value: number): string | null {
-  return !Number.isFinite(value) || value < -100 || value > 100
-    ? 'route amount must be between -100 and 100'
-    : null;
-}
 
 function formatScalar(value: ScalarValue): string {
   if (typeof value === 'number') return formatNumber(value);

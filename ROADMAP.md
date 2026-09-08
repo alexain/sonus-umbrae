@@ -1,381 +1,258 @@
 # Sonus Umbrae Roadmap
 
-Sonus Umbrae is currently developed as a browser-based modular live-coding environment, but the language and runtime are intentionally being designed so they are not tied permanently to the web platform.
+Sonus Umbrae is an experimental live-coding environment for composing, sequencing, routing and performing modular audio systems from text. The browser implementation is currently the reference platform, while the language and runtime are being designed to remain portable beyond the web.
 
-This roadmap is directional rather than a release commitment. Features may move, change shape, or be dropped as the language evolves.
+This roadmap is directional rather than a release commitment. Items may change shape, move between milestones, or be dropped as the language and runtime evolve.
 
-## 0.1.0 baseline
+## Current foundation
 
-The first tagged development release establishes the current high-level
-language and DSP architecture:
+The current development line already includes the main architectural pieces required for a complete live-coding environment:
 
-- `VOICE` objects with model-specific sound engines, per-object level, unified `PITCH` material (`SCALE`, `NOTES`, `FREQS`) sequencing, LPG option, and parameter modulation.
-- `MOD` objects with four related outputs, local declaration inside `VOICE` and
-  `FX`, shared transport semantics, and optional scope views.
-- `FX` objects with the current `mist.*` model family, stereo routing, dynamic
-  parameters, musical pitch sequencing where supported, and local modulation.
-- Explicit `CLOCK set ... bpm` master-clock transport.
-- `every` as the public temporal reevaluation syntax, including object-level
-  fallback timing and typed `SET` time variables.
-- `PLAY ... through ... then ...` audio routing with per-edge `at` levels,
-  stereo channel selectors, mono-to-stereo normalization, and multiline chains.
-- `MAIN level` as a distinct final-bus control.
-- Shared runtime scheduler for wall-clock and beat-based jobs.
-- Read-only Scheme and optional scope views.
+- Text-first `.sum` programs with hot reload reconciled against the running audio graph.
+- Typed reusable values through `SET`, including scalar, time, note, frequency, scale, envelope and kit data.
+- `VOICE`, `DRUMKIT`, `FILTER`, `MOD`, `FX`, `CLOCK`, `SEQ` and `REGISTER` objects.
+- Unified musical `PITCH` material based on notes, frequencies, scales and stateful sources.
+- Shared beat/wall-clock scheduling with named clocks, derived rates, Euclidean timing, chance, loose timing, jitter and drift.
+- Stereo-aware routing with named ports, serial/parallel paths, route levels and automatic MAIN routing where appropriate.
+- AudioWorklet processing with independent C/C++ WebAssembly DSP modules.
+- Multiple synthesis families, physical modelling, modulation sources, multimode filtering and stereo effects.
+- Synthesized and sample-backed `DRUMKIT` workflows with reusable kits.
+- Sample `VOICE` playback with root tuning, regions, loop/reverse, slicing, slice sequencing, waveform views and automatic anti-click smoothing.
+- Stateful generative sources including Turing-style sequencing, cellular-automata pools and shift-register pitch storage.
+- Reusable VCA/parameter envelopes and embedded processing inside compatible objects.
+- Read-only Scheme topology and optional live parameter/signal views.
+- Keyboard-first live environment controls, Configuration, Help, Scheme and About screens.
+- Capability-gated runtime features through top-of-file `USE` declarations.
 
-The items below describe directions beyond this baseline.
+The focus of future work is therefore less on filling basic synthesis gaps and more on consolidating timing, event semantics, routing metadata, modular interoperability, runtime structure and performance workflows.
 
 ## Near term
 
-### Language core
+### Timing and sequencing
 
-- A conventional score/melody sequencer with explicit per-event note durations, rests, ties, and eventually chord events, if it proves useful beyond the current generative SEQ family (Turing, Life, Constellation, Snake).
-- Arithmetic, comparison, and logical expressions beyond the current scalar
-  expression support.
-- Richer conditional execution.
-- Event-driven blocks integrated cleanly with the high-level syntax.
-- Looping and iteration primitives where they remain useful for musical code.
-- Persistent runtime state for event-driven code.
-- Clear distinction between snapshot values and continuously evaluated signals.
-- Stateful generative helpers including `walk()`, `chaos()`, `slew()`,
-  reproducible `seed()`, numeric `wrap()`, and `quantize()`.
-- Reusable timing/group constructs beyond per-property and object-level `every`.
+- Swing as a first-class clock feel control.
+- General ratchet/retrigger support at the event/timing layer rather than as a sample-specific feature.
+- Phase offsets and additional clock-relationship controls.
+- Clearer common semantics for event probability, weighted value selection and trigger skipping.
+- Additional reusable timing/group constructs where they reduce repetition without making the language pattern-centric.
+- Preserve current musical timing behaviour across hot reload and transport stop/restart.
 
-### Signal routing
-
-- Generic routing from any compatible output port to any compatible input or parameter.
-- Per-connection attenuation and inversion:
-  `source.out(-50) -> destination.input;`
-- Internal port metadata for:
-  - SIGNAL
-  - GATE
-  - TRIGGER
-- Audio-rate modulation without an artificial distinction between audio and CV.
-- Runtime validation of module ports and parameters.
-
-### Visual monitoring
-
-- SIGNAL views as oscilloscopes.
-- TRIGGER views as independent moving event particles.
-- GATE views as high/low timelines.
-- PARAMETER views showing live and base values.
-- Variable views collected into a compact VARIABLES monitor.
-- Additional optional visualizers such as spectrum and level views.
-
-### Scheme view
-
-- Read-only topological graph generated from the live runtime.
-- Compact content-driven module sizing.
-- Embedded visualizers inside their parent modules.
-- Distinct rendering for SIGNAL, GATE, and TRIGGER connections.
-- Future animated signal activity.
-- Pan, zoom, fit-to-view, and keyboard navigation for large patches.
-- Explicit support for branching, fan-in, fan-out, and feedback paths.
-
-## DSP modules
-
-The initial DSP integration is based on permissively licensed open-source modules and algorithms.
-
-Current direction:
-
-- `VOICE` macro engines backed initially by Mutable Instruments Plaits DSP.
-- `MOD` modulation backed initially by Mutable Instruments Tides 2018 DSP.
-- `FX` processors backed by Mist / SuperParasites plus the MIT-licensed `sky` ambient reverb based on CloudSeedCore.
-- `FILTER` processors backed by modular permissively licensed DSP areas; the first implementation is DaisySP `svf` with simultaneous multimode outputs.
-- Additional DaisySP areas may be introduced as separate WASM modules rather than one monolithic library.
-- LIVE performance controls now cover scalar sliders and note piano views; future work can add direct note-list editing and scheduled mute/bypass state changes.
-- Additional permissively licensed DSP where appropriate.
-- Original Sonus Umbrae DSP modules.
-- Inspiration from other modular systems and open algorithms without necessarily reproducing their original user interfaces.
-- A stable module metadata format describing parameters, ports, signal semantics, and visual behavior.
-
-The language should not depend on the identity of any one upstream hardware module.
-
-## Clock and event system
-
-`Clock` is intended to evolve into a programmable master timing system rather than a simple metronome.
-
-Planned directions include:
-
-- Meter information.
-- Phase offsets.
-- Swing.
-- Probability.
-- Trigger skipping.
-- Ratchets.
-- Additional clock feel controls such as swing, phase, probability and algorithmically changing rates.
-- Event-driven scripting connected to clock and trigger ports.
-
-The design is conceptually closer to a programmable modular timing source than to a conventional DAW transport.
-
-## Event-driven language core
+### Event-driven language core
 
 The primary control-flow model should remain musical and event-driven rather than becoming a conventional general-purpose scripting language.
 
-Initial event syntax:
+A future event form is expected to build on clock and trigger sources, for example:
 
 `when (Clock.out) { ... }`
 
-A temporary clock-rate view can be requested directly from the event source without creating a named derived clock:
+Temporary clock-rate views should be expressible without requiring a named derived clock:
 
 `when (Clock.out("/2")) { ... }`
 
 `when (Clock.out("*2")) { ... }`
 
-Event modifiers use the same function-call syntax as normal language operations:
+Event modifiers should use the same function-call style as normal language operations:
 
 `when (Clock.out("/2"), cycle("1:4"), prob(30)) { ... }`
 
-Initial modifiers:
+Initial candidate modifiers include:
 
-- `cycle("1:4")`, `cycle("2:4")`, etc. select a position in a repeating event cycle.
-- `cycle("first")` matches only the first event after the handler is evaluated.
-- `cycle("!first")` matches every event except the first.
-- `prob(n)` applies a percentage probability after the cycle condition matches.
+- `cycle("1:4")`, `cycle("2:4")`, etc. for positions in a repeating event cycle.
+- `cycle("first")` for the first event after handler evaluation.
+- `cycle("!first")` for every event except the first.
+- `prob(n)` for event probability after other conditions match.
 
-Modifiers are optional and order-independent. This avoids introducing a separate object/map configuration syntax solely for `when`.
+Richer conditionals, iteration and persistent event-local state can be considered where they provide clear musical value.
 
-The language may later gain conventional `if`, `for`, or other control structures where genuinely useful, but musical event primitives should remain the preferred way to express temporal behavior.
+### Signal, gate and trigger routing
 
-## Visual engine / audiovisual performance
+The runtime already exposes a mixture of audio ports, pitch/CV-like inputs, triggers and parameter modulation. These should converge toward one capability-driven routing model.
 
-Sonus Umbrae should eventually include a programmable visual engine driven by the same live-coding language used for audio.
+Planned work:
 
-The visual engine is a separate subsystem from the audio engine:
+- Generic routing from any compatible output port to any compatible input or parameter.
+- Internal port metadata for `SIGNAL`, `GATE` and `TRIGGER` semantics.
+- Per-connection attenuation and inversion.
+- Runtime validation based on declared module capabilities rather than object-category special cases.
+- Audio-rate modulation without an artificial language-level distinction between audio and CV where the DSP supports it.
+- Broader modulation coverage for model parameters that are currently not exposed as modulatable targets.
+- A stable module metadata format describing parameters, ports, trigger/gate behaviour, stereo capability, views and hot-reload policy.
 
-- The audio engine starts automatically when the application launches, subject to browser/device permission requirements.
-- The visual engine is disabled by default.
-- The visual engine is started and stopped explicitly from command mode, for example:
-  `:visual start`
-  `:visual stop`
-- A separate command may open the visual output client, for example:
-  `:visual open`
-- The main status bar should indicate visual-engine state independently from audio-engine state.
+The language should not depend on the identity or panel layout of any one upstream hardware module.
 
-The same `.sum` source can contain both audio and visual code. Visual objects should follow the same object/parameter/routing model as audio modules rather than introducing a separate visual programming language.
+### Runtime and codebase consolidation
 
-Possible visual primitives include:
+As the feature set grows, the implementation should become more modular without requiring a disruptive rewrite.
 
-- `Circle()`
-- `Rect()`
-- `Line()`
-- `Grid()`
-- `Pixel()`
-- `Text()`
-- `Ascii()`
-- `Bitmap()`
-- `Sprite()`
-- procedural noise and pixel-art sources
+Planned direction:
 
-Possible visual properties and transforms include:
+- Incrementally split large parser/runtime/audio/UI files by responsibility.
+- Move object-family parsing and runtime behaviour into focused modules.
+- Reduce duplicated engine/model conditionals by extending registry metadata.
+- Make scheduler ownership and lifecycle explicit for hot reload, transport stop and object replacement.
+- Keep DSP modules independent where practical instead of building one monolithic WASM library.
+- Add regression coverage around parser metadata passes, scheduler re-registration, routing capability checks and state preservation.
 
-- position
-- scale and size
-- rotation
-- opacity
-- color
-- gradients
-- distortion
-- blur
-- glow
-- feedback
-- trails
-- mirror/kaleidoscopic transforms
-- pixelation
-- threshold/posterization
+## Sample and drum workflows
 
-Audio/runtime values should be routable into visual properties using the same conceptual patching model used elsewhere in Sonus Umbrae. SIGNAL, GATE, and TRIGGER sources may drive visual behavior without requiring a separate syntax family.
+The first sample playback milestone is considered functionally complete for now.
 
-Examples of future concepts include:
+Current capabilities include:
 
-`Clock.out -> visual.trig;`
+- Sample assets as VOICE sources with optional root-note declaration.
+- Classic varispeed pitch behaviour.
+- Region selection, loop and reverse playback.
+- Equal region slicing with forward, reverse, random, walk and pendulum traversal.
+- Per-slice reverse markers and weighted random selection.
+- Waveform views with region dimming, slice guides and active-slice indication.
+- Automatic anti-click smoothing at playback boundaries.
+- Sample-backed DRUMKIT lanes and reusable hybrid kits.
 
-`voice.out -> visual.distort;`
+Possible later extensions, intentionally deferred until there is a concrete musical need:
 
-`voice.timbre -> visual.size;`
+- Per-slice relative tuning/transpose while keeping slice syntax readable.
+- General polyphonic sample voice allocation.
+- Choke groups and explicit gate/one-shot behaviour.
+- Time-stretch/tempo-sync independent of pitch.
+- Loop crossfades beyond the current anti-click smoothing.
 
-The exact visual API will be designed after the core event and routing systems are stable.
+These should remain secondary to shared timing/event/routing work unless real usage exposes a stronger need.
 
-### Audio analysis for visuals
+## Modulation and parameter system
 
-The visual engine should not require rendering individual audio samples directly. A dedicated analysis layer can expose musically useful derived values such as:
+The project already includes reusable envelopes and multiple modulation engines. Future work should concentrate on interoperability rather than simply adding more modulation sources.
 
-- level / envelope
-- onset
-- low/mid/high spectral energy
-- spectrum bands
-- pitch or other extracted features where useful
+Planned direction:
 
-These values can then be routed to visual parameters using the normal language model.
+- Extend modulation support consistently across compatible parameters.
+- Clarify snapshot values versus continuously evaluated signals.
+- Add reusable stateful helpers where useful, such as `walk()`, `chaos()`, `slew()`, reproducible `seed()`, numeric `wrap()` and `quantize()`.
+- Keep slow control-rate and audio-rate modulation semantics explicit in module metadata.
+- Preserve meaningful raw modulation domains in visual monitoring rather than normalizing everything prematurely.
 
-### Separate visual output
+## Visual monitoring and Scheme
 
-The browser implementation should support a dedicated visual-output client, initially as another route/end-point of the same application, for example:
+The Scheme view remains a read-only representation of the running modular topology, not a graphical patch editor.
 
-`/visual`
+Planned improvements include:
 
-This allows:
+- SIGNAL views as oscilloscopes.
+- TRIGGER views as event timelines/particles.
+- GATE views as high/low timelines.
+- PARAMETER views showing base and live values.
+- Compact variable/value monitoring.
+- Optional spectrum and level visualizers.
+- Pan, zoom, fit-to-view and keyboard navigation for large topologies.
+- Clear rendering of branching, fan-in, fan-out and feedback paths.
+- Visual differentiation of SIGNAL, GATE and TRIGGER connections once the common port model is established.
 
-- live coding and runtime monitoring on the primary display
-- fullscreen generated visuals on a second monitor or projector
-- the visual output to remain active while the main UI switches between LIVE, SCHEME, CONFIG, or other screens
+Embedded views should remain associated with their parent runtime objects where possible.
 
-The architecture should not assume that the visual renderer always runs on the same display or even the same machine. A future implementation may allow the visual client to connect to the active Sonus Umbrae session over a local network.
+## MIDI and external control
 
-### Scheme interaction
+MIDI should operate both as a direct mapping layer and as an ordinary modular signal/event source.
 
-The Scheme view remains focused on the audio/modular runtime and must not expand into a graph of every visual object.
+Candidate mapping descriptors include:
 
-Individual visual primitives such as `Circle`, `Text`, `Bitmap`, gradients, or visual effects should **not** appear as separate Scheme nodes.
+- `a.timbre(20).midi("#20");`
+- `a.timbre(20).midi("#20@2");`
+- note/event descriptors such as `"!C2"` or `"!C2@3"` where appropriate.
+- MIDI learn for assigning hardware controls without entering controller numbers manually.
 
-If the visual engine receives data from the modular graph, Scheme may show one aggregated terminal node:
+A future built-in `Midi` source should expose ordinary Sonus Umbrae ports, for example:
 
-`VISUAL`
+- `Midi.note` as a pitch SIGNAL.
+- `Midi.gate` as a GATE held from Note On to Note Off.
+- `Midi.trig` as a TRIGGER emitted on Note On.
+- `Midi.velocity` as a SIGNAL.
+- Later pitch bend, pressure, modulation and MIDI clock sources.
 
-This node represents the entire visual subsystem. Connections entering it may use a dedicated visual-control edge style so they are distinguishable from normal audio, gate, and trigger routing.
+MIDI should not become a separate special-purpose routing subsystem. Its signals should use the same attenuation, validation, visualization and Scheme rules as internal sources.
 
-The node may show only compact aggregate state such as:
-
-- engine ON/OFF
-- number of active visual objects
-- number of incoming control connections
-
-The internal visual scene remains opaque to Scheme.
+Implementation should follow consolidation of the common SIGNAL/GATE/TRIGGER port model.
 
 ## Multi-script sessions
 
-Multi-script support is intentionally postponed until the core language/runtime semantics are stable.
+Multi-script support remains intentionally postponed until event ownership and runtime lifecycle semantics are stable.
 
-The intended model is:
+Intended direction:
 
-- A session can hold multiple independent scripts in memory.
-- Each script has its own local variable/object scope.
-- Scripts can continue running independently while another script is being edited.
-- Cross-script access may use explicit namespaces, for example:
-  `DRONE.a`
-- Script names act as namespaces and are likely to use a normalized uppercase form.
-- A script may create persistent objects, event handlers, clocks, or other runtime state.
-- Stopping or replacing a script must have well-defined ownership and cleanup semantics.
-- `.sum` session files should eventually be able to store all scripts in one human-readable, versionable document.
+- Multiple independent scripts resident in one session.
+- Local object/value scope per script.
+- Independent execution while another script is edited.
+- Explicit namespaces for cross-script access.
+- Well-defined ownership and cleanup of persistent objects, clocks, handlers and state.
+- Human-readable `.sum` session storage containing all scripts.
 
-A possible initial layout is a fixed bank of scripts (for example `00` through `09`), inspired by hardware live-coding workflows but not intended to reproduce any specific device.
+A fixed script bank may be useful for performance-oriented or dedicated-device workflows, but the exact interaction model is still open.
 
-Multi-script support becomes particularly useful on constrained or dedicated devices where several prepared programs can remain resident and be switched or combined during performance.
+## Visual engine / audiovisual performance
 
-## MIDI integration
+A programmable visual engine remains a longer-term direction. It should use the same language and runtime concepts rather than introducing a separate visual programming language.
 
-MIDI should be able to operate both as a direct control-mapping layer and as a modular signal/event source.
+The visual subsystem should have an independent lifecycle from audio and remain disabled by default. Candidate primitives include geometric shapes, text, grids, sprites, bitmap/pixel sources and procedural textures, with properties such as position, scale, rotation, opacity, colour, distortion, blur, feedback and trails.
 
-Planned parameter mapping syntax includes descriptors such as:
+Audio/runtime values should eventually be routable into visual properties through the same SIGNAL/GATE/TRIGGER model used elsewhere.
 
-- `a.timbre(20).midi("#20");` for MIDI CC 20.
-- `a.timbre(20).midi("#20@2");` for MIDI CC 20 on channel 2.
-- Note/event descriptors such as `"!C2"` or `"!C2@3"` where appropriate.
-- MIDI learn for assigning hardware controls without manually entering controller numbers.
+A dedicated analysis layer may expose musically useful values such as level, onset, spectral-band energy and pitch-derived features without requiring direct per-sample coupling between audio and graphics.
 
-A future built-in `Midi` source should convert incoming MIDI into ordinary Sonus Umbrae ports so it can participate in the same routing graph as software and Eurorack signals. Candidate ports include:
-
-- `Midi.note` as a SIGNAL carrying pitch in the logical V/OCT domain.
-- `Midi.gate` as a GATE held high from Note On until Note Off.
-- `Midi.trig` as a TRIGGER emitted on Note On.
-- `Midi.velocity` as a SIGNAL.
-- Future pitch bend, pressure, modulation, and MIDI clock sources.
-- `Midi.ch(n)` as an optional channel filter, with channel 1 as the default when omitted.
-
-A typical future patch could therefore use:
-
-`Midi.note -> a.v_oct;`
-
-`Midi.gate -> a.trig;`
-
-MIDI must not become a separate special-purpose signal system. Once converted to Sonus Umbrae ports, MIDI-derived SIGNAL, GATE, and TRIGGER data should follow the same routing, attenuation, visualization, and Scheme rules as every other source.
-
-`Voice.v_oct` is the first pitch-CV input intended for this model. Internally it remains a continuous SIGNAL; user-facing displays should prefer musical note names (for example `C2`, `F#3`, or `A4 +12c`) rather than raw voltage values.
+The browser implementation should eventually support a separate fullscreen visual-output client suitable for a second display or projector. Scheme should represent the entire visual subsystem only as an optional aggregated endpoint rather than exposing every visual primitive as a node.
 
 ## Beyond the browser
 
-The web version is currently the reference implementation, not necessarily the final platform.
+The web version is the current reference implementation, not necessarily the final platform.
 
 The language/runtime should remain portable enough to support possible future dedicated applications for:
 
 - macOS
 - Windows
-- iPadOS
-- iOS
+- iPadOS / iOS
 - Android
 - Linux
 
-Potential native applications could provide:
-
-- Lower-latency/native audio backends.
-- Better multi-channel audio interface support.
-- MIDI and OSC integration.
-- Local project/session management.
-- Offline DSP builds.
-- Plugin hosting or plugin versions where practical.
-- Touch-first interfaces on tablets.
+Potential native applications could provide lower-latency audio backends, richer multi-channel I/O, MIDI/OSC integration, local session management, offline DSP builds and touch-first interfaces where appropriate.
 
 The core language should remain as platform-independent as practical.
 
 ## Dedicated hardware / Eurorack
 
-A long-term experimental direction is running Sonus Umbrae on dedicated hardware, potentially including a Eurorack module.
+A long-term experimental direction is running Sonus Umbrae on dedicated hardware, potentially including a Eurorack device.
 
-A hardware implementation could benefit significantly from:
+Relevant requirements include:
 
-- Multiple scripts stored in memory.
-- Fast script switching.
-- A small monochrome/pixel display.
-- Physical CV, gate, trigger, and audio I/O.
-- Encoders/buttons for navigation rather than graphical editing.
-- The same textual language used by the web/native versions.
-- Session transfer between desktop/web and hardware.
-- A reduced but deterministic DSP/runtime profile suitable for embedded hardware.
+- deterministic runtime behaviour;
+- compact CPU/memory footprint;
+- physical audio/CV/gate/trigger I/O;
+- multiple resident scripts;
+- fast switching and performance controls;
+- a minimal display/navigation model;
+- session transfer between desktop/web and hardware.
 
-This is exploratory and depends heavily on CPU, memory, audio latency, storage, and display constraints.
+This remains exploratory and depends on the requirements of a future hardware target.
 
 ## Session format
 
 The `.sum` format should remain:
 
-- Human-readable.
-- Text-based.
-- Version-control friendly.
-- Portable between implementations.
-- Capable of representing future multi-script sessions without turning into an opaque binary project file.
+- human-readable;
+- text-based;
+- version-control friendly;
+- portable between implementations;
+- capable of representing future multi-script sessions without becoming an opaque project container.
 
-Runtime-only state should not silently become required to understand or reproduce a session.
+Runtime-only state should not silently become necessary to understand or reproduce a session.
 
 ## Design principles
 
 Sonus Umbrae should continue to follow these principles:
 
 - Code is the source of truth.
-- The system is live, not command-line oriented.
+- The system is live rather than command-line oriented.
+- The language describes musical/runtime intent rather than mirroring upstream hardware interfaces.
 - Values are observed through views rather than `print()`-style console output.
-- The Scheme view is read-only and never becomes a graphical patch editor.
-- Visual objects are programmed in the same language, but Scheme exposes them only through an optional aggregated `VISUAL` endpoint rather than individual visual nodes.
-- Audio and visual engines have independent lifecycle state; visual output is opt-in by default.
-- Audio and CV are signals, not artificially separated language concepts.
-- Gate and trigger semantics are metadata used for interpretation and visualization.
-- Visual interfaces should remain compact, phosphor-inspired, keyboard-first, and deliberately non-IDE-like.
-- The runtime should reconcile changes rather than destructively restart the whole audio system.
-- The language should remain usable for ambient, generative, experimental, and modular composition without becoming pattern-centric.
-
-## Matter physical modeling
-
-- Evaluate future audio-rate modulation inputs for selected Matter parameters without exposing the original Eurorack panel semantics.
-
-## Resonator physical modeling
-
-- Evaluate explicit strum/pitch decoupling only after the initial note-driven workflow has been tested musically.
-
-## Current follow-up priorities
-
-- Add DSP adapters so composite graphs can instantiate `MOD` nodes and additional `VOICE` backends, enabling genuinely mixed-domain composites without sharing standalone runtime instances.
-- Continue expanding composite-capable object families only where their domain policy and output contract are well defined.
-- Keep generative SEQ work focused on readers and refinements for the existing Turing, Life, Constellation, and Snake models; defer a conventional duration-aware score sequencer until its syntax and role are clearly distinct from inline `pitch` timing.
-- Add further random/chaotic modulator families, extend LOGIC from event pulses to continuous control/gate comparison where useful, and add additional REGISTER consumers where they provide distinct musical behaviour.
-- Add a dedicated `VOICE ... sound sample` engine as a near-term priority: WAV decoding, start/end, reverse, loop, tune/playback-rate, automatic/manual slicing, realtime playhead telemetry, and a compact waveform/slice view; keep transient detection and independent time-stretch/pitch-shift as follow-up work.
-- Add a dedicated polyphonic `VOICE ... sound wavetable` engine, informed by the lightweight Skred table/voice architecture but implemented natively for Sonus Umbrae; target multi-frame wavetable morphing, band-limited mip levels, interpolation, polyphony, unison/detune, and reuse of the table-reader foundation where practical with the sampler engine.
-- Develop a polyphonic chord-oriented sound generator and continue extending drum/sample playback beyond that sampler baseline.
+- Scheme is read-only and never becomes a graphical patch editor.
+- Routing should increasingly be capability-driven rather than category-driven.
+- Audio and CV-like data are signals; gate and trigger semantics are metadata for interpretation and visualization.
+- Runtime changes should be reconciled rather than destructively restarting the entire audio system.
+- DSP integrations should remain modular and license-compatible.
+- The language should remain suitable for ambient, generative, rhythmic, experimental and modular composition without becoming centred on any single workflow.

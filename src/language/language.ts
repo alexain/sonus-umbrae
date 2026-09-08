@@ -7,21 +7,21 @@ import {
 } from './parser/pitch';
 import { findScaleDefinition, type SupportedEdo } from './scales';
 import { IDENTIFIER_PATTERN, invalidIdentifierMessage, isValidIdentifier } from './identifier';
+import { ControlExpressionError, parseControlExpression, splitTopLevelCommaList, type ControlExpression } from './control-expression';
 
-export type LanguageDiagnostic = {
-  line: number;
-  message: string;
-};
-
-export class LanguageError extends Error {
-  readonly diagnostics: LanguageDiagnostic[];
-
-  constructor(diagnostics: LanguageDiagnostic[]) {
-    super(diagnostics.map((item) => `line ${item.line}: ${item.message}`).join('\n'));
-    this.name = 'LanguageError';
-    this.diagnostics = diagnostics;
-  }
-}
+export { LanguageError, type LanguageDiagnostic } from './diagnostics';
+import { LanguageError, type LanguageDiagnostic } from './diagnostics';
+import {
+  DRUM_DEFAULTS,
+  SONUS606_KIT,
+  applyDrumKitEntries,
+  cloneDrumKit,
+  drumParameterDefaults,
+  serializeDrumParams,
+  type DrumKitDefinition,
+  type DrumKitEntry,
+  type DrumkitState,
+} from './parser/drumkit';
 
 
 export type ProgramCapability = 'visual' | 'midi' | 'audioin' | 'osc';
@@ -111,6 +111,9 @@ type SourceDefinition =
   | { kind: 'logic'; display: string; internalName?: string };
 
 
+type LogicOperator = 'and' | 'or' | 'xor' | 'nand' | 'nor' | 'divider' | 'counter' | 'flipflop';
+type LogicState = { name: string; line: number; indentation: number; view: boolean; nodes: Set<string> };
+
 type EnvelopeCurve = 'lin' | 'log';
 type EnvelopeTimeUnit = 'ms' | 'sec' | 'beat';
 type EnvelopeTimeStage = {
@@ -129,99 +132,6 @@ type EnvelopeSpec = {
   display: string;
 };
 
-type DrumVoiceId = 'kick' | 'snare' | 'clap' | 'hihat' | 'openhat' | 'lowtom' | 'hightom';
-
-type DrumSlotDefaults = {
-  level: number;
-  pan: number;
-  tune: number;
-  decay: number;
-  transient: number;
-  snappy: number;
-  color: number;
-  noise: number;
-  humanize: number;
-};
-
-type DrumKitEntry = { source: DrumVoiceId; alias: string; defaults: DrumSlotDefaults };
-type DrumKitDefinition = { entries: Map<string, DrumKitEntry> };
-type DrumkitState = { name: string; line: number; indentation: number; kit: DrumKitDefinition | null; viewSteps: number };
-
-type LogicOperator = 'and' | 'or' | 'xor' | 'nand' | 'nor' | 'divider' | 'counter' | 'flipflop';
-type LogicState = { name: string; line: number; indentation: number; view: boolean; nodes: Set<string> };
-
-const DRUM_DEFAULTS: DrumSlotDefaults = {
-  level: 100, pan: 0, tune: 0, decay: 70,
-  transient: 30, snappy: 75, color: 50, noise: 50, humanize: 0,
-};
-
-const SONUS606_KIT: DrumKitDefinition = {
-  entries: new Map<string, DrumKitEntry>([
-    ['kick', { source: 'kick', alias: 'kick', defaults: { ...DRUM_DEFAULTS } }],
-    ['snare', { source: 'snare', alias: 'snare', defaults: { ...DRUM_DEFAULTS } }],
-    ['clap', { source: 'clap', alias: 'clap', defaults: { ...DRUM_DEFAULTS } }],
-    ['hihat', { source: 'hihat', alias: 'hihat', defaults: { ...DRUM_DEFAULTS, decay: 30 } }],
-    ['openhat', { source: 'openhat', alias: 'openhat', defaults: { ...DRUM_DEFAULTS, decay: 75 } }],
-    ['lowtom', { source: 'lowtom', alias: 'lowtom', defaults: { ...DRUM_DEFAULTS } }],
-    ['hightom', { source: 'hightom', alias: 'hightom', defaults: { ...DRUM_DEFAULTS } }],
-  ]),
-};
-
-function cloneDrumKit(kit: DrumKitDefinition): DrumKitDefinition {
-  return { entries: new Map([...kit.entries].map(([alias, entry]) => [alias, {
-    source: entry.source, alias: entry.alias, defaults: { ...entry.defaults },
-  }])) };
-}
-
-function drumParameterDefaults(source: DrumVoiceId, raw: string, line: number, base: DrumSlotDefaults = DRUM_DEFAULTS): DrumSlotDefaults {
-  const result = { ...base };
-  const modifiers = raw.trim() ? raw.split(',').map((item) => item.trim()).filter(Boolean) : [];
-  for (const modifier of modifiers) {
-    const match = modifier.match(/^([A-Za-z_][A-Za-z0-9_]*)\s+(-?\d+(?:\.\d+)?)$/);
-    if (!match) throw new LanguageError([{ line, message: `invalid drum WITH parameter '${modifier}'` }]);
-    const key = match[1].toLowerCase() as keyof DrumSlotDefaults;
-    const value = Number(match[2]);
-    if (key === 'level' || key === 'decay' || key === 'transient' || key === 'snappy' || key === 'color' || key === 'noise' || key === 'humanize') {
-      if (value < 0 || value > 100) throw new LanguageError([{ line, message: `drum ${key} expects 0..100` }]);
-    } else if (key === 'pan') {
-      if (value < -100 || value > 100) throw new LanguageError([{ line, message: 'drum pan expects -100..100' }]);
-    } else if (key === 'tune') {
-      if (value < -24 || value > 24) throw new LanguageError([{ line, message: 'drum tune expects -24..24 semitones' }]);
-    } else throw new LanguageError([{ line, message: `unknown drum parameter '${match[1]}'` }]);
-    if (key === 'transient' && source !== 'kick') throw new LanguageError([{ line, message: 'transient is available only for drum.kick' }]);
-    if ((key === 'snappy' || key === 'color') && source !== 'snare') throw new LanguageError([{ line, message: `${key} is available only for drum.snare` }]);
-    if (key === 'noise' && source !== 'clap') throw new LanguageError([{ line, message: 'noise is available only for drum.clap' }]);
-    result[key] = value;
-  }
-  return result;
-}
-
-function parseDrumKitEntry(raw: string, line: number, kit: DrumKitDefinition): DrumKitEntry {
-  const sourceEntry = raw.match(/^drum\.(kick|snare|clap|hihat|openhat|lowtom|hightom)\s+as\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(.+))?$/i);
-  if (sourceEntry) {
-    const source = sourceEntry[1].toLowerCase() as DrumVoiceId;
-    return { source, alias: sourceEntry[2], defaults: drumParameterDefaults(source, sourceEntry[3] ?? '', line) };
-  }
-  const override = raw.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(.+))?$/i);
-  if (override) {
-    const previous = kit.entries.get(override[1]);
-    if (!previous) throw new LanguageError([{ line, message: `unknown KIT alias '${override[1]}'` }]);
-    return { source: previous.source, alias: previous.alias, defaults: drumParameterDefaults(previous.source, override[2] ?? '', line, previous.defaults) };
-  }
-  throw new LanguageError([{ line, message: `invalid KIT entry '${raw}'` }]);
-}
-
-function applyDrumKitEntries(base: DrumKitDefinition, body: string, line: number): DrumKitDefinition {
-  const result = cloneDrumKit(base);
-  for (const raw of body.split(/\s*;\s*/).map((item) => item.trim()).filter(Boolean)) {
-    const entry = parseDrumKitEntry(raw, line, result);
-    result.entries.set(entry.alias, entry);
-  }
-  return result;
-}
-
-function serializeDrumParams(params: DrumSlotDefaults): string { return JSON.stringify(params); }
-
 type VoiceState = {
   name: string;
   line: number;
@@ -231,6 +141,8 @@ type VoiceState = {
   pitchProperty: 'note' | 'scale' | 'freq' | null;
   vcaTargets: Set<string>;
   embeddedFilter: string | null;
+  sampleSlices: number | null;
+  sampleRegionHasPlaybackModifiers: boolean;
 };
 
 type FxState = {
@@ -318,13 +230,14 @@ type ModState = {
   line: number;
   indentation: number;
   ownerVoice: string | null;
-  modelId: 'swell' | 'dices' | 'composite';
+  modelId: 'generic' | 'lfo' | 'noise' | 'swell' | 'dices' | 'composite';
+  noiseModel: 'white' | 'dust' | 'clocked' | 'fractal' | null;
 };
 
 type ModSourceDefinition = {
   internalName: string;
   ownerVoice: string | null;
-  modelId: 'swell' | 'dices' | 'composite';
+  modelId: 'generic' | 'lfo' | 'noise' | 'swell' | 'dices' | 'composite';
   outputs: Set<string>;
 };
 
@@ -389,7 +302,12 @@ const SOUND_ENGINE_REGISTRY: Record<string, SoundEngineSchema> = {
   'sawtooth': { parameters: {}, options: new Set() },
   'ramp': { parameters: {}, options: new Set() },
   'square': { parameters: SQUARE_PARAMETERS, options: new Set() },
+  'noise.white': { parameters: {}, options: new Set() },
+  'noise.dust': { parameters: { density: { min: 0, max: 100, modulatable: true } }, options: new Set() },
+  'noise.clocked': { parameters: {}, options: new Set() },
+  'noise.fractal': { parameters: {}, options: new Set() },
   'composite': { parameters: {}, options: new Set() },
+  'sample': { parameters: {}, options: new Set() },
 
   'macro.analog': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
   'macro.waves': { parameters: MACRO_PARAMETERS, options: new Set(['lpg']) },
@@ -467,6 +385,95 @@ function stripComment(line: string): string {
 
 function formatSourceNumber(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+function validateControlModReferences(
+  expression: ControlExpression,
+  line: number,
+  modSources: Map<string, ModSourceDefinition> | undefined,
+  scopeOwner: string | null,
+): void {
+  if (!modSources) return;
+  const visit = (node: ControlExpression): void => {
+    if (node.kind === 'reference') {
+      if (node.path.length !== 2) return;
+      const [name, rawPort] = node.path;
+      const port = rawPort.toLowerCase();
+      const looksLikeModPort = /^(?:out|out[1-4]|x1|x2|x3|y|a|b|c|d)$/.test(port);
+      if (!looksLikeModPort) return;
+      const source = (scopeOwner ? modSources.get(modSourceKey(scopeOwner, name)) : undefined) ?? modSources.get(name);
+      if (!source) throw new LanguageError([{ line, message: `unknown MOD source '${name}'` }]);
+
+      if (source.modelId === 'lfo') {
+        const canonical = port === 'out' ? 'out1' : port;
+        if (!/^out[1-4]$/.test(canonical) || !source.outputs.has(canonical)) {
+          throw new LanguageError([{ line, message: `MOD lfo '${name}' does not expose '${rawPort}'` }]);
+        }
+        return;
+      }
+      if (source.modelId === 'noise') {
+        if (port !== 'out' && port !== 'out1') {
+          throw new LanguageError([{ line, message: `MOD noise '${name}' exposes only 'out'` }]);
+        }
+        return;
+      }
+      if (source.modelId === 'composite') {
+        if (port !== 'out' && !source.outputs.has(port)) {
+          throw new LanguageError([{ line, message: `MOD composite '${name}' does not expose '${rawPort}'` }]);
+        }
+        return;
+      }
+      if (source.modelId === 'dices') {
+        if (!/^(?:x1|x2|x3|y)$/.test(port)) {
+          throw new LanguageError([{ line, message: `MOD dices '${name}' does not expose '${rawPort}'` }]);
+        }
+        return;
+      }
+      if (source.modelId === 'swell') {
+        if (!/^out[1-4]$/.test(port) && port !== 'out') {
+          throw new LanguageError([{ line, message: `MOD swell '${name}' does not expose '${rawPort}'` }]);
+        }
+        return;
+      }
+      throw new LanguageError([{ line, message: `MOD '${name}' requires MODEL before it can be used in a control expression` }]);
+    }
+    if (node.kind === 'unary') visit(node.operand);
+    else if (node.kind === 'binary') { visit(node.left); visit(node.right); }
+  };
+  visit(expression);
+}
+
+function parenthesizedControlExpression(
+  raw: string,
+  line: number,
+  label: string,
+  modSources?: Map<string, ModSourceDefinition>,
+  scopeOwner: string | null = null,
+): string | null {
+  const text = raw.trim();
+  if (!text.startsWith('(') || !text.endsWith(')')) return null;
+  const expression = text.slice(1, -1).trim();
+  if (!expression) throw new LanguageError([{ line, message: `${label} control expression cannot be empty` }]);
+  try {
+    const ast = parseControlExpression(expression);
+    validateControlModReferences(ast, line, modSources, scopeOwner);
+  } catch (error) {
+    if (error instanceof LanguageError) throw error;
+    const message = error instanceof ControlExpressionError ? error.message : String(error);
+    throw new LanguageError([{ line, message: `${label}: ${message}` }]);
+  }
+  return expression;
+}
+
+function controlParameterDirective(
+  kind: 'voice' | 'fx' | 'filter',
+  owner: string,
+  parameter: string,
+  expression: string,
+  min: number,
+  max: number,
+): string {
+  return `__controlparam(${JSON.stringify(kind)},${JSON.stringify(owner)},${JSON.stringify(parameter)},${JSON.stringify(expression)},${min},${max});`;
 }
 
 
@@ -1265,6 +1272,7 @@ function compileVoiceProperty(
   sourceDefinitions: Map<string, SourceDefinition>,
   modSources: Map<string, ModSourceDefinition>,
   live = false,
+  hasSampleAsset?: (alias: string) => boolean,
 ): string {
   let key = property.toLowerCase();
   let value = rawValue.trim();
@@ -1322,8 +1330,7 @@ function compileVoiceProperty(
     return `__voicevca(${JSON.stringify(voice.name)},${JSON.stringify(target)},${envelopeLiteral(envelope)},${line});`;
   }
 
-  if (key === 'tune') {
-    if (voice.soundId !== 'composite') throw new LanguageError([{ line, message: 'tune is available only for sound composite' }]);
+  if (key === 'tune' && voice.soundId === 'composite') {
     return compileCompositeTuneDirective(voice.name, value, line, sourceDefinitions);
   }
 
@@ -1355,6 +1362,70 @@ function compileVoiceProperty(
   if (key === 'output') {
     if (voice.soundId !== 'composite') throw new LanguageError([{ line, message: 'output is available only for sound composite' }]);
     return compileCompositeOutputDirective(voice.name, value, line);
+  }
+
+  if (key === 'region') {
+    if (voice.soundId !== 'sample') throw new LanguageError([{ line, message: 'region is available only for sound sample' }]);
+    const split = value.match(/^(?:(.*?)\s+)?with\s+(.+)$/i);
+    const rangeText = split ? (split[1] ?? '').trim() : value.trim();
+    const range = rangeText ? rangeText.split(/\s+/) : [];
+    if (range.length > 2 || range.some((item) => !/^\d+(?:\.\d+)?$/.test(item))) {
+      throw new LanguageError([{ line, message: 'region expects [<start> [<end>]] [with loop][, reverse] or [with slices <count>]' }]);
+    }
+    const start = range.length >= 1 ? numberValue(range[0], line, 'region start') : 0;
+    const end = range.length >= 2 ? numberValue(range[1], line, 'region end') : 100;
+    if (start < 0 || start > 100 || end < 0 || end > 100) throw new LanguageError([{ line, message: 'region start/end expect 0..100' }]);
+    if (end < start) throw new LanguageError([{ line, message: 'region end must be greater than or equal to start' }]);
+
+    let loop = false;
+    let reverse = false;
+    let slices: number | null = null;
+    const modifiers = (split?.[2] ?? '').split(',').map((item) => item.trim().toLowerCase()).filter(Boolean);
+    for (const modifier of modifiers) {
+      const sliceMatch = modifier.match(/^slices\s+(\d+)$/i);
+      if (sliceMatch) {
+        if (slices !== null) throw new LanguageError([{ line, message: 'region accepts only one slices modifier' }]);
+        slices = Number(sliceMatch[1]);
+        if (!Number.isInteger(slices) || slices < 1 || slices > 128) throw new LanguageError([{ line, message: 'region slices expects an integer from 1 to 128' }]);
+      } else if (modifier === 'loop') loop = true;
+      else if (modifier === 'reverse') reverse = true;
+      else throw new LanguageError([{ line, message: `region does not support modifier '${modifier}'` }]);
+    }
+    if (slices !== null && (loop || reverse)) throw new LanguageError([{ line, message: 'region slices cannot be combined with loop or reverse' }]);
+    voice.sampleSlices = slices;
+    voice.sampleRegionHasPlaybackModifiers = loop || reverse;
+    const sliceDirective = ` __sampleslices(${JSON.stringify(voice.name)},${slices ?? 0});`;
+    return `${voice.name}.sampleRegion(${start},${end},${loop},${reverse});${sliceDirective}`;
+  }
+
+  if (key === 'slice') {
+    if (voice.soundId !== 'sample') throw new LanguageError([{ line, message: 'slice is available only for sound sample' }]);
+    if (voice.sampleSlices === null) throw new LanguageError([{ line, message: 'slice requires region ... with slices <count> declared first' }]);
+    if (voice.sampleRegionHasPlaybackModifiers) throw new LanguageError([{ line, message: 'slice cannot be used with region loop/reverse' }]);
+
+    const timingSplit = splitEveryClause(value);
+    const modeMatch = timingSplit.base.match(/^(.*?)(?:\s+with\s+(forward|reverse|random|walk|pendulum))?$/i);
+    if (!modeMatch) throw new LanguageError([{ line, message: 'invalid slice expression' }]);
+    const sequenceText = modeMatch[1].trim();
+    const mode = (modeMatch[2] ?? 'forward').toLowerCase();
+    const listMatch = sequenceText.match(/^\[(.*)\]$/);
+    const tokenTexts = (listMatch ? listMatch[1].trim().split(/\s+/) : [sequenceText]).filter(Boolean);
+    if (tokenTexts.length === 0) throw new LanguageError([{ line, message: 'slice requires at least one slice index' }]);
+    const items = tokenTexts.map((token) => {
+      const parsed = token.match(/^(\d+)(r)?(?:!(\d+))?$/i);
+      if (!parsed) throw new LanguageError([{ line, message: `invalid slice token '${token}'; expected <index>[r][!weight]` }]);
+      const index = Number(parsed[1]);
+      if (!Number.isInteger(index) || index < 1 || index > voice.sampleSlices!) throw new LanguageError([{ line, message: `slice ${index} is outside 1..${voice.sampleSlices}` }]);
+      const weight = parsed[3] === undefined ? 100 : Number(parsed[3]);
+      if (!Number.isInteger(weight) || weight < 1 || weight > 100) throw new LanguageError([{ line, message: 'slice weight expects an integer from 1 to 100' }]);
+      if (parsed[3] !== undefined && mode !== 'random') throw new LanguageError([{ line, message: 'slice weights require WITH RANDOM' }]);
+      return { index, reverse: Boolean(parsed[2]), weight };
+    });
+    const payload = JSON.stringify(items);
+    if (!timingSplit.every) return `__sampleslicedef(${JSON.stringify(voice.name)},${JSON.stringify(payload)},${JSON.stringify(mode)},0,"ms",100,false,false,"Clock",${line});`;
+    const timing = parseEverySpec(timingSplit.every, line, sourceDefinitions);
+    const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+    return `${prefix}__sampleslicedef(${JSON.stringify(voice.name)},${JSON.stringify(payload)},${JSON.stringify(mode)},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)},${line});`;
   }
 
   const soundParameter = voice.soundId ? SOUND_ENGINE_REGISTRY[voice.soundId]?.parameters[key] : undefined;
@@ -1513,6 +1584,10 @@ function compileVoiceProperty(
   }
 
   if (soundParameter) {
+    const dynamic = parenthesizedControlExpression(value, line, key, modSources, voice.name);
+    if (dynamic !== null) {
+      return controlParameterDirective('voice', voice.name, key, dynamic, soundParameter.min, soundParameter.max);
+    }
     const split = splitEveryClause(value);
     const generative = parseGenerativeValue(split.base, line);
     const expression = scalarExpressionFromSource(generative.base, sourceDefinitions);
@@ -1542,6 +1617,8 @@ function compileVoiceProperty(
 
   switch (key) {
     case 'level': {
+      const dynamic = parenthesizedControlExpression(value, line, 'level', modSources, voice.name);
+      if (dynamic !== null) return controlParameterDirective('voice', voice.name, 'level', dynamic, 0, 100);
       const level = numberValue(value, line, 'level');
       if (level < 0 || level > 100) throw new LanguageError([{ line, message: 'level expects 0..100' }]);
       return `${voice.name}.level(${level});`;
@@ -1549,6 +1626,22 @@ function compileVoiceProperty(
 
     case 'sound': {
       if (voice.hasSound) throw new LanguageError([{ line, message: `VOICE '${voice.name}' can declare SOUND only once` }]);
+
+      const sampleMatch = value.match(/^sample\.([^\s]+)(?:\s+with\s+root\s+([A-Ga-g][#b]?-?\d+))?$/i);
+      if (sampleMatch) {
+        const alias = sampleMatch[1];
+        if (hasSampleAsset && !hasSampleAsset(alias)) throw new LanguageError([{ line, message: `unknown sample asset '${alias}'` }]);
+        const rootNote = sampleMatch[2] ?? 'C3';
+        const rootMidi = midiFromNote(rootNote);
+        if (rootMidi === null) throw new LanguageError([{ line, message: `invalid sample root note '${rootNote}'` }]);
+        const rootFrequency = midiToFrequency(rootMidi);
+        voice.soundId = 'sample';
+        return `${voice.name}.model("sample"); ${voice.name}.sample(${JSON.stringify(alias)}); ${voice.name}.sampleRoot(${rootFrequency});`;
+      }
+      if (/^sample(?:\s|$)/i.test(value)) {
+        throw new LanguageError([{ line, message: 'sample sound expects sample.<asset> [with root <note>]' }]);
+      }
+
       const match = value.match(/^([a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)?)(?:\s+with\s+(.+))?$/i);
       if (!match) {
         throw new LanguageError([{ line, message: 'sound expects an engine or engine.algorithm [with option, ...]' }]);
@@ -2839,17 +2932,130 @@ function modSourceKey(ownerVoice: string | null, name: string): string {
   return ownerVoice ? `${ownerVoice}:${name}` : name;
 }
 
-function compileModProperty(mod: ModState, property: string, rawValue: string, line: number, sourceDefinitions: Map<string, SourceDefinition>): string {
+function compileModProperty(mod: ModState, property: string, rawValue: string, line: number, sourceDefinitions: Map<string, SourceDefinition>, modSources: Map<string, ModSourceDefinition>): string {
   const key = property.toLowerCase();
   const value = rawValue.trim();
 
   if (key === 'model') {
     const model = value.toLowerCase();
-    if (model !== 'swell' && model !== 'dices' && model !== 'composite') {
-      throw new LanguageError([{ line, message: 'MOD model expects swell, dices, or composite' }]);
+    const noiseModel = /^noise\.(?:white|dust|clocked|fractal)$/.test(model);
+    if (model !== 'lfo' && model !== 'noise' && !noiseModel && model !== 'swell' && model !== 'dices' && model !== 'composite') {
+      throw new LanguageError([{ line, message: 'MOD model expects lfo, noise.white, noise.dust, noise.clocked, noise.fractal, swell, dices, or composite' }]);
     }
-    mod.modelId = model as 'swell' | 'dices' | 'composite';
-    return `__modset(${JSON.stringify(mod.internalName)},"model",${JSON.stringify(model)});`;
+    mod.modelId = (model === 'noise' || noiseModel ? 'noise' : model) as 'lfo' | 'noise' | 'swell' | 'dices' | 'composite';
+    mod.noiseModel = noiseModel ? model.replace(/^noise\./, '') as 'white' | 'dust' | 'clocked' | 'fractal' : model === 'noise' ? 'white' : null;
+    return `__modset(${JSON.stringify(mod.internalName)},"model",${JSON.stringify(model === 'noise' ? 'noise.white' : model)});`;
+  }
+
+  // RATE belongs to MOD itself, not to a concrete model. Resolve one common
+  // time grammar before MODEL validation so model ordering does not affect it.
+  if (key === 'rate') {
+    let match = value.match(/^(\d+(?:\.\d+)?)\s*hz$/i);
+    if (match) {
+      const hz = Number(match[1]);
+      if (!Number.isFinite(hz) || hz <= 0) throw new LanguageError([{ line, message: 'MOD rate must be greater than 0' }]);
+      return `__modset(${JSON.stringify(mod.internalName)},"freq",${JSON.stringify(String(hz))});`;
+    }
+    match = value.match(/^(\d+(?:\.\d+)?)\s+beats?$/i);
+    if (match) {
+      const beats = Number(match[1]);
+      if (!Number.isFinite(beats) || beats <= 0) throw new LanguageError([{ line, message: 'MOD rate must be greater than 0' }]);
+      return `__modset(${JSON.stringify(mod.internalName)},"ratebeat",${JSON.stringify(String(beats))});`;
+    }
+    match = value.match(/^(\d+(?:\.\d+)?)\s+(?:sec|secs|second|seconds)$/i);
+    if (match) {
+      const seconds = Number(match[1]);
+      if (!Number.isFinite(seconds) || seconds <= 0) throw new LanguageError([{ line, message: 'MOD rate must be greater than 0' }]);
+      return `__modset(${JSON.stringify(mod.internalName)},"freq",${JSON.stringify(String(1 / seconds))});`;
+    }
+    match = value.match(/^(\d+(?:\.\d+)?)\s+ms$/i);
+    if (match) {
+      const ms = Number(match[1]);
+      if (!Number.isFinite(ms) || ms <= 0) throw new LanguageError([{ line, message: 'MOD rate must be greater than 0' }]);
+      return `__modset(${JSON.stringify(mod.internalName)},"freq",${JSON.stringify(String(1000 / ms))});`;
+    }
+    throw new LanguageError([{ line, message: 'MOD rate expects hz, beat, sec, or ms' }]);
+  }
+
+  if (mod.modelId === 'generic') {
+    throw new LanguageError([{ line, message: `MOD '${mod.name}' requires MODEL before '${property}'` }]);
+  }
+
+  if (mod.modelId === 'lfo') {
+    if (key === 'out1' || key === 'out2' || key === 'out3' || key === 'out4') {
+      const headMatch = value.match(/^([A-Za-z]+)(?:\s*([*/])\s*(\d+(?:\.\d+)?))?(?:\s+with\s+(.+))?$/i);
+      if (!headMatch) {
+        throw new LanguageError([{ line, message: `MOD lfo ${key} expects <waveform> [*N|/N] [with phase <degrees>, level <0..100|control-expression>]` }]);
+      }
+      const waveform = headMatch[1].toLowerCase();
+      if (!['sine', 'triangle', 'sawtooth', 'ramp', 'square'].includes(waveform)) {
+        throw new LanguageError([{ line, message: `MOD lfo ${key} expects sine, triangle, sawtooth, ramp, or square` }]);
+      }
+      const factorValue = headMatch[3] ? Number(headMatch[3]) : 1;
+      if (!Number.isFinite(factorValue) || factorValue <= 0) {
+        throw new LanguageError([{ line, message: `MOD lfo ${key} rate factor must be greater than 0` }]);
+      }
+      const rateMultiplier = headMatch[2] === '/' ? 1 / factorValue : factorValue;
+      let phase = 0;
+      let level: number | string = 100;
+      let modifiers: string[];
+      try {
+        modifiers = splitTopLevelCommaList(headMatch[4] ?? '');
+      } catch (error) {
+        const message = error instanceof ControlExpressionError ? error.message : String(error);
+        throw new LanguageError([{ line, message: `MOD lfo ${key}: ${message}` }]);
+      }
+      for (const modifier of modifiers) {
+        const phaseMatch = modifier.match(/^phase\s+(-?\d+(?:\.\d+)?)$/i);
+        if (phaseMatch) {
+          phase = Number(phaseMatch[1]);
+          if (!Number.isFinite(phase)) throw new LanguageError([{ line, message: `MOD lfo ${key} phase must be a number` }]);
+          continue;
+        }
+        const levelMatch = modifier.match(/^level\s+(.+)$/i);
+        if (levelMatch) {
+          const rawLevel = levelMatch[1].trim();
+          if (rawLevel.startsWith('(') && rawLevel.endsWith(')')) {
+            const expression = rawLevel.slice(1, -1).trim();
+            if (!expression) throw new LanguageError([{ line, message: `MOD lfo ${key} level control expression cannot be empty` }]);
+            try {
+              const ast = parseControlExpression(expression);
+              validateControlModReferences(ast, line, modSources, mod.ownerVoice);
+            } catch (error) {
+              if (error instanceof LanguageError) throw error;
+              const message = error instanceof ControlExpressionError ? error.message : String(error);
+              throw new LanguageError([{ line, message: `MOD lfo ${key} level: ${message}` }]);
+            }
+            level = `(${expression})`;
+          } else {
+            const numericLevel = Number(rawLevel);
+            if (!Number.isFinite(numericLevel) || numericLevel < 0 || numericLevel > 100) {
+              throw new LanguageError([{ line, message: `MOD lfo ${key} level expects 0..100 or a parenthesized control expression` }]);
+            }
+            level = numericLevel;
+          }
+          continue;
+        }
+        throw new LanguageError([{ line, message: `MOD lfo ${key} does not support modifier '${modifier}'` }]);
+      }
+      const encoded = `${waveform}|${rateMultiplier}|${phase}|${level}`;
+      return `__modset(${JSON.stringify(mod.internalName)},${JSON.stringify(key)},${JSON.stringify(encoded)});`;
+    }
+    throw new LanguageError([{ line, message: `unknown MOD lfo property '${property}'` }]);
+  }
+
+  if (mod.modelId === 'noise') {
+    if (key === 'density') {
+      if (mod.noiseModel !== 'dust') {
+        throw new LanguageError([{ line, message: 'MOD noise density is available only for noise.dust' }]);
+      }
+      const amount = Number(value);
+      if (!Number.isFinite(amount) || amount < 0 || amount > 100) {
+        throw new LanguageError([{ line, message: 'MOD noise density expects 0..100' }]);
+      }
+      return `__modset(${JSON.stringify(mod.internalName)},"density",${JSON.stringify(String(amount))});`;
+    }
+    throw new LanguageError([{ line, message: `MOD noise has no model-specific property '${property}'` }]);
   }
 
   if (mod.modelId === 'composite') {
@@ -2863,34 +3069,6 @@ function compileModProperty(mod: ModState, property: string, rawValue: string, l
   }
 
   if (mod.modelId === 'dices') {
-    if (key === 'rate') {
-      let match = value.match(/^(\d+(?:\.\d+)?)\s*hz$/i);
-      if (match) {
-        const hz = Number(match[1]);
-        if (!Number.isFinite(hz) || hz <= 0) throw new LanguageError([{ line, message: 'MOD rate must be greater than 0' }]);
-        return `__modset(${JSON.stringify(mod.internalName)},"freq",${JSON.stringify(String(hz))});`;
-      }
-      match = value.match(/^(\d+(?:\.\d+)?)\s+beats?$/i);
-      if (match) {
-        const beats = Number(match[1]);
-        if (!Number.isFinite(beats) || beats <= 0) throw new LanguageError([{ line, message: 'MOD rate must be greater than 0' }]);
-        return `__modset(${JSON.stringify(mod.internalName)},"ratebeat",${JSON.stringify(String(beats))});`;
-      }
-      match = value.match(/^(\d+(?:\.\d+)?)\s+(?:sec|secs|second|seconds)$/i);
-      if (match) {
-        const seconds = Number(match[1]);
-        if (!Number.isFinite(seconds) || seconds <= 0) throw new LanguageError([{ line, message: 'MOD rate must be greater than 0' }]);
-        return `__modset(${JSON.stringify(mod.internalName)},"freq",${JSON.stringify(String(1 / seconds))});`;
-      }
-      match = value.match(/^(\d+(?:\.\d+)?)\s+ms$/i);
-      if (match) {
-        const ms = Number(match[1]);
-        if (!Number.isFinite(ms) || ms <= 0) throw new LanguageError([{ line, message: 'MOD rate must be greater than 0' }]);
-        return `__modset(${JSON.stringify(mod.internalName)},"freq",${JSON.stringify(String(1000 / ms))});`;
-      }
-      throw new LanguageError([{ line, message: 'MOD dices rate expects hz, beat, sec, or ms' }]);
-    }
-
     if (key === 'length') {
       const amount = Number(value);
       if (!Number.isInteger(amount) || amount < 1 || amount > 16) {
@@ -2908,31 +3086,6 @@ function compileModProperty(mod: ModState, property: string, rawValue: string, l
     }
 
     throw new LanguageError([{ line, message: `unknown MOD dices property '${property}'` }]);
-  }
-
-  if (key === 'rate') {
-    let match = value.match(/^(\d+(?:\.\d+)?)\s*hz$/i);
-    if (match) {
-      const hz = Number(match[1]);
-      if (!Number.isFinite(hz) || hz <= 0) throw new LanguageError([{ line, message: 'MOD rate must be greater than 0' }]);
-      return `__modset(${JSON.stringify(mod.internalName)},"freq",${JSON.stringify(String(hz))});`;
-    }
-
-    match = value.match(/^(\d+(?:\.\d+)?)\s+(?:sec|secs|second|seconds)$/i);
-    if (match) {
-      const seconds = Number(match[1]);
-      if (!Number.isFinite(seconds) || seconds <= 0) throw new LanguageError([{ line, message: 'MOD rate must be greater than 0' }]);
-      return `__modset(${JSON.stringify(mod.internalName)},"freq",${JSON.stringify(String(1 / seconds))});`;
-    }
-
-    match = value.match(/^(\d+(?:\.\d+)?)\s+ms$/i);
-    if (match) {
-      const ms = Number(match[1]);
-      if (!Number.isFinite(ms) || ms <= 0) throw new LanguageError([{ line, message: 'MOD rate must be greater than 0' }]);
-      return `__modset(${JSON.stringify(mod.internalName)},"freq",${JSON.stringify(String(1000 / ms))});`;
-    }
-
-    throw new LanguageError([{ line, message: 'MOD rate expects hz, sec, or ms' }]);
   }
 
   if (key === 'shape') {
@@ -3025,6 +3178,16 @@ function compileModulationRoute(
       throw new LanguageError([{ line, message: `MOD composite '${match[1]}' does not expose '${match[2]}'` }]);
     }
     sourcePort = token;
+  } else if (source.modelId === 'lfo') {
+    const canonical = token === 'out' ? 'out1' : token;
+    if (!/^out[1-4]$/.test(canonical)) return null;
+    if (!source.outputs.has(canonical)) {
+      throw new LanguageError([{ line, message: `MOD lfo '${match[1]}' does not expose '${match[2]}'` }]);
+    }
+    sourcePort = canonical;
+  } else if (source.modelId === 'noise') {
+    if (token !== 'out' && token !== 'out1') return null;
+    sourcePort = 'out1';
   } else {
     const aliases = ({ a: 1, b: 2, c: 3, d: 4, x1: 1, x2: 2, x3: 3, y: 4 } as const);
     const port = aliases[token as keyof typeof aliases];
@@ -3042,7 +3205,7 @@ function compileFxModulation(
   line: number,
   modSources: Map<string, ModSourceDefinition>,
 ): string | null {
-  const match = value.match(/^([A-Za-z_][A-Za-z0-9_]*)\.(a|b|c|d|x1|x2|x3|y)(?:\s+with\s+depth\s+(-?\d+(?:\.\d+)?))?$/i);
+  const match = value.match(/^([A-Za-z_][A-Za-z0-9_]*)\.(out|out[1-4]|a|b|c|d|x1|x2|x3|y)(?:\s+with\s+depth\s+(-?\d+(?:\.\d+)?))?$/i);
   if (!match) return null;
   const source = modSources.get(modSourceKey(fx.name, match[1])) ?? modSources.get(match[1]);
   if (!source) throw new LanguageError([{ line, message: `unknown MOD source '${match[1]}'` }]);
@@ -3051,7 +3214,7 @@ function compileFxModulation(
     throw new LanguageError([{ line, message: 'modulation depth must be between -100 and 100' }]);
   }
   const token = match[2].toLowerCase();
-  const channel = ({ a: 1, b: 2, c: 3, d: 4, x1: 1, x2: 2, x3: 3, y: 4 } as const)[token as 'a'|'b'|'c'|'d'|'x1'|'x2'|'x3'|'y'];
+  const channel = ({ out: 1, out1: 1, out2: 2, out3: 3, out4: 4, a: 1, b: 2, c: 3, d: 4, x1: 1, x2: 2, x3: 3, y: 4 } as const)[token as 'out'|'out1'|'out2'|'out3'|'out4'|'a'|'b'|'c'|'d'|'x1'|'x2'|'x3'|'y'];
   return `__fxmod(${JSON.stringify(fx.name)},${JSON.stringify(parameter)},${JSON.stringify(source.internalName)},${channel},${depth});`;
 }
 
@@ -3339,6 +3502,11 @@ function compileFxProperty(
   const modulation = compileFxModulation(fx, parameter, value, line, modSources);
   if (modulation) return modulation;
 
+  if (parameter !== 'pitch') {
+    const dynamic = parenthesizedControlExpression(value, line, parameter, modSources, fx.name);
+    if (dynamic !== null) return controlParameterDirective('fx', fx.name, parameter, dynamic, 0, 100);
+  }
+
   const split = splitEveryClause(value);
   const generative = parseGenerativeValue(split.base, line);
   const expression = scalarExpressionFromSource(generative.base, sourceDefinitions);
@@ -3480,9 +3648,14 @@ function compileOut(
     }
 
     if (kind === 'voice') {
-      if (endpoint.channel) throw new LanguageError([{ line, message: 'VOICE outputs are mono ports; .L/.R are not valid' }]);
-      if (endpoint.port === 'in' || endpoint.port === 'in2') throw new LanguageError([{ line, message: `VOICE '${endpoint.name}' does not expose an audio input` }]);
       const sound = voiceSoundIds.get(endpoint.name) ?? '';
+      if (sound !== 'sample' && endpoint.channel) throw new LanguageError([{ line, message: 'VOICE outputs are mono ports; .L/.R are not valid' }]);
+      if (endpoint.port === 'in' || endpoint.port === 'in2') throw new LanguageError([{ line, message: `VOICE '${endpoint.name}' does not expose an audio input` }]);
+      if (sound === 'sample') {
+        if (endpoint.port && endpoint.port !== 'out') throw new LanguageError([{ line, message: `sample VOICE '${endpoint.name}' exposes only OUT` }]);
+        if (endpoint.channel) return { stereo: false, mono: `${endpoint.name}.${endpoint.channel === 'R' ? 'out_R' : 'out_L'}` };
+        return { stereo: true, left: `${endpoint.name}.out_L`, right: `${endpoint.name}.out_R`, primary: `${endpoint.name}.out_L` };
+      }
       if (sound === 'composite') return { stereo: false, mono: `${endpoint.name}.${endpoint.port ?? 'out'}` };
       if (endpoint.port && !['out', 'aux'].includes(endpoint.port)) throw new LanguageError([{ line, message: `VOICE '${endpoint.name}' output must be .out or .aux` }]);
       return { stereo: false, mono: `${endpoint.name}.${endpoint.port ?? 'out'}` };
@@ -3578,6 +3751,7 @@ function compileFilterProperty(
   rawValue: string,
   line: number,
   sourceDefinitions: Map<string, SourceDefinition>,
+  modSources: Map<string, ModSourceDefinition>,
 ): string {
   const key = property.toLowerCase();
   let value = rawValue.trim();
@@ -3606,6 +3780,8 @@ function compileFilterProperty(
   if (!filter.hasModel) throw new LanguageError([{ line, message: `FILTER '${filter.name}' requires model before parameters` }]);
 
   if (key === 'resonance' || key === 'drive' || key === 'cutoff') {
+    const dynamic = parenthesizedControlExpression(value, line, key, modSources, filter.ownerVoice);
+    if (dynamic !== null) return controlParameterDirective('filter', filter.internalName, key, dynamic, 0, 100);
     const envelopeSplit = splitEveryClause(value);
     const envelope = envelopeFromValue(envelopeSplit.base, line, sourceDefinitions);
     if (envelope) {
@@ -3748,7 +3924,7 @@ function requireFilterModel(filter: FilterState | null, diagnostics: LanguageDia
 function requireVoiceReady(voice: VoiceState | null, diagnostics: LanguageDiagnostic[]): void {
   if (!voice) return;
   if (!voice.hasSound) diagnostics.push({ line: voice.line, message: `VOICE '${voice.name}' requires sound` });
-  if (!voice.pitchProperty) diagnostics.push({ line: voice.line, message: `VOICE '${voice.name}' requires pitch` });
+  if (!voice.pitchProperty && !voice.soundId?.startsWith('noise.')) diagnostics.push({ line: voice.line, message: `VOICE '${voice.name}' requires pitch` });
 }
 
 
@@ -3778,7 +3954,7 @@ function validateLiveVoiceProperty(voice: VoiceState, property: string, line: nu
   const soundParameter = voice.soundId ? SOUND_ENGINE_REGISTRY[voice.soundId]?.parameters[key] : undefined;
   if (soundParameter || key === 'level' || key === 'bow' || key === 'blow' || key === 'strike' || key === 'pitch') return;
   if (voice.soundId === 'composite' && (key === 'tune' || key === 'mix' || key === 'output')) return;
-  throw new LanguageError([{ line, message: `LIVE is available only for 0..100 VOICE parameters or PITCH; '${property}' is not eligible` }]);
+  throw new LanguageError([{ line, message: `LIVE is available only for eligible VOICE parameters or PITCH; '${property}' is not eligible` }]);
 }
 
 function validateLiveFxProperty(fx: FxState, property: string, line: number): void {
@@ -3815,7 +3991,7 @@ function validateDeclaredIdentifiers(source: string): void {
   }
 }
 
-export function compileLanguageSource(source: string): string {
+export function compileLanguageSource(source: string, options: { hasSampleAsset?: (alias: string) => boolean } = {}): string {
   validateDeclaredIdentifiers(source);
   const capabilitySet = parseProgramCapabilities(source);
   setReferenceTuningHz(capabilitySet.tuningHz);
@@ -4160,15 +4336,9 @@ export function compileLanguageSource(source: string): string {
         continue;
       }
 
-      const modMatch = trimmed.match(/^MOD\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view)(?:\s+(\d+(?:\.\d+)?)\s*([vx]))?)?\s*:\s*$/i);
+      const modMatch = trimmed.match(/^MOD\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(view))?\s*:\s*$/i);
       if (modMatch) {
         const name = modMatch[1];
-        if (modMatch[2] && modMatch[3] !== undefined) {
-          const viewAmount = Number(modMatch[3]);
-          if (!Number.isFinite(viewAmount) || viewAmount <= 0) {
-            throw new LanguageError([{ line: lineNumber, message: 'MOD WITH VIEW scale must be greater than 0' }]);
-          }
-        }
         const ownerObject = indentation > 0
           ? (currentVoice?.name ?? currentFx?.name ?? null)
           : null;
@@ -4187,10 +4357,10 @@ export function compileLanguageSource(source: string): string {
         const scopeKey = modSourceKey(ownerObject, name);
         if (modSources.has(scopeKey)) throw new LanguageError([{ line: lineNumber, message: `MOD '${name}' is already defined in this scope` }]);
         const internalName = ownerObject ? `__mod_${ownerObject}_${name}` : name;
-        currentMod = { name, internalName, line: lineNumber, indentation, ownerVoice: ownerObject, modelId: 'swell' };
-        modSources.set(scopeKey, { internalName, ownerVoice: ownerObject, modelId: 'swell', outputs: new Set() });
+        currentMod = { name, internalName, line: lineNumber, indentation, ownerVoice: ownerObject, modelId: 'generic', noiseModel: null };
+        modSources.set(scopeKey, { internalName, ownerVoice: ownerObject, modelId: 'generic', outputs: new Set() });
         const viewDirective = modMatch[2] ? `\n${internalName}.view();` : '';
-        output[index] = `${internalName} = Swell();\n__modmeta(${JSON.stringify(internalName)},${JSON.stringify(name)},${JSON.stringify(ownerObject ?? '')});${viewDirective}`;
+        output[index] = `${internalName} = Mod();\n__modmeta(${JSON.stringify(internalName)},${JSON.stringify(name)},${JSON.stringify(ownerObject ?? '')});${viewDirective}`;
         continue;
       }
 
@@ -4202,6 +4372,9 @@ export function compileLanguageSource(source: string): string {
         const value = propertyMatch[3].trim();
         if (live) {
           const key = property.toLowerCase();
+          if (currentMod.modelId === 'generic' && key !== 'model') {
+            throw new LanguageError([{ line: lineNumber, message: `MOD '${currentMod.name}' requires MODEL before '${property}'` }]);
+          }
           if (currentMod.modelId === 'composite' && (key === 'tune' || key === 'output')) {
             if (key === 'tune' && /\bpitch\b/i.test(value)) {
               throw new LanguageError([{ line: lineNumber, message: 'LIVE TUNE exposes sliders only for WITH octave/detune/ratio; TUNE PITCH remains a structured pitch expression' }]);
@@ -4221,13 +4394,21 @@ export function compileLanguageSource(source: string): string {
             }
           }
         }
-        output[index] = compileModProperty(currentMod, property, value, lineNumber, currentMod.ownerVoice ? scopedDefinitions(`voice:${currentMod.ownerVoice}`) : sourceDefinitions);
+        output[index] = compileModProperty(currentMod, property, value, lineNumber, currentMod.ownerVoice ? scopedDefinitions(`voice:${currentMod.ownerVoice}`) : sourceDefinitions, modSources);
         const scopeKey = modSourceKey(currentMod.ownerVoice, currentMod.name);
         const source = modSources.get(scopeKey);
         if (source) {
           source.modelId = currentMod.modelId;
+          if (property.toLowerCase() === 'model') {
+            if (currentMod.modelId === 'noise') source.outputs = new Set(['out1']);
+            else if (currentMod.modelId === 'swell') source.outputs = new Set(['out1', 'out2', 'out3', 'out4']);
+            else if (currentMod.modelId === 'dices') source.outputs = new Set(['x1', 'x2', 'x3', 'y']);
+            else if (currentMod.modelId === 'lfo') source.outputs = new Set(['out1']);
+          }
           if (currentMod.modelId === 'composite' && property.toLowerCase() === 'output') {
             source.outputs = new Set(value.split(',').map((item) => item.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)/)?.[1]).filter((item): item is string => Boolean(item)));
+          } else if (currentMod.modelId === 'lfo' && /^out[1-4]$/i.test(property)) {
+            source.outputs.add(property.toLowerCase());
           }
         }
         continue;
@@ -4292,7 +4473,7 @@ export function compileLanguageSource(source: string): string {
         }
         voices.add(name);
         sourceKinds.set(name, 'voice');
-        currentVoice = { name, line: lineNumber, indentation, hasSound: false, soundId: null, pitchProperty: null, vcaTargets: new Set(), embeddedFilter: null };
+        currentVoice = { name, line: lineNumber, indentation, hasSound: false, soundId: null, pitchProperty: null, vcaTargets: new Set(), embeddedFilter: null, sampleSlices: null, sampleRegionHasPlaybackModifiers: false };
         const viewDirective = voiceMatch[3] ? `\n${name}.view();` : '';
         const disabledDirective = disabled ? `\n${name}.disabled(true);` : '';
         output[index] = `${name} = Voice();${viewDirective}${disabledDirective}`;
@@ -4363,6 +4544,13 @@ export function compileLanguageSource(source: string): string {
           const base = baseName ? (scoped?.get(baseName) ?? kitDefinitions.get(baseName.toLowerCase()) ?? kitDefinitions.get(baseName)) : { entries: new Map<string, DrumKitEntry>() };
           if (!base) throw new LanguageError([{ line: lineNumber, message: `unknown KIT '${baseName}'` }]);
           const defined = applyDrumKitEntries(base, setKit[3], lineNumber);
+          if (options.hasSampleAsset) {
+            for (const entry of defined.entries.values()) {
+              if (entry.source === 'sample' && entry.sampleAlias && !options.hasSampleAsset(entry.sampleAlias)) {
+                throw new LanguageError([{ line: lineNumber, message: `unknown sample asset '${entry.sampleAlias}'` }]);
+              }
+            }
+          }
           if (local) scoped!.set(setName, defined); else kitDefinitions.set(setName, defined);
           output[index] = '';
           continue;
@@ -4463,29 +4651,51 @@ export function compileLanguageSource(source: string): string {
           output[index] = `__drumkitmeta(${JSON.stringify(currentDrumkit.name)},${JSON.stringify(kitLine[1])});`;
           continue;
         }
-        if (!currentDrumkit.kit) throw new LanguageError([{ line: lineNumber, message: `DRUMKIT '${currentDrumkit.name}' requires KIT before instrument lines` }]);
         const split = splitEveryClause(trimmed);
+        const inlineSample = split.base.match(/^sample\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(.+))?$/i);
+        if (inlineSample) {
+          const sampleAlias = inlineSample[1];
+          if (options.hasSampleAsset && !options.hasSampleAsset(sampleAlias)) {
+            throw new LanguageError([{ line: lineNumber, message: `unknown sample asset '${sampleAlias}'` }]);
+          }
+          const slotAlias = sampleAlias;
+          const params = drumParameterDefaults('sample', inlineSample[2] ?? '', lineNumber, { ...DRUM_DEFAULTS, decay: 100 });
+          if (!split.every) {
+            output[index] = `__drumsampleslot(${JSON.stringify(currentDrumkit.name)},${JSON.stringify(slotAlias)},${JSON.stringify(sampleAlias)},${JSON.stringify(serializeDrumParams(params))},0,"ms",100,false,false,"Clock",0,0,0);`;
+            continue;
+          }
+          const timing = parseEverySpec(split.every, lineNumber, scopedDefinitions(`drumkit:${currentDrumkit.name}`));
+          const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
+          const euclidean = timing.euclidean ?? { hits: 0, steps: 0, rotate: 0 };
+          output[index] = `${prefix}__drumsampleslot(${JSON.stringify(currentDrumkit.name)},${JSON.stringify(slotAlias)},${JSON.stringify(sampleAlias)},${JSON.stringify(serializeDrumParams(params))},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)},${euclidean.hits},${euclidean.steps},${euclidean.rotate});`;
+          continue;
+        }
+        if (!currentDrumkit.kit) throw new LanguageError([{ line: lineNumber, message: `DRUMKIT '${currentDrumkit.name}' requires KIT before KIT alias lines` }]);
         const soundPart = split.base.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\s+with\s+(.+))?$/i);
         if (!soundPart) throw new LanguageError([{ line: lineNumber, message: `invalid DRUMKIT instrument line '${trimmed}'` }]);
         const alias = soundPart[1];
         const entry = currentDrumkit.kit.entries.get(alias);
         if (!entry) throw new LanguageError([{ line: lineNumber, message: `unknown KIT alias '${alias}'` }]);
         const params = drumParameterDefaults(entry.source, soundPart[2] ?? '', lineNumber, entry.defaults);
+        const drumkitName = currentDrumkit.name;
+        const directive = (amount: number, unit: string, chance: number, drift: boolean, loose: boolean, clockSource: string, hits: number, steps: number, rotate: number): string => entry.source === 'sample'
+          ? `__drumsampleslot(${JSON.stringify(drumkitName)},${JSON.stringify(alias)},${JSON.stringify(entry.sampleAlias)},${JSON.stringify(serializeDrumParams(params))},${amount},${JSON.stringify(unit)},${chance},${drift},${loose},${JSON.stringify(clockSource)},${hits},${steps},${rotate});`
+          : `__drumslot(${JSON.stringify(drumkitName)},${JSON.stringify(alias)},${JSON.stringify(entry.source)},${JSON.stringify(serializeDrumParams(params))},${amount},${JSON.stringify(unit)},${chance},${drift},${loose},${JSON.stringify(clockSource)},${hits},${steps},${rotate});`;
         if (!split.every) {
-          output[index] = `__drumslot(${JSON.stringify(currentDrumkit.name)},${JSON.stringify(alias)},${JSON.stringify(entry.source)},${JSON.stringify(serializeDrumParams(params))},0,"ms",100,false,false,"Clock",0,0,0);`;
+          output[index] = directive(0, 'ms', 100, false, false, 'Clock', 0, 0, 0);
           continue;
         }
         const timing = parseEverySpec(split.every, lineNumber, scopedDefinitions(`drumkit:${currentDrumkit.name}`));
         const prefix = timing.clockPrelude ? `${timing.clockPrelude} ` : '';
         const euclidean = timing.euclidean ?? { hits: 0, steps: 0, rotate: 0 };
-        output[index] = `${prefix}__drumslot(${JSON.stringify(currentDrumkit.name)},${JSON.stringify(alias)},${JSON.stringify(entry.source)},${JSON.stringify(serializeDrumParams(params))},${timing.amount},${JSON.stringify(timing.unit)},${timing.chance},${timing.drift},${timing.loose},${JSON.stringify(timing.clockSource)},${euclidean.hits},${euclidean.steps},${euclidean.rotate});`;
+        output[index] = `${prefix}${directive(timing.amount, timing.unit, timing.chance, timing.drift, timing.loose, timing.clockSource, euclidean.hits, euclidean.steps, euclidean.rotate)}`;
         continue;
       }
 
       if (currentFilter && indentation > currentFilter.indentation) {
         const statement = parseBlockPropertyStatement(trimmed, lineNumber, 'FILTER');
         if (statement.live) validateLiveFilterProperty(statement.property, lineNumber);
-        output[index] = compileFilterProperty(currentFilter, statement.property, statement.value, lineNumber, scopedDefinitions(`filter:${currentFilter.internalName}`, currentFilter.ownerVoice ? `voice:${currentFilter.ownerVoice}` : null));
+        output[index] = compileFilterProperty(currentFilter, statement.property, statement.value, lineNumber, scopedDefinitions(`filter:${currentFilter.internalName}`, currentFilter.ownerVoice ? `voice:${currentFilter.ownerVoice}` : null), modSources);
         continue;
       }
 
@@ -4504,7 +4714,7 @@ export function compileLanguageSource(source: string): string {
             throw new LanguageError([{ line: lineNumber, message: 'LIVE TUNE exposes sliders only for WITH octave/detune/ratio; TUNE PITCH remains a structured pitch expression' }]);
           }
         }
-        output[index] = compileVoiceProperty(currentVoice, statement.property, statement.value, lineNumber, scopedKinds(`voice:${currentVoice.name}`), scopedDefinitions(`voice:${currentVoice.name}`), modSources, statement.live);
+        output[index] = compileVoiceProperty(currentVoice, statement.property, statement.value, lineNumber, scopedKinds(`voice:${currentVoice.name}`), scopedDefinitions(`voice:${currentVoice.name}`), modSources, statement.live, options.hasSampleAsset);
         if (statement.property.toLowerCase() === 'sound') {
           currentVoice.hasSound = true;
           if (currentVoice.soundId) voiceSoundIds.set(currentVoice.name, currentVoice.soundId);

@@ -87,10 +87,45 @@ resonator.modal
 resonator.sympathetic
 resonator.strings
 resonator.string
+noise.white
+noise.dust
+noise.clocked
+noise.fractal
 matter
 ```
 
 `@v ... saw` is a convenience alias that generates `sound sawtooth`. Engine names otherwise use the public Sonus names directly; Mutable Instruments product names are not snippet aliases.
+
+Sample VOICE snippets accept any asset text after `sample.` and deliberately do not validate the asset while expanding the snippet:
+
+```text
+@v guitar sample.test-sound
+```
+
+expands to:
+
+```text
+VOICE guitar:
+    sound sample.test-sound
+    pitch notes [C3]
+```
+
+The `.full` form makes the default root and region explicit:
+
+```text
+@v guitar sample.test-sound.full
+```
+
+expands to:
+
+```text
+VOICE guitar:
+    sound sample.test-sound with root C3
+    pitch notes [C3]
+    region 0 100
+```
+
+The editor does not check whether `test-sound` exists. Normal language compilation performs that validation when the expanded source is run.
 
 Without `.full`, VOICE snippets deliberately create only the minimum useful skeleton: `sound` and `pitch`. With `.full`, the registered public engine parameters are added with neutral starting values.
 
@@ -220,6 +255,73 @@ SEQ ecosystem:
 ```
 
 The snippet creates only normal SEQ source. Life variants such as `life.highlife` remain normal language edits after expansion unless a dedicated snippet is added later.
+
+## MOD
+
+Use `@mod <name> <model>`. The snippet expands to normal `MOD` source and uses the current public model names.
+
+### LFO
+
+```text
+@mod motion lfo
+```
+
+expands to:
+
+```text
+MOD motion:
+    model lfo
+    rate 0.1 hz
+```
+
+The snippet intentionally creates only the common LFO skeleton. Add `out1..out4` definitions normally, for example:
+
+```text
+out1 sine
+out2 triangle /2 with phase 90
+out3 sawtooth *2 with level 60
+```
+
+Each output may use `sine`, `triangle`, `sawtooth`, `ramp`, or `square`, an optional `*N`/`/N` rate relation, phase, and level.
+
+### Noise
+
+The supported noise snippets are:
+
+```text
+@mod random noise
+@mod random noise.white
+@mod dust noise.dust
+@mod stepped noise.clocked
+@mod texture noise.fractal
+```
+
+`noise` is a snippet convenience alias for `noise.white`. For example:
+
+```text
+@mod dust noise.dust
+```
+
+expands to:
+
+```text
+MOD dust:
+    model noise.dust
+```
+
+Add `density 0..100` manually for `noise.dust`; `noise.clocked` can use the common MOD `rate`. White and fractal noise need no rate.
+
+### Other MOD models
+
+The editor also provides:
+
+```text
+@mod motion swell
+@mod rnd dices
+@mod graph composite
+```
+
+These expand to the current starter definitions implemented in the editor. `swell` and `dices` include useful initial parameters, while `composite` creates only the model declaration so its internal graph can be authored explicitly.
 
 ## DRUMKIT
 

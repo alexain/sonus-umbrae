@@ -9,6 +9,7 @@
   --phosphor: #d7a92e;
   --phosphor-dim: #715a1d;
   --phosphor-hot: #ffe783;
+  --sample-slice-guide: #63e6e2;
   --bg: #050605;
   --line: rgba(215, 169, 46, 0.35);
 
@@ -1490,3 +1491,181 @@ button, input, textarea { font: inherit; }
 @media (max-width: 760px) {
   .logic-hardware-rack { grid-template-columns: 1fr; min-width: 260px; }
 }
+
+/* Session asset library. WAV files are retained as browser File objects here;
+   decoded PCM memory shown in the panel is the projected Float32 sampler cost. */
+.assets-monitor-card .monitor-body {
+  display: grid;
+  gap: 8px;
+}
+
+.assets-memory {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  color: var(--phosphor-dim);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.assets-drop-zone {
+  position: relative;
+  min-height: 104px;
+  padding: 8px 9px;
+  overflow: hidden;
+  border: 1px solid rgba(215, 169, 46, 0.18);
+  background: rgba(5, 6, 5, 0.42);
+  outline: none;
+  cursor: pointer;
+}
+
+.assets-drop-zone:focus-visible {
+  border-color: var(--phosphor);
+}
+
+.assets-file-input { display: none; }
+
+.assets-list {
+  display: grid;
+  gap: 4px;
+}
+
+.assets-empty {
+  display: grid;
+  min-height: 86px;
+  place-items: center;
+  color: var(--phosphor-dim);
+  font-size: 13px;
+  letter-spacing: .07em;
+}
+
+.asset-row {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) 28px;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 4px 6px 7px;
+  border-left: 1px solid rgba(215, 169, 46, 0.14);
+}
+
+.asset-row:hover {
+  background: rgba(215, 169, 46, 0.035);
+}
+
+.asset-copy { min-width: 0; }
+
+.asset-alias {
+  overflow: hidden;
+  color: var(--phosphor);
+  font-size: 15px;
+  line-height: 1.05;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.asset-meta {
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--phosphor-dim);
+  font-size: 10px;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+
+.asset-preview {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  padding: 2px;
+  border: 1px solid rgba(215, 169, 46, 0.24);
+  background: transparent;
+  color: var(--phosphor-dim);
+  cursor: pointer;
+}
+
+.asset-preview svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  fill: currentColor;
+  stroke: none;
+}
+
+.asset-preview:hover,
+.asset-preview:focus-visible,
+.asset-preview.playing {
+  color: var(--phosphor-hot);
+  border-color: rgba(255, 231, 131, 0.48);
+  outline: none;
+  box-shadow: 0 0 7px rgba(215, 169, 46, 0.14);
+}
+
+.asset-delete {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  padding: 4px;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--phosphor-dim);
+  cursor: pointer;
+}
+
+.asset-delete svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.asset-delete:hover,
+.asset-delete:focus-visible {
+  color: var(--phosphor-hot);
+  outline: none;
+  filter: drop-shadow(0 0 4px rgba(255, 231, 131, 0.32));
+}
+
+.assets-drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: none;
+  place-items: center;
+  align-content: center;
+  gap: 4px;
+  border: 1px solid var(--phosphor-hot);
+  background: rgba(5, 6, 5, 0.94);
+  color: var(--phosphor-hot);
+  pointer-events: none;
+  text-align: center;
+}
+
+.assets-drop-zone.drag-active .assets-drop-overlay { display: grid; }
+
+.assets-drop-plus {
+  font-size: 52px;
+  font-weight: 300;
+  line-height: .85;
+  text-shadow: 0 0 8px rgba(255, 231, 131, 0.34);
+}
+
+.assets-drop-label {
+  font-size: 12px;
+  letter-spacing: .08em;
+}
+
+.sample-waveform-canvas {
+  display: block;
+  width: 100%;
+  height: 96px;
+  background: rgba(0, 0, 0, 0.18);
+  border: 1px solid var(--line-soft);
+}
+.scheme-sample-waveform { min-width: 280px; }
