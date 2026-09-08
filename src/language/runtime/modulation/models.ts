@@ -5,24 +5,44 @@ export const MOD_MODEL_CAPABILITIES: Record<'lfo' | 'noise' | 'swell' | 'dices' 
   lfo: {
     outputs: ['out1', 'out2', 'out3', 'out4'],
     parameters: new Set(['out1', 'out2', 'out3', 'out4']),
+    rate: true,
   },
   noise: {
     outputs: ['out1'],
     parameters: new Set(['density']),
+    rate: 'clocked-only',
   },
   swell: {
     outputs: ['out1', 'out2', 'out3', 'out4'],
     parameters: new Set(['shape', 'slope', 'smooth', 'relation', 'shift', 'range']),
+    rate: true,
   },
   dices: {
     outputs: ['x1', 'x2', 'x3', 'y'],
     parameters: new Set(['spread', 'bias', 'steps', 'deja', 'length', 'diversity']),
+    rate: true,
   },
   composite: {
     outputs: 'dynamic',
     parameters: new Set(['tune', 'fm', 'pm', 'am', 'ring', 'sync', 'output']),
+    rate: false,
   },
 };
+
+
+export function modSupportsRate(mod: Pick<ModDefinition, 'model' | 'noiseModel'>): boolean {
+  if (mod.model === 'generic') return true;
+  const capability = MOD_MODEL_CAPABILITIES[mod.model];
+  if (capability.rate === 'clocked-only') return mod.noiseModel === 'clocked';
+  return capability.rate;
+}
+
+export function modRateError(mod: Pick<ModDefinition, 'model' | 'noiseModel'>): string {
+  if (mod.model === 'noise') {
+    return `MOD noise.${mod.noiseModel} does not support rate; RATE is available only for noise.clocked`;
+  }
+  return `MOD ${mod.model} does not support rate`;
+}
 
 export function applyModelModSetDirective(
   mod: ModDefinition,

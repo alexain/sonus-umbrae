@@ -89,4 +89,6 @@ export type ModSetDirective = {
 export type ModModelCapabilities = {
   outputs: readonly string[] | 'dynamic';
   parameters: ReadonlySet<string>;
+  /** Whether the model consumes MOD's common RATE. Noise is variant-dependent. */
+  rate: boolean | 'clocked-only';
 };

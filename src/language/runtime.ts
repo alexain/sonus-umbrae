@@ -574,7 +574,7 @@ export interface LanguageModMetadata {
 
 export interface LanguageModSetDirective {
   internalName: string;
-  parameter: 'model' | 'freq' | 'ratebeat' | 'out1' | 'out2' | 'out3' | 'out4' | 'slope' | 'shape' | 'smooth' | 'shift' | 'output' | 'range' | 'spread' | 'bias' | 'steps' | 'deja' | 'length' | 'diversity';
+  parameter: 'model' | 'freq' | 'ratebeat' | 'out1' | 'out2' | 'out3' | 'out4' | 'slope' | 'shape' | 'smooth' | 'shift' | 'output' | 'range' | 'spread' | 'bias' | 'steps' | 'deja' | 'length' | 'diversity' | 'density';
   value: string;
   line: number;
 }
@@ -2302,7 +2302,7 @@ export class SonusRuntime {
         continue;
       }
 
-      match = line.match(/^([A-Za-z_]\w*)\.(harmo|timbre|morph|width|geometry|structure|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)\(\s*(.+)\s*\)\s*$/);
+      match = line.match(/^([A-Za-z_]\w*)\.(harmo|timbre|morph|width|density|geometry|structure|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)\(\s*(.+)\s*\)\s*$/);
       if (match) {
         const [, name, parameter, rawValue] = match;
         const voice = voices.get(name);
@@ -2342,7 +2342,7 @@ export class SonusRuntime {
         continue;
       }
 
-      match = line.match(/^([A-Za-z_]\w*)\.(freq|harmo|timbre|morph|width|model|level|slope|shape|smooth|shift)\.view\(\s*\)\s*$/);
+      match = line.match(/^([A-Za-z_]\w*)\.(freq|harmo|timbre|morph|width|density|model|level|slope|shape|smooth|shift)\.view\(\s*\)\s*$/);
       if (match) {
         const [, name, parameter] = match;
           const voice = voices.get(name);

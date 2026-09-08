@@ -486,7 +486,7 @@ export function parseLanguageFxModulationDirective(
 
 export function parseLanguageModSetDirective(line: string, lineNumber: number): LanguageModSetDirective | null {
   const match = line.match(
-    /^__modset\("([A-Za-z_]\w*)","(model|freq|ratebeat|out1|out2|out3|out4|slope|shape|smooth|shift|output|range|spread|bias|steps|deja|length|diversity)","((?:[^"\\]|\\.)*)"\);?$/,
+    /^__modset\("([A-Za-z_]\w*)","(model|freq|ratebeat|out1|out2|out3|out4|slope|shape|smooth|shift|output|range|spread|bias|steps|deja|length|diversity|density)","((?:[^"\\]|\\.)*)"\);?$/,
   );
   if (!match) return null;
 
@@ -639,7 +639,7 @@ export function parseLanguageParameterCycleDirective(
   lineNumber: number,
 ): LanguageParameterCycleDefinition | null {
   const match = line.match(
-    /^__paramcycle\("([A-Za-z_]\w*)","(harmo|timbre|morph|width|geometry|structure|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)","((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/,
+    /^__paramcycle\("([A-Za-z_]\w*)","(harmo|timbre|morph|width|density|geometry|structure|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)","((?:[^"\\]|\\.)*)",(\d+(?:\.\d+)?),"(ms|sec|beat)",(\d+(?:\.\d+)?),(true|false),(true|false),"([A-Za-z_]\w*)"\)$/,
   );
   if (!match) return null;
 
@@ -669,7 +669,7 @@ export function parseLanguageParameterDefaultDirective(
   lineNumber: number,
 ): LanguageParameterDefaultDefinition | null {
   const match = line.match(
-    /^__paramdefault\("([A-Za-z_]\w*)","(harmo|timbre|morph|width|geometry|structure|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)","((?:[^"\\]|\\.)*)"\)$/,
+    /^__paramdefault\("([A-Za-z_]\w*)","(harmo|timbre|morph|width|density|geometry|structure|brightness|damping|position|space|bow|bowTimbre|blow|blowTimbre|strike|strikeTimbre)","((?:[^"\\]|\\.)*)"\)$/,
   );
   if (!match) return null;
 

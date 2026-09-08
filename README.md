@@ -1,72 +1,41 @@
 # Sonus Umbrae
 
-**Sonus Umbrae** is an experimental browser-based live-coding environment for composing and performing modular audio systems entirely from text.
+**Sonus Umbrae** is an experimental browser-based live-coding environment for building and performing modular audio systems from text.
 
-The source document is the patch: declarations describe generators, modulators, processors, sequencing and routing, while the runtime reconciles edits against the live audio graph. The project combines a typed musical language, a shared scheduler, Web Audio / AudioWorklet orchestration and WebAssembly DSP backends. The graphical Scheme view is intentionally an observer of the running patch rather than a second patch-editing surface.
+The source document is the patch: `VOICE`, `DRUMKIT`, `MOD`, `FX`, `FILTER`, clocks, sequencers and routes describe the desired musical system, while the runtime reconciles edits against the live Web Audio graph. DSP backends are implemented with AudioWorklets and independent WebAssembly modules where practical.
 
-Sonus Umbrae is not built around one synthesizer family or one upstream hardware ecosystem. Its public language uses its own engine and model names while selected permissively licensed DSP implementations are integrated behind those abstractions.
+## Highlights
 
-## Current characteristics
-
-- Text-first modular live coding with hot reload quantized to the musical transport.
-- Shared beat/wall-clock scheduler for `every`, probability, named clock objects, clock-rate derivation and generative events.
-- Typed reusable values including scalar, time, note, frequency, scale and envelope specifications, with a unified `PITCH` property for `SCALE`, `NOTES`, and `FREQS` material.
-- Stateful `SEQ` sources, including a Turing-style generative sequencer.
-- Stereo-aware declarative audio routing with serial and parallel signal paths, named ports, per-route levels, and automatic routing of unrouted audio sources to the main output.
-- AudioWorklet processing with C/C++ DSP compiled to independent WebAssembly modules.
-- Synthesized and sample-backed `DRUMKIT` instruments with reusable/customizable kits, Euclidean triggering, per-voice controls and performance humanization.
-- Sample `VOICE` playback with musical root tuning, regions, loop/reverse, slicing, sequencing and waveform monitoring.
-- DaisySP basic oscillator VOICE backends plus a shared `composite` graph core used by `VOICE ... sound composite` and `MOD ... model composite`. Composite graphs own private node instances, inherit engine/model parameters live, support audio-rate FM/PM/AM/ring/sync, per-instance `tune` (relative or independent pitch), multi-parameter LIVE controls, and domain-specific output policies; VOICE composites additionally expose named internal mixer buses and a mixed master output.
-- Macro synthesis engines derived from permissively licensed Mutable Instruments Plaits DSP.
-- `matter` physical modelling derived from Mutable Instruments Elements DSP.
-- `resonator.*` models derived from Mutable Instruments Rings DSP, including internal polyphony and stereo MAIN/AUX behaviour.
-- Four-output modulation derived from Mutable Instruments Tides 2018 DSP.
-- `MOD ... model dices` random-voltage modulation derived from selected MIT-licensed Mutable Instruments Marbles components, exposing `x1`, `x2`, `x3` and slow `y` outputs.
-- `mist.*` stereo effects derived from the permissively licensed SuperParasites/Clouds family.
-- `sky` ambient reverb based on Ghost Note Audio CloudSeedCore.
-- Multimode `svf` filtering based on Electrosmith DaisySP, with simultaneous `lp`/`hp`/`bp`/`np` outputs and low-pass as the default.
-- Performance-oriented source controls with `LIVE` parameters/notes and hot mute/bypass/pause declarations for voices, drumkits, filters, effects and both master/named clocks.
-- Read-only Scheme topology view and optional live signal/parameter visualisation.
+- Text-first modular live coding with quantized hot reload.
+- Musical clocks, reusable rhythms, probability and generative sequencing.
+- Synth voices ranging from basic oscillators to macro, physical-model and resonator engines.
+- Sample `VOICE` playback with root tuning, regions, loop/reverse, slicing, sequencing and waveform monitoring.
+- Synthesized and sample-backed `DRUMKIT` instruments.
+- DaisySP noise sources: `noise.white`, `noise.dust`, `noise.clocked` and `noise.fractal`, available as both audio `VOICE` engines and modulation sources where appropriate.
+- Multi-output `MOD ... model lfo` with independent waveform, rate ratio, phase and level for each output.
+- Additional modulation models including `swell`, `dices` and audio-rate `composite` graphs.
+- Stereo routing, named ports, filters, delays, ambient/realtime effects and automatic MAIN routing.
+- Read-only Scheme and signal views for observing the running patch.
 - Plain-text `.sum` sessions.
 
-## Project documentation
+Sonus Umbrae exposes its own public language rather than mirroring any particular hardware ecosystem. Selected permissively licensed DSP implementations are integrated behind those abstractions.
 
-- [`docs/LANGUAGE.md`](docs/LANGUAGE.md) — language syntax, typing, timing, object semantics and routing.
-- [`BUILD.md`](BUILD.md) — local development, DSP source setup and WebAssembly builds.
-- [`ROADMAP.md`](ROADMAP.md) — current direction and planned architecture.
-- [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) — licensing overview for upstream components.
-- [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) — attribution and notices required or requested by upstream projects.
+## Documentation
 
-## Status
-
-Sonus Umbrae is under active development. The language, DSP registry and runtime contracts may still change while the architecture is being consolidated.
-
-### Environment
-
-The live environment includes dedicated Configuration, Help, Scheme, and About screens, a keyboard-first `Esc` quick menu, and a terminal-style `>` command prompt. Optional program capabilities are declared with the top-of-file `USE` directive; editor-only preferences remain outside the language and are stored locally by the browser. See `docs/LANGUAGE.md` for the language contract.
-
-
-The configuration screen can select the browser audio output when supported, request a sample rate, choose a Web Audio latency mode, and display the effective sample rate and reported latency. Audio-structural changes restart the audio engine after confirmation.
-
-
-### Runtime and language
-
-The language combines declarative object definitions, reusable typed values, musical scheduling, stateful generative sources and explicit routing. `REGISTER` provides persistent pitch storage, while sample, synthesis, modulation, filtering and effects share the same runtime lifecycle and hot-reload model.
-
-The implementation is intentionally modular: browser orchestration, scheduling and views are kept separate from DSP backends, which are built as independent WebAssembly modules where practical. The public language abstracts those backends so sessions are not tied to any one upstream DSP project.
-
+- [`docs/LANGUAGE.md`](docs/LANGUAGE.md) — language syntax and runtime semantics.
+- [`docs/SNIPPETS.md`](docs/SNIPPETS.md) — editor shorthand for creating normal Sonus source.
+- [`BUILD.md`](BUILD.md) — local development and WebAssembly DSP builds.
+- [`ROADMAP.md`](ROADMAP.md) — current architectural direction.
+- [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) — upstream licensing and attribution.
 
 ## Try it online
 
-Sonus Umbrae runs directly in a modern web browser and can be tried through the project's GitHub Pages deployment, with no local installation required:
+Sonus Umbrae runs in a modern browser through the project GitHub Pages deployment:
 
 **https://alexain.github.io/sonus-umbrae/**
 
-The online build tracks the current public release from the `main` branch. Web Audio capabilities such as explicit output-device selection remain browser-dependent.
+The online build tracks the current public release from `main`. Web Audio capabilities such as explicit output-device selection remain browser-dependent.
 
+## Status
 
-### Constellation SEQ
-
-Sonus Umbrae also includes `SEQ ... model constellation`: a weighted melodic generator with stepwise/leap/repeat bias, recent-memory bias, weighted octave register, phrase memory/mutation, and a constellation-style `with view` monitor. Consumer timing remains external (`every`, `pattern`, Euclidean), consistent with the rest of the SEQ architecture.
-
-`SEQ ... model snake` adds a reusable matrix sequencer. A matrix can be generated from normal scale/note/frequency material or authored explicitly with `matrix [ ... ]`; traversal modes include snake, rows, columns, spiral, diagonal, bounce, random, and orthogonal walk. The optional view shows the current head and a fading body over the matrix.
+Sonus Umbrae is under active development. Language, DSP registry and runtime contracts may still evolve while the architecture is consolidated.
