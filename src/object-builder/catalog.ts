@@ -19,7 +19,7 @@ const everyParameter: BuilderParameterDefinition = {
   id: 'every', label: 'Timing / Every', control: 'time', description: 'Normal Sonus EVERY / PATTERN / Euclidean timing.',
 };
 const pitchParameter: BuilderParameterDefinition = {
-  id: 'pitch', label: 'Pitch', control: 'pitch', description: 'Notes, scale, frequencies, SEQ/REGISTER source, selection and EVERY modifiers.',
+  id: 'pitch', label: 'Pitch', control: 'pitch', required: true, description: 'Notes, scale, frequencies, SEQ/REGISTER source, selection and EVERY modifiers.',
 };
 const routeParameter: BuilderParameterDefinition = {
   id: 'out', label: 'Output routing', control: 'routing', defaultValue: 'MAIN', description: 'Defaults to MAIN when the object has an automatic main audio route.',
@@ -35,23 +35,23 @@ const resonatorModels = ['resonator.modal', 'resonator.sympathetic', 'resonator.
 
 const voiceModels: BuilderModelDefinition[] = [
   ...['sine', 'triangle', 'sawtooth', 'ramp'].map((id) => ({ id, label: id, preview: 'waveform' as const })),
-  { id: 'square', label: 'square', preview: 'waveform', parameters: [{ id: 'width', label: 'Width', control: 'slider', min: 0, max: 100, unit: '%' }] },
+  { id: 'square', label: 'square', preview: 'waveform', parameters: [{ id: 'width', label: 'Width', control: 'slider', min: 0, max: 100, unit: '%', liveCapable: true }] },
   { id: 'noise.white', label: 'noise.white', preview: 'waveform' },
-  { id: 'noise.dust', label: 'noise.dust', preview: 'waveform', parameters: [{ id: 'density', label: 'Density', control: 'slider', min: 0, max: 100, unit: '%' }] },
+  { id: 'noise.dust', label: 'noise.dust', preview: 'waveform', parameters: [{ id: 'density', label: 'Density', control: 'slider', min: 0, max: 100, unit: '%', liveCapable: true }] },
   { id: 'noise.clocked', label: 'noise.clocked', preview: 'waveform' },
   { id: 'noise.fractal', label: 'noise.fractal', preview: 'waveform' },
   ...macroModels.map((id) => ({
     id,
     label: id,
     parameters: [
-      { id: 'harmo', label: 'Harmonics', control: 'slider' as const, min: 0, max: 100, unit: '%' },
-      { id: 'timbre', label: 'Timbre', control: 'slider' as const, min: 0, max: 100, unit: '%' },
-      { id: 'morph', label: 'Morph', control: 'slider' as const, min: 0, max: 100, unit: '%' },
+      { id: 'harmo', label: 'Harmonics', control: 'slider' as const, min: 0, max: 100, unit: '%', liveCapable: true },
+      { id: 'timbre', label: 'Timbre', control: 'slider' as const, min: 0, max: 100, unit: '%', liveCapable: true },
+      { id: 'morph', label: 'Morph', control: 'slider' as const, min: 0, max: 100, unit: '%', liveCapable: true },
       { id: 'lpg', label: 'LPG', control: 'toggle' as const },
     ],
   })),
-  { id: 'matter', label: 'matter', parameters: ['geometry', 'brightness', 'damping', 'position', 'space'].map((id) => ({ id, label: id, control: 'slider' as const, min: 0, max: 100, unit: '%' })) },
-  ...resonatorModels.map((id) => ({ id, label: id, parameters: ['structure', 'brightness', 'damping', 'position'].map((p) => ({ id: p, label: p, control: 'slider' as const, min: 0, max: 100, unit: '%' })) })),
+  { id: 'matter', label: 'matter', parameters: ['geometry', 'brightness', 'damping', 'position', 'space'].map((id) => ({ id, label: id, control: 'slider' as const, min: 0, max: 100, unit: '%', liveCapable: true })) },
+  ...resonatorModels.map((id) => ({ id, label: id, parameters: ['structure', 'brightness', 'damping', 'position'].map((p) => ({ id: p, label: p, control: 'slider' as const, min: 0, max: 100, unit: '%', liveCapable: true })) })),
   { id: 'sample', label: 'sample', preview: 'sample-waveform', parameters: [
     { id: 'asset', label: 'Sample', control: 'sample', required: true },
     { id: 'region', label: 'Region', control: 'expression' },
@@ -164,29 +164,10 @@ export const OBJECT_BUILDER_CATALOG: readonly BuilderObjectDefinition[] = [
   {
     kind: 'voice', keyword: 'VOICE', label: 'Voice', named: true, supportsView: true, preview: 'routing', models: voiceModels,
     ports: [audioOut], defaultDestination: 'MAIN', parameters: [nameParameter, viewParameter, pitchParameter, routeParameter,
-      { id: 'level', label: 'Level', control: 'slider', min: 0, max: 100, unit: '%' },
-      { id: 'pan', label: 'Pan', control: 'slider', min: -100, max: 100 },
+      { id: 'level', label: 'Level', control: 'slider', min: 0, max: 100, unit: '%', defaultValue: 50, liveCapable: true },
       { id: 'vca', label: 'VCA envelope', control: 'expression' },
       everyParameter,
     ],
-  },
-  {
-    kind: 'mod', keyword: 'MOD', label: 'Modulator', named: true, supportsView: true, preview: 'waveform', models: modModels,
-    ports: [signalOut], defaultDestination: null, parameters: [nameParameter, viewParameter],
-  },
-  {
-    kind: 'envelope', keyword: 'SET', label: 'Envelope', named: true, supportsView: false, preview: 'envelope', ports: [{ id: 'out', label: 'OUT', domain: 'signal', direction: 'output' }],
-    parameters: [nameParameter,
-      { id: 'delay', label: 'Delay', control: 'time' }, { id: 'attack', label: 'Attack', control: 'time' },
-      { id: 'hold', label: 'Hold', control: 'time' }, { id: 'decay', label: 'Decay', control: 'time' },
-      { id: 'sustain', label: 'Sustain', control: 'slider', min: 0, max: 100, unit: '%' },
-      { id: 'release', label: 'Release', control: 'time' },
-      { id: 'range', label: 'Range', control: 'expression' },
-    ], note: 'Public language form is SET <name>: ENVELOPE [...].',
-  },
-  {
-    kind: 'fx', keyword: 'FX', label: 'Effect', named: true, supportsView: true, preview: 'routing', models: fxModels,
-    ports: [stereoIn, audioOut], defaultDestination: 'MAIN', parameters: [nameParameter, viewParameter, routeParameter, everyParameter],
   },
   {
     kind: 'filter', keyword: 'FILTER', label: 'Filter', named: true, supportsView: false, preview: 'routing',
@@ -198,17 +179,22 @@ export const OBJECT_BUILDER_CATALOG: readonly BuilderObjectDefinition[] = [
     ],
   },
   {
+    kind: 'mod', keyword: 'MOD', label: 'Modulator', named: true, supportsView: true, preview: 'waveform', models: modModels,
+    ports: [signalOut], defaultDestination: null, parameters: [nameParameter, viewParameter],
+  },
+  {
+    kind: 'fx', keyword: 'FX', label: 'Effect', named: true, supportsView: true, preview: 'routing', models: fxModels,
+    ports: [stereoIn, audioOut], defaultDestination: 'MAIN', parameters: [nameParameter, viewParameter, routeParameter, everyParameter],
+  },
+  {
     kind: 'drumkit', keyword: 'DRUMKIT', label: 'Drumkit', named: true, supportsView: true, preview: 'pattern',
     ports: [audioOut], defaultDestination: 'MAIN', parameters: [nameParameter, viewParameter,
       { id: 'kit', label: 'Kit / lanes', control: 'pattern' }, routeParameter,
     ],
   },
   {
-    kind: 'logic', keyword: 'LOGIC', label: 'Logic', named: true, supportsView: true, preview: 'logic-diagram',
-    ports: [{ id: 'nodes', label: 'Named nodes', domain: 'event', direction: 'output', dynamic: true }],
-    parameters: [nameParameter, viewParameter,
-      { id: 'nodes', label: 'Logic nodes', control: 'pattern', description: 'AND, OR, XOR, NAND, NOR, divider, counter and flipflop nodes.' },
-    ],
+    kind: 'seq', keyword: 'SEQ', label: 'Sequencer', named: true, supportsView: true, preview: 'turing', models: seqModels,
+    ports: [{ id: 'pitch', label: 'Pitch source', domain: 'pitch', direction: 'output' }], parameters: [nameParameter, viewParameter],
   },
   {
     kind: 'register', keyword: 'REGISTER', label: 'Register', named: true, supportsView: false, preview: 'routing', models: [{ id: 'shift', label: 'Shift register' }],
@@ -219,9 +205,12 @@ export const OBJECT_BUILDER_CATALOG: readonly BuilderObjectDefinition[] = [
     ],
   },
   {
-    kind: 'seq', keyword: 'SEQ', label: 'Sequencer', named: true, supportsView: true, preview: 'turing', models: seqModels,
-    ports: [{ id: 'pitch', label: 'Pitch source', domain: 'pitch', direction: 'output' }], parameters: [nameParameter, viewParameter],
-  },
+    kind: 'logic', keyword: 'LOGIC', label: 'Logic', named: true, supportsView: true, preview: 'logic-diagram',
+    ports: [{ id: 'nodes', label: 'Named nodes', domain: 'event', direction: 'output', dynamic: true }],
+    parameters: [nameParameter, viewParameter,
+      { id: 'nodes', label: 'Logic nodes', control: 'pattern', description: 'AND, OR, XOR, NAND, NOR, divider, counter and flipflop nodes.' },
+    ],
+  }
 ] as const;
 
 export function builderObjectDefinition(kind: BuilderObjectDefinition['kind']): BuilderObjectDefinition | undefined {

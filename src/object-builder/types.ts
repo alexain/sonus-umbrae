@@ -65,6 +65,7 @@ export interface BuilderParameterDefinition {
   excludeModels?: readonly string[];
   referenceKinds?: readonly BuilderObjectKind[];
   description?: string;
+  liveCapable?: boolean;
 }
 
 export interface BuilderModelDefinition {

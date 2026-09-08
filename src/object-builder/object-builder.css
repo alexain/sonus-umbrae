@@ -1,0 +1,260 @@
+.object-builder-launcher{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:5;border:1px solid var(--line);background:transparent;color:var(--phosphor);font:inherit;font-size:12px;letter-spacing:.06em;padding:5px 12px;cursor:pointer}.object-builder-launcher:hover,.object-builder-launcher:focus-visible{border-color:var(--phosphor);outline:none;background:rgba(215,169,46,.06)}
+.object-builder-overlay{position:fixed;inset:0;z-index:40;display:grid;place-items:center;background:rgba(0,0,0,.72);padding:28px}.object-builder-overlay.hidden{display:none}.object-builder-dialog{width:min(1120px,94vw);height:min(760px,88vh);display:grid;grid-template-rows:auto 1fr auto;background:var(--bg);border:1px solid var(--line);box-shadow:0 0 32px rgba(0,0,0,.65)}
+.object-builder-head,.object-builder-foot{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line)}.object-builder-head strong{letter-spacing:.08em}.object-builder-head span{margin-left:auto;color:var(--phosphor-dim);font-size:12px}.object-builder-foot{border-top:1px solid var(--line);border-bottom:0;justify-content:flex-end}.object-builder-body{min-height:0;display:grid;grid-template-columns:220px minmax(360px,1fr) 300px}.object-builder-kinds{overflow:auto;border-right:1px solid var(--line);padding:10px}.object-builder-kind{display:block;width:100%;text-align:left;border:0;border-left:2px solid transparent;background:transparent;color:var(--phosphor-dim);font:inherit;padding:9px 10px;cursor:pointer}.object-builder-kind:hover,.object-builder-kind.active{color:var(--phosphor);border-left-color:var(--phosphor);background:rgba(215,169,46,.05)}
+.object-builder-form{overflow:auto;padding:18px 20px}.object-builder-form h2{margin:0 0 18px;font-size:18px;font-weight:500}.object-builder-row{display:grid;grid-template-columns:150px 1fr;align-items:center;gap:12px;margin:0 0 13px}.object-builder-row label{color:var(--phosphor-dim)}.object-builder-row input,.object-builder-row select{width:100%;box-sizing:border-box;border:1px solid var(--line);background:transparent;color:var(--phosphor);font:inherit;padding:6px 8px}.object-builder-row input[type=checkbox]{width:auto;justify-self:start}.object-builder-info{overflow:auto;border-left:1px solid var(--line);padding:18px}.object-builder-info h3{margin:0 0 12px;font-size:13px;letter-spacing:.08em}.object-builder-diagram{min-height:150px;display:grid;place-items:center;border:1px solid var(--line);margin-bottom:16px;color:var(--phosphor-dim);text-align:center;white-space:pre-line}.object-builder-code{white-space:pre-wrap;border:1px solid var(--line);padding:12px;min-height:110px;color:var(--phosphor);font:inherit;font-size:12px}.object-builder-button{border:1px solid var(--line);background:transparent;color:var(--phosphor);font:inherit;padding:7px 14px;cursor:pointer}.object-builder-button:hover{border-color:var(--phosphor)}.object-builder-button.primary{background:rgba(215,169,46,.07)}
+@media(max-width:850px){.object-builder-body{grid-template-columns:170px 1fr}.object-builder-info{display:none}}
+.object-builder-notice{margin:0 0 16px;padding:9px 11px;border:1px solid var(--line);color:var(--phosphor-dim);font-size:12px;line-height:1.45}.object-builder-row input:disabled,.object-builder-row select:disabled{opacity:.45;cursor:not-allowed}.object-builder-slider{display:grid;grid-template-columns:1fr 38px;gap:10px;align-items:center}.object-builder-slider output{text-align:right;color:var(--phosphor);font-variant-numeric:tabular-nums}
+
+.object-builder-error{margin:0 0 16px;padding:10px 12px;border:1px solid currentColor;color:#d86f5f;font-size:12px;line-height:1.45}.object-builder-error::before{content:'ERROR  ';font-weight:700;letter-spacing:.06em}
+
+/* VOICE builder ---------------------------------------------------------- */
+.object-builder-section { margin: 18px 0; padding-top: 12px; border-top: 1px solid var(--line); }
+.object-builder-section h3 { margin: 0 0 10px; font-size: 11px; letter-spacing: .12em; color: var(--phosphor-dim); }
+.object-builder-sound-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.object-builder-field { display: grid; gap: 6px; font-size: 11px; color: var(--phosphor-dim); }
+.object-builder-field > input, .object-builder-field > select { min-width: 0; }
+.object-builder-action-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 11px 0; border-bottom: 1px solid color-mix(in srgb, var(--line) 65%, transparent); }
+.object-builder-action-row > div { min-width: 0; display: grid; gap: 3px; }
+.object-builder-action-label { font-size: 12px; letter-spacing: .08em; }
+.object-builder-action-summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--phosphor-dim); font-size: 11px; }
+.object-builder-action-row.required .object-builder-action-label::after { content: ' REQUIRED'; color: var(--phosphor); font-size: 9px; }
+.object-builder-action-row button, .object-builder-secondary-dialog button { border: 1px solid var(--line); background: var(--bg); color: var(--phosphor); padding: 8px 10px; font: inherit; cursor: pointer; }
+.object-builder-action-row button:disabled { opacity: .4; cursor: default; }
+
+.object-builder-secondary-overlay { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; background: rgba(0,0,0,.44); }
+.object-builder-secondary-dialog { width: min(760px, calc(100vw - 56px)); max-height: min(760px, calc(100vh - 64px)); display: grid; grid-template-rows: auto minmax(0,1fr) auto; border: 1px solid var(--line); background: var(--bg); box-shadow: 0 22px 70px rgba(0,0,0,.35); }
+.object-builder-secondary-dialog > header, .object-builder-secondary-dialog > footer { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.object-builder-secondary-dialog > header strong { margin-right: auto; letter-spacing: .08em; }
+.object-builder-secondary-dialog > header button { padding: 4px 9px; font-size: 18px; }
+.object-builder-secondary-dialog > footer { justify-content: flex-end; border-top: 1px solid var(--line); border-bottom: 0; }
+.object-builder-secondary-dialog button.primary { background: var(--phosphor); color: var(--bg); }
+.object-builder-secondary-body { overflow: auto; padding: 16px; }
+.object-builder-secondary-fields { display: grid; gap: 12px; }
+.object-builder-secondary-param { display: grid; grid-template-columns: 130px minmax(0,1fr) 72px; gap: 12px; align-items: center; }
+.object-builder-secondary-param > label:first-child { font-size: 12px; }
+.object-builder-live-toggle { white-space: nowrap; font-size: 11px; color: var(--phosphor-dim); }
+.object-builder-secondary-hint { padding: 10px; border: 1px dashed var(--line); color: var(--phosphor-dim); font-size: 11px; }
+.object-builder-envelope-stages { display: grid; grid-template-columns: 1fr auto; gap: 8px 10px; align-items: end; }
+.object-builder-envelope-preview { height: 170px; border: 1px solid var(--line); padding: 8px; }
+.object-builder-envelope-preview svg { width: 100%; height: 100%; }
+.object-builder-envelope-preview path { stroke: currentColor; stroke-width: 1.5; }
+.object-builder-behavior-fields { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 10px; }
+
+.object-builder-routing-editor { display: grid; gap: 14px; }
+.object-builder-routing-modes { display: flex; gap: 18px; padding-bottom: 10px; border-bottom: 1px solid var(--line); text-transform: uppercase; font-size: 11px; }
+.object-builder-routing-canvas { position: relative; min-height: 320px; display: grid; grid-template-columns: 1fr 1fr; gap: 150px; padding: 18px 0; }
+.object-builder-routing-column { position: relative; z-index: 2; display: flex; flex-direction: column; gap: 12px; }
+.object-builder-port { display: grid !important; grid-template-columns: 1fr auto; align-items: center; gap: 10px; width: 100%; text-align: left; background: var(--bg) !important; }
+.object-builder-port.destination { grid-template-columns: auto 1fr; }
+.object-builder-port i { display: block; width: 11px; height: 11px; border: 1px solid currentColor; border-radius: 50%; background: var(--bg); }
+.object-builder-port.active i, .object-builder-port.connected i { background: currentColor; }
+.object-builder-routing-wires { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.object-builder-routing-wires path { fill: none; stroke: currentColor; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.object-builder-row .object-builder-slider:has(.object-builder-live-toggle) { grid-template-columns: minmax(0,1fr) 38px 58px; }
+.object-builder-envelope-slider { display: grid; grid-template-columns: minmax(0, 1fr) 58px; gap: 10px; align-items: center; }
+.object-builder-envelope-slider input[type="range"] { width: 100%; }
+.object-builder-envelope-slider output { min-width: 48px; text-align: right; font-variant-numeric: tabular-nums; }
+
+/* Native selects created by the VOICE panel and its secondary editors do not
+   use .object-builder-row, so style them explicitly instead of relying only
+   on the global browser color-scheme hint. */
+.object-builder-form select,
+.object-builder-secondary-dialog select {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  background-color: var(--bg);
+  color: var(--phosphor);
+  color-scheme: dark;
+  font: inherit;
+  padding: 6px 8px;
+}
+
+.object-builder-form select option,
+.object-builder-form select optgroup,
+.object-builder-secondary-dialog select option,
+.object-builder-secondary-dialog select optgroup {
+  background-color: var(--bg);
+  color: var(--phosphor);
+}
+
+.object-builder-form select:disabled,
+.object-builder-secondary-dialog select:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
+/* Secondary VOICE editors live directly under <body>; force the complete
+   native control surface into the same dark scheme used by the main Builder. */
+.object-builder-secondary-overlay,
+.object-builder-secondary-overlay * {
+  color-scheme: dark;
+}
+.object-builder-secondary-dialog select {
+  background: #050605 !important;
+  color: #d7a92e !important;
+  border-color: rgba(215, 169, 46, 0.35) !important;
+}
+.object-builder-secondary-dialog select option,
+.object-builder-secondary-dialog select optgroup {
+  background: #050605 !important;
+  color: #d7a92e !important;
+}
+
+.object-builder-envelope-stages.disabled,
+.object-builder-envelope-preview.disabled { opacity: .42; }
+.object-builder-envelope-unit-spacer { width: 100%; min-width: 64px; }
+
+.object-builder-routing-disabled {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+  text-transform: uppercase;
+  font-size: 11px;
+}
+.object-builder-routing-canvas.disabled { opacity: .35; pointer-events: none; }
+
+.object-builder-routing-preview {
+  min-height: 180px;
+  border: 1px solid var(--line);
+  margin-bottom: 16px;
+  padding: 10px;
+}
+.object-builder-routing-preview-canvas {
+  position: relative;
+  min-height: 158px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 72px;
+  align-items: start;
+  padding: 10px 0;
+}
+.object-builder-routing-preview-column {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.object-builder-preview-port {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 24px;
+  color: var(--phosphor-dim);
+  font-size: 10px;
+}
+.object-builder-preview-port.destination { grid-template-columns: auto 1fr; }
+.object-builder-preview-port i {
+  display: block;
+  width: 9px;
+  height: 9px;
+  border: 1px solid var(--phosphor);
+  border-radius: 50%;
+  background: var(--bg);
+}
+.object-builder-routing-preview-muted {
+  min-height: 158px;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  color: var(--phosphor-dim);
+  letter-spacing: .08em;
+  line-height: 1.7;
+}
+.object-builder-routing-preview-muted span { color: var(--phosphor); letter-spacing: 0; }
+
+/* VOICE routing lives directly in the right preview panel. */
+.object-builder-routing-inline {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+}
+.object-builder-routing-inline .object-builder-routing-disabled {
+  margin-bottom: 10px;
+}
+.object-builder-routing-inline .object-builder-routing-preview-canvas {
+  min-height: 250px;
+  border: 1px solid var(--line);
+  padding: 18px 22px;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 32px;
+}
+.object-builder-routing-inline .object-builder-port {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  padding: 4px 0;
+  text-align: left;
+}
+.object-builder-routing-inline .object-builder-port.destination {
+  text-align: left;
+}
+.object-builder-routing-inline .object-builder-port.connected {
+  color: var(--phosphor);
+}
+
+/* Keep inline routing compact and make the currently edited output obvious. */
+.object-builder-routing-inline .object-builder-routing-preview-column {
+  gap: 14px;
+}
+.object-builder-routing-inline .object-builder-preview-port {
+  font-size: 13px;
+  min-height: 28px;
+}
+.object-builder-routing-inline .object-builder-routing-preview-column:first-of-type .object-builder-port {
+  grid-template-columns: max-content 18px;
+  justify-content: start;
+  gap: 8px;
+}
+.object-builder-routing-inline .object-builder-port.active span,
+.object-builder-routing-inline .object-builder-port.routed.active span {
+  background: var(--phosphor);
+  color: var(--bg);
+  padding: 1px 4px;
+}
+.object-builder-routing-inline .object-builder-port.routed:not(.active) span {
+  color: var(--phosphor);
+}
+
+/* Keep routing source sockets stationary and let wires reach the sockets. */
+.object-builder-routing-inline .object-builder-port {
+  background: transparent !important;
+}
+.object-builder-routing-inline .object-builder-routing-preview-column:first-of-type .object-builder-port {
+  width: 72px;
+  grid-template-columns: 48px 12px;
+  gap: 8px;
+}
+.object-builder-routing-inline .object-builder-routing-preview-column:first-of-type .object-builder-port span {
+  box-sizing: border-box;
+  width: 48px;
+  justify-self: start;
+}
+.object-builder-routing-inline .object-builder-routing-preview-column:first-of-type .object-builder-port i {
+  justify-self: center;
+}
+
+
+/* Give each audio output its own routing color so dense patches stay legible. */
+.object-builder-routing-inline .object-builder-routing-preview-column:first-of-type .object-builder-port {
+  color: var(--route-color, var(--phosphor));
+}
+.object-builder-routing-inline .object-builder-routing-preview-column:first-of-type .object-builder-port.routed:not(.active) span {
+  color: var(--route-color, var(--phosphor));
+}
+.object-builder-routing-inline .object-builder-routing-preview-column:first-of-type .object-builder-port.active span,
+.object-builder-routing-inline .object-builder-routing-preview-column:first-of-type .object-builder-port.routed.active span {
+  background: var(--route-color, var(--phosphor));
+  color: var(--bg);
+}
+.object-builder-routing-inline .object-builder-routing-preview-column:first-of-type .object-builder-port i {
+  border-color: var(--route-color, var(--phosphor));
+}
+.object-builder-routing-inline .object-builder-routing-preview-column:first-of-type .object-builder-port.active i,
+.object-builder-routing-inline .object-builder-routing-preview-column:first-of-type .object-builder-port.routed i {
+  background: var(--route-color, var(--phosphor));
+}
