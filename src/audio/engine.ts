@@ -30,7 +30,9 @@ export interface AudioProgram {
   basicVoices: Array<{
     name: string;
     enabled: boolean;
-    waveform: 'sine' | 'triangle' | 'sawtooth' | 'ramp' | 'square';
+    waveform: 'sine' | 'triangle' | 'sawtooth' | 'ramp' | 'square' | 'noise';
+    noiseModel: 'white' | 'dust' | 'clocked' | 'fractal' | null;
+    density: number;
     level: number;
     frequency: number;
     dynamicPitch?: boolean;
@@ -84,6 +86,12 @@ export interface AudioProgram {
     damping: number;
     position: number;
   }>;
+  lfos: Array<{
+    name: string;
+    frequency: number;
+    outputs: Array<{ waveform: 'sine' | 'triangle' | 'sawtooth' | 'ramp' | 'square'; rateMultiplier: number; phase: number; level: number } | null>;
+  }>;
+  noiseMods: Array<{ name: string; noiseModel: 'white' | 'dust' | 'clocked' | 'fractal'; frequency: number; density: number }>;
   swells: Array<{
     name: string;
     frequency: number;
@@ -202,6 +210,8 @@ interface BasicVoice {
   output: GainNode;
   vOctInput: GainNode;
   waveform: AudioProgram['basicVoices'][number]['waveform'];
+  noiseModel: AudioProgram['basicVoices'][number]['noiseModel'];
+  density: number;
   level: number;
   frequency: number;
   width: number;
@@ -282,8 +292,30 @@ interface ResonatorVoice {
   position: number;
 }
 
+interface BasicModOutput {
+  output: GainNode;
+  monitor: AnalyserNode;
+  definition: AudioProgram['lfos'][number]['outputs'][number];
+}
+
+interface BasicModVoice {
+  node: AudioWorkletNode;
+  outputs: [BasicModOutput, BasicModOutput, BasicModOutput, BasicModOutput];
+  frequency: number;
+}
+
+interface NoiseModVoice {
+  node: AudioWorkletNode;
+  output: GainNode;
+  monitor: AnalyserNode;
+  noiseModel: AudioProgram['noiseMods'][number]['noiseModel'];
+  frequency: number;
+  density: number;
+}
+
 interface SwellVoice {
   node: AudioWorkletNode;
+  outputs: [GainNode, GainNode, GainNode, GainNode];
   frequency: number;
   slope: number;
   shape: number;
@@ -297,6 +329,7 @@ interface SwellVoice {
 
 interface DicesVoice {
   node: AudioWorkletNode;
+  outputs: [GainNode, GainNode, GainNode, GainNode];
   frequency: number;
   spread: number;
   bias: number;
@@ -462,6 +495,8 @@ export class AudioEngine {
   private matters = new Map<string, MatterVoice>();
   private resonators = new Map<string, ResonatorVoice>();
   private swells = new Map<string, SwellVoice>();
+  private basicMods = new Map<string, BasicModVoice>();
+  private noiseMods = new Map<string, NoiseModVoice>();
   private dices = new Map<string, DicesVoice>();
   private sampleDrum = new SampleDrumRuntime();
   private mists = new Map<string, MistVoice>();
@@ -476,6 +511,7 @@ export class AudioEngine {
   private clockTransportRunning = true;
   private macroWasmBytes: ArrayBuffer | null = null;
   private daisyOscillatorsWasmBytes: ArrayBuffer | null = null;
+  private noiseWasmBytes: ArrayBuffer | null = null;
   private compositeWasmBytes: ArrayBuffer | null = null;
   private matterWasmBytes: ArrayBuffer | null = null;
   private resonatorWasmBytes: ArrayBuffer | null = null;
@@ -489,6 +525,7 @@ export class AudioEngine {
   private daisyFiltersWasmBytes: ArrayBuffer | null = null;
   private macroWorkletLoaded = false;
   private daisyOscillatorsWorkletLoaded = false;
+  private noiseWorkletLoaded = false;
   private compositeWorkletLoaded = false;
   private matterWorkletLoaded = false;
   private resonatorWorkletLoaded = false;
@@ -501,6 +538,7 @@ export class AudioEngine {
   private delayWorkletLoaded = false;
   private daisyFiltersWorkletLoaded = false;
   private clockWorkletLoaded = false;
+  private lfoWorkletLoaded = false;
   private pendingProgram: AudioProgram | null = null;
   private routes = new Map<string, AudioRoute>();
   private views = new Map<string, ViewTap>();
@@ -517,7 +555,7 @@ export class AudioEngine {
           : 'suspended',
       sampleRate: this.context?.sampleRate ?? null,
       testFrequency: this.testOscillator?.frequency.value ?? null,
-      objectCount: this.basicVoices.size + this.composites.size + this.gains.size + this.macros.size + this.matters.size + this.resonators.size + this.swells.size + this.dices.size + this.sampleDrum.drumkits.size + this.sampleDrum.samples.size + this.mists.size + this.skies.size + this.delays.size + this.filters.size + this.clocks.size,
+      objectCount: this.basicVoices.size + this.composites.size + this.gains.size + this.macros.size + this.matters.size + this.resonators.size + this.swells.size + this.basicMods.size + this.noiseMods.size + this.dices.size + this.sampleDrum.drumkits.size + this.sampleDrum.samples.size + this.mists.size + this.skies.size + this.delays.size + this.filters.size + this.clocks.size,
       routeCount: this.routes.size,
     };
   }
@@ -533,6 +571,7 @@ export class AudioEngine {
     await this.applyRequestedOutputDevice(context);
     await this.ensureMacroRuntime();
     await this.ensureDaisyOscillatorsRuntime();
+    await this.ensureNoiseRuntime();
     await this.ensureCompositeRuntime();
     await this.ensureMatterRuntime();
     await this.ensureResonatorRuntime();
@@ -544,6 +583,7 @@ export class AudioEngine {
     await this.ensureSkyRuntime();
     await this.ensureDelayRuntime();
     await this.ensureDaisyFiltersRuntime();
+    await this.ensureLfoRuntime();
     await this.ensureClockRuntime();
     if (context.state !== 'running') await context.resume();
     if (this.pendingProgram) {
@@ -628,10 +668,12 @@ export class AudioEngine {
   applyProgram(program: AudioProgram, options: { hotReload?: boolean } = {}): void {
     const hotReload = options.hotReload ?? false;
     if ((program.macros.length > 0 && !this.macroWorkletLoaded) ||
-        (program.basicVoices.length > 0 && !this.daisyOscillatorsWorkletLoaded) ||
+        (program.basicVoices.some((definition) => definition.waveform !== 'noise') && !this.daisyOscillatorsWorkletLoaded) ||
+        ((program.basicVoices.some((definition) => definition.waveform === 'noise') || program.noiseMods.length > 0) && !this.noiseWorkletLoaded) ||
         (program.composites.length > 0 && !this.compositeWorkletLoaded) ||
         (program.matters.length > 0 && !this.matterWorkletLoaded) ||
         (program.resonators.length > 0 && !this.resonatorWorkletLoaded) ||
+        (program.lfos.length > 0 && !this.lfoWorkletLoaded) ||
         (program.swells.length > 0 && !this.swellWorkletLoaded) ||
         (program.dices.length > 0 && !this.dicesWorkletLoaded) ||
         (program.drumkits.length > 0 && !this.drumkitWorkletLoaded) ||
@@ -657,6 +699,8 @@ export class AudioEngine {
     const desiredMacros = new Map(program.macros.map((definition) => [definition.name, definition]));
     const desiredMatters = new Map(program.matters.map((definition) => [definition.name, definition]));
     const desiredResonators = new Map(program.resonators.map((definition) => [definition.name, definition]));
+    const desiredLfos = new Map(program.lfos.map((definition) => [definition.name, definition]));
+    const desiredNoiseMods = new Map(program.noiseMods.map((definition) => [definition.name, definition]));
     const desiredSwells = new Map(program.swells.map((definition) => [definition.name, definition]));
     const desiredDices = new Map(program.dices.map((definition) => [definition.name, definition]));
     const desiredDrumkits = new Map(program.drumkits.map((definition) => [definition.name, definition]));
@@ -707,6 +751,13 @@ export class AudioEngine {
 
     for (const [name] of this.resonators) {
       if (!desiredResonators.has(name)) this.removeResonator(name);
+    }
+
+    for (const [name] of this.basicMods) {
+      if (!desiredLfos.has(name)) this.removeBasicMod(name);
+    }
+    for (const [name] of this.noiseMods) {
+      if (!desiredNoiseMods.has(name)) this.removeNoiseMod(name);
     }
 
     for (const [name] of this.swells) {
@@ -767,6 +818,16 @@ export class AudioEngine {
       this.updateFilter(definition);
     }
 
+    for (const definition of program.lfos) {
+      this.createBasicMod(definition);
+      this.updateBasicMod(definition);
+    }
+
+    for (const definition of program.noiseMods) {
+      this.createNoiseMod(definition);
+      this.updateNoiseMod(definition);
+    }
+
     for (const definition of program.swells) {
       this.createSwell(definition);
       this.updateSwell(definition);
@@ -810,17 +871,20 @@ export class AudioEngine {
 
   private createBasicVoice(definition: AudioProgram['basicVoices'][number]): void {
     if (this.basicVoices.has(definition.name)) return;
-    if (!this.daisyOscillatorsWorkletLoaded || !this.daisyOscillatorsWasmBytes) {
+    const isNoise = definition.waveform === 'noise';
+    if (isNoise) {
+      if (!this.noiseWorkletLoaded || !this.noiseWasmBytes) throw new Error('Noise DSP is not ready; run :start after building the DSP');
+    } else if (!this.daisyOscillatorsWorkletLoaded || !this.daisyOscillatorsWasmBytes) {
       throw new Error('DaisySP oscillator DSP is not ready; run :start after building the DSP');
     }
 
     const context = this.ensureContext();
-    const node = new AudioWorkletNode(context, 'sonus-daisy-oscillator', {
+    const node = new AudioWorkletNode(context, isNoise ? 'sonus-noise' : 'sonus-daisy-oscillator', {
       numberOfInputs: 1,
       numberOfOutputs: 1,
       outputChannelCount: [1],
       processorOptions: {
-        wasmBytes: this.daisyOscillatorsWasmBytes.slice(0),
+        wasmBytes: (isNoise ? this.noiseWasmBytes! : this.daisyOscillatorsWasmBytes!).slice(0),
         hostSampleRate: context.sampleRate,
       },
     });
@@ -837,6 +901,8 @@ export class AudioEngine {
       output,
       vOctInput,
       waveform: definition.waveform,
+      noiseModel: definition.noiseModel,
+      density: definition.density,
       level: definition.level,
       frequency: definition.frequency,
       width: definition.width,
@@ -844,7 +910,9 @@ export class AudioEngine {
     node.port.postMessage({
       type: 'params',
       waveform: definition.waveform,
+      noiseModel: definition.noiseModel,
       frequency: definition.frequency,
+      density: definition.density / 100,
       width: definition.width / 100,
     });
   }
@@ -852,9 +920,16 @@ export class AudioEngine {
   private updateBasicVoice(definition: AudioProgram['basicVoices'][number], hotReload = false): void {
     const voice = this.basicVoices.get(definition.name);
     if (!voice) return;
+    if ((voice.waveform === 'noise') !== (definition.waveform === 'noise')) {
+      this.removeBasicVoice(definition.name);
+      this.createBasicVoice(definition);
+      return;
+    }
     const frequency = hotReload && definition.dynamicPitch ? voice.frequency : definition.frequency;
     const unchanged = voice.enabled === definition.enabled
       && voice.waveform === definition.waveform
+      && voice.noiseModel === definition.noiseModel
+      && voice.density === definition.density
       && voice.level === definition.level
       && Math.abs(voice.frequency - frequency) < 0.0001
       && voice.width === definition.width;
@@ -867,13 +942,17 @@ export class AudioEngine {
     }
     voice.enabled = definition.enabled;
     voice.waveform = definition.waveform;
+    voice.noiseModel = definition.noiseModel;
+    voice.density = definition.density;
     voice.level = definition.level;
     voice.frequency = frequency;
     voice.width = definition.width;
     voice.node.port.postMessage({
       type: 'params',
       waveform: definition.waveform,
+      noiseModel: definition.noiseModel,
       frequency,
+      density: definition.density / 100,
       width: definition.width / 100,
     });
     // Composite operators are private instances which inherit the source
@@ -1322,6 +1401,78 @@ export class AudioEngine {
     filter.node.port.postMessage({ type: 'params', drive: drive / 100 });
   }
 
+  private createBasicMod(definition: AudioProgram['lfos'][number]): void {
+    if (this.basicMods.has(definition.name)) return;
+    if (!this.lfoWorkletLoaded) throw new Error('LFO worklet is not ready; run :start first');
+    const context = this.ensureContext();
+    const node = new AudioWorkletNode(context, 'sonus-lfo', {
+      numberOfInputs: 0,
+      numberOfOutputs: 4,
+      outputChannelCount: [1, 1, 1, 1],
+    });
+    const outputs = [0, 1, 2, 3].map((slot): BasicModOutput => {
+      const output = context.createGain();
+      const monitor = context.createAnalyser();
+      output.gain.value = 1;
+      monitor.fftSize = 32;
+      node.connect(output, slot, 0);
+      output.connect(monitor);
+      return { output, monitor, definition: definition.outputs[slot] ?? null };
+    }) as [BasicModOutput, BasicModOutput, BasicModOutput, BasicModOutput];
+    node.port.postMessage({ type: 'params', frequency: definition.frequency, outputs: definition.outputs });
+    this.basicMods.set(definition.name, { node, outputs, frequency: definition.frequency });
+  }
+
+  private updateBasicMod(definition: AudioProgram['lfos'][number]): void {
+    const mod = this.basicMods.get(definition.name);
+    if (!mod) return;
+    const shapeChanged = definition.outputs.some((output, index) => {
+      const current = mod.outputs[index].definition;
+      if (!output || !current) return output !== current;
+      return output.waveform !== current.waveform
+        || Math.abs(output.rateMultiplier - current.rateMultiplier) > 1e-12
+        || Math.abs(output.phase - current.phase) > 1e-12
+        || Math.abs(output.level - current.level) > 1e-12;
+    });
+    const frequencyChanged = mod.frequency !== definition.frequency;
+    if (!shapeChanged && !frequencyChanged) return;
+    mod.frequency = definition.frequency;
+    for (let slot = 0; slot < 4; slot += 1) mod.outputs[slot].definition = definition.outputs[slot] ?? null;
+    mod.node.port.postMessage({ type: 'params', frequency: definition.frequency, outputs: definition.outputs });
+  }
+
+  private createNoiseMod(definition: AudioProgram['noiseMods'][number]): void {
+    if (this.noiseMods.has(definition.name)) return;
+    if (!this.noiseWorkletLoaded || !this.noiseWasmBytes) {
+      throw new Error('Noise DSP is not ready; run :start after building the DSP');
+    }
+    const context = this.ensureContext();
+    const node = new AudioWorkletNode(context, 'sonus-noise', {
+      numberOfInputs: 0,
+      numberOfOutputs: 1,
+      outputChannelCount: [1],
+      processorOptions: { wasmBytes: this.noiseWasmBytes.slice(0), hostSampleRate: context.sampleRate },
+    });
+    const output = context.createGain();
+    const monitor = context.createAnalyser();
+    output.gain.value = 1;
+    monitor.fftSize = 32;
+    node.connect(output);
+    output.connect(monitor);
+    this.noiseMods.set(definition.name, { node, output, monitor, noiseModel: definition.noiseModel, frequency: definition.frequency, density: definition.density });
+    node.port.postMessage({ type: 'params', noiseModel: definition.noiseModel, frequency: definition.frequency, density: definition.density / 100 });
+  }
+
+  private updateNoiseMod(definition: AudioProgram['noiseMods'][number]): void {
+    const mod = this.noiseMods.get(definition.name);
+    if (!mod) return;
+    if (mod.noiseModel === definition.noiseModel && Math.abs(mod.frequency - definition.frequency) < 1e-12 && mod.density === definition.density) return;
+    mod.noiseModel = definition.noiseModel;
+    mod.frequency = definition.frequency;
+    mod.density = definition.density;
+    mod.node.port.postMessage({ type: 'params', noiseModel: definition.noiseModel, frequency: definition.frequency, density: definition.density / 100 });
+  }
+
   private createSwell(definition: AudioProgram['swells'][number]): void {
     if (this.swells.has(definition.name)) return;
     if (!this.swellWorkletLoaded || !this.swellWasmBytes) {
@@ -1334,8 +1485,15 @@ export class AudioEngine {
       outputChannelCount: [1, 1, 1, 1],
       processorOptions: { wasmBytes: this.swellWasmBytes.slice(0), sampleRate: context.sampleRate },
     });
+    const outputs = [0, 1, 2, 3].map((channel) => {
+      const output = context.createGain();
+      output.gain.value = 0.2;
+      node.connect(output, channel, 0);
+      return output;
+    }) as [GainNode, GainNode, GainNode, GainNode];
     this.swells.set(definition.name, {
       node,
+      outputs,
       frequency: definition.frequency,
       slope: definition.slope,
       shape: definition.shape,
@@ -1354,7 +1512,7 @@ export class AudioEngine {
       if (!swell) return;
       for (let channel = 0; channel < 4; channel += 1) {
         const value = Number(message.values[channel]);
-        swell.monitorValues[channel] = Number.isFinite(value) ? value : 0;
+        swell.monitorValues[channel] = Number.isFinite(value) ? value * 0.2 : 0;
       }
     };
   }
@@ -1717,6 +1875,10 @@ export class AudioEngine {
     const view = this.views.get(signal);
     if (!view) return false;
 
+    const basicModMatch = signal.match(/^([A-Za-z_]\w*)\.(?:out|out[1-4])$/);
+    const basicMod = basicModMatch ? this.basicMods.get(basicModMatch[1]) : undefined;
+    const basicModPort = basicModMatch ? signal.slice(signal.lastIndexOf('.') + 1) : '';
+    const basicModChannel = basicModPort === 'out' ? 0 : /^out[1-4]$/.test(basicModPort) ? Number(basicModPort.slice(3)) - 1 : -1;
     const swellMatch = signal.match(/^([A-Za-z_]\w*)\.out([1-4])$/);
     const dicesMatch = signal.match(/^([A-Za-z_]\w*)\.(x1|x2|x3|y)$/);
     const swell = swellMatch ? this.swells.get(swellMatch[1]) : undefined;
@@ -1725,10 +1887,10 @@ export class AudioEngine {
     const dicesChannel = dicesMatch
       ? ({ x1: 0, x2: 1, x3: 2, y: 3 } as const)[dicesMatch[2] as 'x1'|'x2'|'x3'|'y']
       : -1;
-    const modFrequency = swell?.frequency ?? dices?.frequency ?? 0;
+    const modFrequency = basicMod?.frequency ?? swell?.frequency ?? dices?.frequency ?? 0;
     const monitorValues = swell?.monitorValues ?? dices?.monitorValues;
     const monitorChannel = swell ? swellChannel : dicesChannel;
-    if (!swell && !dices) {
+    if (!basicMod && !swell && !dices) {
       view.analyser.getFloatTimeDomainData(target);
       return true;
     }
@@ -1750,7 +1912,15 @@ export class AudioEngine {
     }
 
     if (now - history.lastSampleAt >= interval) {
-      const raw = monitorValues?.[monitorChannel] ?? 0;
+      let raw = monitorValues?.[monitorChannel] ?? 0;
+      if (basicMod && basicModChannel >= 0) {
+        const output = basicMod.outputs[basicModChannel];
+        if (output) {
+          const sample = new Float32Array(32);
+          output.monitor.getFloatTimeDomainData(sample);
+          raw = sample[sample.length - 1] ?? 0;
+        }
+      }
       // Keep the original routing-domain value in history. The UI renderer
       // owns vertical scale/zoom; storing normalized values here would destroy
       // information before WITH VIEW <n>V / <n>X can use it.
@@ -1798,7 +1968,6 @@ export class AudioEngine {
     }
     view.analyser.disconnect();
     this.views.delete(signal);
-    this.slowScopeHistory.delete(signal);
   }
 
   private sourceForSignal(signal: string): SignalSource {
@@ -1827,11 +1996,28 @@ export class AudioEngine {
       return { node: this.master, output: 0 };
     }
 
+    const noiseModOutput = signal.match(/^([A-Za-z_]\w*)\.(out|out1)$/);
+    if (noiseModOutput) {
+      const mod = this.noiseMods.get(noiseModOutput[1]);
+      if (mod) return { node: mod.output, output: 0 };
+    }
+
+    const basicModOutput = signal.match(/^([A-Za-z_]\w*)\.(out|out[1-4])$/);
+    if (basicModOutput) {
+      const mod = this.basicMods.get(basicModOutput[1]);
+      if (mod) {
+        const slot = basicModOutput[2] === 'out' ? 0 : Number(basicModOutput[2].slice(3)) - 1;
+        const output = mod.outputs[slot];
+        if (!output.definition) throw new Error(`MOD '${basicModOutput[1]}' does not expose ${basicModOutput[2]}`);
+        return { node: output.output, output: 0 };
+      }
+    }
+
     const swellOutput = signal.match(/^([A-Za-z_]\w*)\.out([1-4])$/);
     if (swellOutput) {
       const swell = this.swells.get(swellOutput[1]);
       if (!swell) throw new Error(`unknown Swell object: ${swellOutput[1]}`);
-      return { node: swell.node, output: Number(swellOutput[2]) - 1 };
+      return { node: swell.outputs[Number(swellOutput[2]) - 1], output: 0 };
     }
 
     const dicesOutput = signal.match(/^([A-Za-z_]\w*)\.(x1|x2|x3|y)$/);
@@ -1839,7 +2025,7 @@ export class AudioEngine {
       const dices = this.dices.get(dicesOutput[1]);
       if (!dices) throw new Error(`unknown Dices MOD: ${dicesOutput[1]}`);
       const output = ({ x1: 0, x2: 1, x3: 2, y: 3 } as const)[dicesOutput[2] as 'x1'|'x2'|'x3'|'y'];
-      return { node: dices.node, output };
+      return { node: dices.outputs[output], output: 0 };
     }
 
 
@@ -1894,6 +2080,13 @@ export class AudioEngine {
         throw new Error(`MOD composite '${name}' has multiple outputs; use one of its named outputs`);
       }
       return { node: composite.mainGain, output: 0 };
+    }
+    const basicMod = this.basicMods.get(name);
+    if (basicMod) {
+      if (port === 'aux') throw new Error(`aux output is not available on MOD ${name}`);
+      const primary = basicMod.outputs[0];
+      if (!primary.definition) throw new Error(`MOD ${name} has no OUT1`);
+      return { node: primary.output, output: 0 };
     }
     const voice = this.macros.get(name);
     if (voice) return { node: port === 'aux' ? voice.auxGain : voice.outGain, output: 0 };
@@ -2206,7 +2399,7 @@ export class AudioEngine {
 
   setVoiceParameter(
     name: string,
-    parameter: 'freq' | 'model' | 'harmo' | 'timbre' | 'morph' | 'width' | 'geometry' | 'structure' | 'brightness' | 'damping' | 'position' | 'space' | 'bow' | 'bowTimbre' | 'blow' | 'blowTimbre' | 'strike' | 'strikeTimbre',
+    parameter: 'freq' | 'model' | 'harmo' | 'timbre' | 'morph' | 'width' | 'geometry' | 'structure' | 'brightness' | 'damping' | 'position' | 'space' | 'density' | 'bow' | 'bowTimbre' | 'blow' | 'blowTimbre' | 'strike' | 'strikeTimbre',
     value: number,
   ): void {
     const sampleVoice = this.sampleDrum.samples.get(name);
@@ -2277,6 +2470,12 @@ export class AudioEngine {
         basicVoice.width = value;
         basicVoice.node.port.postMessage({ type: 'params', width: value / 100 });
         this.updateCompositeOperator(name, { width: value });
+        return;
+      }
+      if (parameter === 'density') {
+        if (basicVoice.waveform !== 'noise' || basicVoice.noiseModel !== 'dust') throw new RangeError('DENSITY is only available for SOUND noise.dust');
+        basicVoice.density = value;
+        basicVoice.node.port.postMessage({ type: 'params', density: value / 100 });
         return;
       }
       return;
@@ -2462,6 +2661,21 @@ export class AudioEngine {
   }
 
   readModOutput(name: string, channel: 1 | 2 | 3 | 4): number | null {
+    const basicMod = this.basicMods.get(name);
+    if (basicMod) {
+      const output = basicMod.outputs[channel - 1];
+      if (!output.definition) return null;
+      const sample = new Float32Array(32);
+      output.monitor.getFloatTimeDomainData(sample);
+      return sample[sample.length - 1] ?? 0;
+    }
+    const noiseMod = this.noiseMods.get(name);
+    if (noiseMod) {
+      if (channel !== 1) return null;
+      const sample = new Float32Array(32);
+      noiseMod.monitor.getFloatTimeDomainData(sample);
+      return sample[sample.length - 1] ?? 0;
+    }
     const swell = this.swells.get(name);
     if (swell) return swell.monitorValues[channel - 1] ?? null;
     const dices = this.dices.get(name);
@@ -2490,8 +2704,15 @@ export class AudioEngine {
       outputChannelCount: [1, 1, 1, 1],
       processorOptions: { wasmBytes: this.dicesWasmBytes.slice(0), sampleRate: context.sampleRate },
     });
+    const outputs = [0, 1, 2, 3].map((channel) => {
+      const output = context.createGain();
+      output.gain.value = 0.2;
+      node.connect(output, channel, 0);
+      return output;
+    }) as [GainNode, GainNode, GainNode, GainNode];
     this.dices.set(definition.name, {
       node,
+      outputs,
       frequency: definition.frequency,
       spread: definition.spread,
       bias: definition.bias,
@@ -2508,7 +2729,7 @@ export class AudioEngine {
       if (!dices) return;
       for (let channel = 0; channel < 4; channel += 1) {
         const value = Number(message.values[channel]);
-        dices.monitorValues[channel] = Number.isFinite(value) ? value : 0;
+        dices.monitorValues[channel] = Number.isFinite(value) ? value * 0.2 : 0;
       }
     };
   }
@@ -2529,14 +2750,41 @@ export class AudioEngine {
     });
   }
 
+  setBasicModOutputLevel(name: string, channel: number, level: number): void {
+    const mod = this.basicMods.get(name);
+    if (!mod) return;
+    const slot = Math.max(0, Math.min(3, Math.round(channel) - 1));
+    const output = mod.outputs[slot];
+    if (!output.definition) return;
+    const checked = Math.max(0, Math.min(100, level));
+    if (Math.abs(output.definition.level - checked) < 1e-6) return;
+    output.definition = { ...output.definition, level: checked };
+    mod.node.port.postMessage({
+      type: 'params',
+      frequency: mod.frequency,
+      outputs: mod.outputs.map((entry) => entry.definition),
+    });
+  }
+
   setModTransport(running: boolean): void {
+    const context = this.context;
+    if (context) {
+      for (const mod of this.basicMods.values()) {
+        for (const output of mod.outputs) {
+          output?.output.gain.setTargetAtTime(running ? 1 : 0, context.currentTime, 0.004);
+        }
+      }
+      for (const mod of this.noiseMods.values()) mod.output.gain.setTargetAtTime(running ? 1 : 0, context.currentTime, 0.004);
+    }
     for (const swell of this.swells.values()) {
       swell.node.port.postMessage({ type: 'transport', running });
       if (!running) {
         swell.monitorValues = [0, 0, 0, 0];
       }
     }
-    if (!running) this.slowScopeHistory.clear();
+    // Keep slow MOD scope history across transport stops. The analyser then
+    // contributes silence while stopped, letting existing traces scroll left
+    // naturally instead of replacing the whole view with a flat line.
   }
 
   setClockTransport(running: boolean): void {
@@ -2713,6 +2961,7 @@ export class AudioEngine {
       ...this.matters.keys(),
       ...this.resonators.keys(),
       ...this.swells.keys(),
+      ...this.basicMods.keys(),
       ...this.sampleDrum.samples.keys(),
       ...[...this.filters.entries()]
         .filter(([, filter]) => Boolean(filter.ownerVoice))
@@ -2822,15 +3071,35 @@ export class AudioEngine {
     this.basicVoices.delete(name);
   }
 
+  private removeBasicMod(name: string): void {
+    const mod = this.basicMods.get(name);
+    if (!mod) return;
+    for (const slot of mod.outputs) {
+      try { slot.output.disconnect(); } catch {}
+      try { slot.monitor.disconnect(); } catch {}
+    }
+    try { mod.node.disconnect(); } catch {}
+    mod.node.port.close();
+    this.basicMods.delete(name);
+  }
+
+  private removeNoiseMod(name: string): void {
+    const mod = this.noiseMods.get(name);
+    if (!mod) return;
+    try { mod.output.disconnect(); } catch {}
+    try { mod.monitor.disconnect(); } catch {}
+    try { mod.node.disconnect(); } catch {}
+    mod.node.port.close();
+    this.noiseMods.delete(name);
+  }
+
   private removeSwell(name: string): void {
     const swell = this.swells.get(name);
     if (!swell) return;
+    for (const output of swell.outputs) { try { output.disconnect(); } catch {} }
     try { swell.node.disconnect(); } catch {}
     swell.node.port.close();
     this.swells.delete(name);
-    for (const signal of [...this.slowScopeHistory.keys()]) {
-      if (signal.startsWith(`${name}.`)) this.slowScopeHistory.delete(signal);
-    }
   }
 
 
@@ -2847,12 +3116,10 @@ export class AudioEngine {
   private removeDices(name: string): void {
     const dices = this.dices.get(name);
     if (!dices) return;
+    for (const output of dices.outputs) { try { output.disconnect(); } catch {} }
     try { dices.node.disconnect(); } catch {}
     dices.node.port.close();
     this.dices.delete(name);
-    for (const signal of [...this.slowScopeHistory.keys()]) {
-      if (signal.startsWith(`${name}.`)) this.slowScopeHistory.delete(signal);
-    }
   }
 
 
@@ -3076,6 +3343,12 @@ export class AudioEngine {
     this.daisyFiltersWorkletLoaded = true;
   }
 
+  private async ensureLfoRuntime(): Promise<void> {
+    if (this.lfoWorkletLoaded) return;
+    await loadWorkletModule(this.ensureContext(), '/worklets/lfo-processor.js');
+    this.lfoWorkletLoaded = true;
+  }
+
   private async ensureClockRuntime(): Promise<void> {
     if (this.clockWorkletLoaded) return;
     await loadWorkletModule(this.ensureContext(), '/worklets/clock-processor.js');
@@ -3113,6 +3386,17 @@ export class AudioEngine {
       (response) => `failed to load composite DSP: ${response.status}`,
     );
     this.compositeWorkletLoaded = true;
+  }
+
+  private async ensureNoiseRuntime(): Promise<void> {
+    if (this.noiseWorkletLoaded && this.noiseWasmBytes) return;
+    this.noiseWasmBytes = await loadWasmWorklet(
+      this.ensureContext(),
+      '/dsp/noise.wasm',
+      '/worklets/noise-processor.js',
+      'DaisySP noise DSP missing. Run npm run dsp:setup and npm run dsp:build.',
+    );
+    this.noiseWorkletLoaded = true;
   }
 
   private async ensureDaisyOscillatorsRuntime(): Promise<void> {
@@ -3155,6 +3439,8 @@ export class AudioEngine {
     for (const name of [...this.delays.keys()]) this.removeDelay(name);
     for (const name of [...this.skies.keys()]) this.removeSky(name);
     for (const name of [...this.mists.keys()]) this.removeMist(name);
+    for (const name of [...this.basicMods.keys()]) this.removeBasicMod(name);
+    for (const name of [...this.noiseMods.keys()]) this.removeNoiseMod(name);
     for (const name of [...this.swells.keys()]) this.removeSwell(name);
     for (const name of [...this.dices.keys()]) this.removeDices(name);
     for (const name of [...this.sampleDrum.drumkits.keys()]) this.removeDrumkit(name);
@@ -3181,10 +3467,12 @@ export class AudioEngine {
     this.pendingProgram = null;
     this.macroWasmBytes = null;
     this.daisyOscillatorsWasmBytes = null;
+    this.noiseWasmBytes = null;
     this.compositeWasmBytes = null;
     this.sampleWasmBytes = null;
     this.macroWorkletLoaded = false;
     this.daisyOscillatorsWorkletLoaded = false;
+    this.noiseWorkletLoaded = false;
     this.compositeWorkletLoaded = false;
     this.matterWorkletLoaded = false;
     this.resonatorWorkletLoaded = false;
@@ -3195,6 +3483,7 @@ export class AudioEngine {
     this.skyWorkletLoaded = false;
     this.daisyFiltersWorkletLoaded = false;
     this.clockWorkletLoaded = false;
+    this.lfoWorkletLoaded = false;
     this.slowScopeHistory.clear();
     if (context.state !== 'closed') await context.close();
   }

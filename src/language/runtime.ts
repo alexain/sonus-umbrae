@@ -1,5 +1,11 @@
 import { AudioEngine, type AudioProgram, type SignalKind } from '../audio/engine';
 import { evaluateExpression, ExpressionError, type ScalarValue } from './expression';
+import {
+  ControlExpressionError,
+  evaluateControlExpression,
+  parseControlExpression,
+  type InlineControlState,
+} from './control-expression';
 import { RuntimeScheduler, parseRuntimePatternSource } from './runtime/scheduler';
 import * as directives from './runtime/directives';
 import {
@@ -31,6 +37,12 @@ import {
   resolveRouteLine,
   type RouteDefinition,
 } from './runtime/routing';
+import {
+  applyModSetDirective,
+  createModDefinition,
+  modViewSignals,
+  type ModDefinition,
+} from './runtime/modulation';
 import type { CompositeDefinition, CompositeDomain } from './composite/types';
 import { COMPOSITE_DOMAIN_POLICY } from './composite/types';
 import {
@@ -308,8 +320,8 @@ interface GainDefinition {
   parameters: Map<string, string>;
 }
 
-type VoiceEngineKind = 'macro' | 'matter' | 'resonator' | 'oscillator' | 'composite' | 'sample';
-type VoiceParameterName = 'harmo' | 'timbre' | 'morph' | 'width' | 'geometry' | 'structure' | 'brightness' | 'damping' | 'position' | 'space' | 'bow' | 'bowTimbre' | 'blow' | 'blowTimbre' | 'strike' | 'strikeTimbre';
+type VoiceEngineKind = 'macro' | 'matter' | 'resonator' | 'oscillator' | 'noise' | 'composite' | 'sample';
+type VoiceParameterName = 'harmo' | 'timbre' | 'morph' | 'width' | 'density' | 'geometry' | 'structure' | 'brightness' | 'damping' | 'position' | 'space' | 'bow' | 'bowTimbre' | 'blow' | 'blowTimbre' | 'strike' | 'strikeTimbre';
 
 interface VoiceDefinition {
   disabled: boolean;
@@ -324,6 +336,7 @@ interface VoiceDefinition {
   timbre: number;
   morph: number;
   width: number;
+  density: number;
   geometry: number;
   structure: number;
   brightness: number;
@@ -346,25 +359,6 @@ interface VoiceDefinition {
   sampleSlices: number;
   sampleInitialSlice: number;
   sampleInitialSliceReverse: boolean;
-  parameters: Map<string, string>;
-}
-
-interface SwellDefinition {
-  model: 'swell' | 'dices' | 'composite';
-  frequency: number;
-  slope: number;
-  shape: number;
-  smooth: number;
-  shift: number;
-  mode: number;
-  outputMode: number;
-  range: number;
-  spread: number;
-  bias: number;
-  steps: number;
-  deja: number;
-  length: number;
-  diversity: number;
   parameters: Map<string, string>;
 }
 
@@ -580,7 +574,7 @@ export interface LanguageModMetadata {
 
 export interface LanguageModSetDirective {
   internalName: string;
-  parameter: 'model' | 'freq' | 'ratebeat' | 'slope' | 'shape' | 'smooth' | 'shift' | 'output' | 'range' | 'spread' | 'bias' | 'steps' | 'deja' | 'length' | 'diversity';
+  parameter: 'model' | 'freq' | 'ratebeat' | 'out1' | 'out2' | 'out3' | 'out4' | 'slope' | 'shape' | 'smooth' | 'shift' | 'output' | 'range' | 'spread' | 'bias' | 'steps' | 'deja' | 'length' | 'diversity';
   value: string;
   line: number;
 }
@@ -759,6 +753,7 @@ export class SonusRuntime {
   private drumHumanizeState = new Map<string, number>();
   private liveDisabledDrumkits = new Set<string>();
   private randomState = 0x6d2b79f5;
+  private inlineControlState = new Map<string, InlineControlState>();
 
   constructor(private readonly audio: AudioEngine) {
     this.scheduler = new RuntimeScheduler(audio);
@@ -1033,10 +1028,11 @@ export class SonusRuntime {
       this.whenEventState.clear();
       this.drumHumanizeState.clear();
       this.randomState = 0x6d2b79f5;
+      this.inlineControlState.clear();
     }
     const gains = new Map<string, GainDefinition>();
     const voices = new Map<string, VoiceDefinition>();
-    const swells = new Map<string, SwellDefinition>();
+    const swells = new Map<string, ModDefinition>();
     const mists = new Map<string, MistDefinition>();
     const filters = new Map<string, FilterDefinition>();
     const routes = new Map<string, RouteDefinition>();
@@ -1109,8 +1105,11 @@ export class SonusRuntime {
     const languageSampleSlices: LanguageSampleSliceDefinition[] = [];
     const languageSampleSliceCounts = new Map<string, number>();
     const languageModSets: LanguageModSetDirective[] = [];
+    const languageControlParameters: directives.LanguageControlParameterDefinition[] = [];
     let languageMasterClock: LanguageMasterClockDefinition | null = null;
     for (const { source: line, line: lineNumber } of lines) {
+      const controlParameter = directives.parseLanguageControlParameterDirective(line);
+      if (controlParameter) { languageControlParameters.push(controlParameter); continue; }
       const logicDeclaration = directives.parseLanguageLogicDirective(line);
       if (logicDeclaration) { languageLogics.set(logicDeclaration.name, { view: logicDeclaration.view, nodes: [] }); continue; }
       const logicNode = directives.parseLanguageLogicNodeDirective(line);
@@ -1622,6 +1621,7 @@ export class SonusRuntime {
           timbre: 50,
           morph: 50,
           width: 50,
+          density: 50,
           geometry: 45,
           structure: 50,
           brightness: 65,
@@ -1644,9 +1644,10 @@ export class SonusRuntime {
         continue;
       }
 
+      const modDeclaration = parseModDeclaration(line);
       const swellDeclaration = parseSwellDeclaration(line);
-      if (swellDeclaration) {
-        const { name } = swellDeclaration;
+      if (modDeclaration || swellDeclaration) {
+        const { name } = modDeclaration ?? swellDeclaration!;
         // High-level MOD objects use a compiler-generated __mod_* identifier.
         // The matching __modmeta directive is collected in the pre-pass, so
         // only those known generated objects may bypass the user identifier
@@ -1660,25 +1661,9 @@ export class SonusRuntime {
           diagnostics.push({ line: lineNumber, message: `duplicate object: ${name}` });
           continue;
         }
-        swells.set(name, {
-          model: 'swell',
-          frequency: 0.25,
-          slope: 50,
-          shape: 50,
-          smooth: 50,
-          shift: 50,
-          mode: 1,
-          outputMode: 2,
-          range: 0,
-          spread: 50,
-          bias: 50,
-          steps: 50,
-          deja: 0,
-          length: 8,
-          diversity: 50,
-          parameters: new Map(),
-        });
-        results.push({ message: `${name} = Swell` });
+        const model = modDeclaration ? 'generic' : 'swell';
+        swells.set(name, createModDefinition(model));
+        results.push({ message: `${name} = ${modDeclaration ? 'MOD' : 'Swell'}` });
         continue;
       }
 
@@ -1752,7 +1737,7 @@ export class SonusRuntime {
       if (parameter === 'freq') return voice?.frequency ?? swell?.frequency;
       if (parameter === 'level') return gain?.level;
       if (parameter === 'model') return voice?.model;
-      if (voice && (parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph' || parameter === 'width')) return voice[parameter];
+      if (voice && (parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph' || parameter === 'width' || parameter === 'density')) return voice[parameter];
       if (swell && (parameter === 'slope' || parameter === 'shape' || parameter === 'smooth' || parameter === 'shift')) return swell[parameter];
       return undefined;
     };
@@ -1915,7 +1900,7 @@ export class SonusRuntime {
     // source order. All module declarations already exist, so references between
     // modules are still independent from declaration order.
     for (const { source: line, line: lineNumber } of lines) {
-      if (directives.parseLanguageLogicDirective(line) || directives.parseLanguageLogicNodeDirective(line) || directives.parseLanguageCompositePitch(line) || directives.parseLanguageCompositeTune(line) || directives.parseLanguageCompositeEdge(line) || directives.parseLanguageCompositeMix(line) || directives.parseLanguageCompositeOutput(line) || parseLanguageDrumkitDirective(line) || parseLanguageDrumkitMetaDirective(line) || parseLanguageDrumSlotDirective(line) || parseLanguageDrumSampleSlotDirective(line) || parseLanguageSampleSlicesDirective(line) || parseLanguageSampleSliceDirective(line) || directives.parseLanguageTuningDirective(line) !== null || directives.parseLanguageClockParentDirective(line) || directives.parseLanguageClockFeelDirective(line) || directives.parseLanguageTuringDeclaration(line) || directives.parseLanguageTuringView(line) || directives.parseLanguageSeqModel(line) || directives.parseLanguageSeqWeights(line) || directives.parseLanguageConstellationParam(line) || directives.parseLanguageConstellationOctaves(line) || directives.parseLanguageConstellationReader(line) || directives.parseLanguageSnakeSize(line) || directives.parseLanguageSnakeMovement(line) || directives.parseLanguageSnakeMatrix(line) || directives.parseLanguageSnakeReader(line) || directives.parseLanguageSeqSize(line) || directives.parseLanguageLifeDensity(line) || directives.parseLanguageLifeReader(line) || directives.parseLanguageLifeEvolve(line) || directives.parseLanguageTuringLength(line) || directives.parseLanguageTuringChange(line) || directives.parseLanguageTuringValues(line) || directives.parseLanguageTuringVoice(line) || directives.parseLanguageInlinePianoDirective(line) || directives.parseLanguageInlineScalarDirective(line) || directives.parseLanguageVcaDirective(line, lineNumber) || directives.parseLanguageEnvelopeDirective(line, lineNumber) || directives.parseLanguageFxMetadata(line) || directives.parseLanguageDelayTime(line) || directives.parseLanguageDelayParam(line, lineNumber) || directives.parseLanguageDelayParamDefault(line, lineNumber) || directives.parseLanguageDelayParamCycle(line, lineNumber) || directives.parseLanguageFxParameterCycleDirective(line, lineNumber) || directives.parseLanguageFxParameterDefaultDirective(line, lineNumber) || directives.parseLanguageFxPitchSequenceDirective(line) || directives.parseLanguageFxPitchCycleDirective(line) || directives.parseLanguageFxModulationDirective(line, lineNumber) || directives.parseLanguageGenerativeCycleDirective(line, lineNumber) || directives.parseLanguageGenerativeDefaultDirective(line, lineNumber) || directives.parseLanguageModMetadata(line) || directives.parseLanguageModSetDirective(line, lineNumber) || directives.parseLanguageParameterDefaultDirective(line, lineNumber) || directives.parseLanguageObjectEveryDirective(line) || directives.parseLanguageDriveEvery(line) || directives.parseLanguageMasterClockDirective(line, lineNumber) || directives.parseLanguageFilterSequenceDirective(line) || directives.parseLanguageSequenceDirective(line) || directives.parseLanguageCycleDirective(line) || directives.parseLanguageSetCycleDirective(line) || directives.parseLanguageParameterCycleDirective(line, lineNumber) || directives.parseLanguageFromDirective(line)) continue;
+      if (directives.parseLanguageControlParameterDirective(line) || directives.parseLanguageLogicDirective(line) || directives.parseLanguageLogicNodeDirective(line) || directives.parseLanguageCompositePitch(line) || directives.parseLanguageCompositeTune(line) || directives.parseLanguageCompositeEdge(line) || directives.parseLanguageCompositeMix(line) || directives.parseLanguageCompositeOutput(line) || parseLanguageDrumkitDirective(line) || parseLanguageDrumkitMetaDirective(line) || parseLanguageDrumSlotDirective(line) || parseLanguageDrumSampleSlotDirective(line) || parseLanguageSampleSlicesDirective(line) || parseLanguageSampleSliceDirective(line) || directives.parseLanguageTuningDirective(line) !== null || directives.parseLanguageClockParentDirective(line) || directives.parseLanguageClockFeelDirective(line) || directives.parseLanguageTuringDeclaration(line) || directives.parseLanguageTuringView(line) || directives.parseLanguageSeqModel(line) || directives.parseLanguageSeqWeights(line) || directives.parseLanguageConstellationParam(line) || directives.parseLanguageConstellationOctaves(line) || directives.parseLanguageConstellationReader(line) || directives.parseLanguageSnakeSize(line) || directives.parseLanguageSnakeMovement(line) || directives.parseLanguageSnakeMatrix(line) || directives.parseLanguageSnakeReader(line) || directives.parseLanguageSeqSize(line) || directives.parseLanguageLifeDensity(line) || directives.parseLanguageLifeReader(line) || directives.parseLanguageLifeEvolve(line) || directives.parseLanguageTuringLength(line) || directives.parseLanguageTuringChange(line) || directives.parseLanguageTuringValues(line) || directives.parseLanguageTuringVoice(line) || directives.parseLanguageInlinePianoDirective(line) || directives.parseLanguageInlineScalarDirective(line) || directives.parseLanguageVcaDirective(line, lineNumber) || directives.parseLanguageEnvelopeDirective(line, lineNumber) || directives.parseLanguageFxMetadata(line) || directives.parseLanguageDelayTime(line) || directives.parseLanguageDelayParam(line, lineNumber) || directives.parseLanguageDelayParamDefault(line, lineNumber) || directives.parseLanguageDelayParamCycle(line, lineNumber) || directives.parseLanguageFxParameterCycleDirective(line, lineNumber) || directives.parseLanguageFxParameterDefaultDirective(line, lineNumber) || directives.parseLanguageFxPitchSequenceDirective(line) || directives.parseLanguageFxPitchCycleDirective(line) || directives.parseLanguageFxModulationDirective(line, lineNumber) || directives.parseLanguageGenerativeCycleDirective(line, lineNumber) || directives.parseLanguageGenerativeDefaultDirective(line, lineNumber) || directives.parseLanguageModMetadata(line) || directives.parseLanguageModSetDirective(line, lineNumber) || directives.parseLanguageParameterDefaultDirective(line, lineNumber) || directives.parseLanguageObjectEveryDirective(line) || directives.parseLanguageDriveEvery(line) || directives.parseLanguageMasterClockDirective(line, lineNumber) || directives.parseLanguageFilterSequenceDirective(line) || directives.parseLanguageSequenceDirective(line) || directives.parseLanguageCycleDirective(line) || directives.parseLanguageSetCycleDirective(line) || directives.parseLanguageParameterCycleDirective(line, lineNumber) || directives.parseLanguageFromDirective(line)) continue;
 
       const gainDeclaration = parseGainDeclaration(line);
       if (gainDeclaration) {
@@ -1933,6 +1918,12 @@ export class SonusRuntime {
           const error = applyVoiceCall(voiceDeclaration.name, definition, call, moduleViews, (expr) => evalValue(expr, lineNumber));
           if (error) diagnostics.push({ line: lineNumber, message: error });
         }
+        continue;
+      }
+      const modDeclaration = parseModDeclaration(line);
+      if (modDeclaration) {
+        // High-level MOD is generic here; the concrete backend is selected by
+        // the explicit `model` directive that follows in the compiled source.
         continue;
       }
       const swellDeclaration = parseSwellDeclaration(line);
@@ -2364,7 +2355,7 @@ export class SonusRuntime {
           else if (swell) value = `${formatNumber(swell.frequency)} HZ`;
         } else if (parameter === 'model' && voice) {
           value = voice.engine === 'macro' ? formatVoiceModel(voice.model) : voice.soundId.toUpperCase();
-        } else if ((parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph' || parameter === 'width') && voice) {
+        } else if ((parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph' || parameter === 'width' || parameter === 'density') && voice) {
           value = `${formatNumber(voice[parameter])}%`;
         } else if (parameter === 'level' && gain) {
           value = `${formatNumber(gain.level)}%`;
@@ -2569,96 +2560,19 @@ export class SonusRuntime {
         continue;
       }
 
-      const parameter = directive.parameter;
-      if (parameter === 'model') {
-        const model = directive.value.toLowerCase();
-        if (model !== 'swell' && model !== 'dices' && model !== 'composite') {
-          diagnostics.push({ line: directive.line, message: 'MOD model expects swell, dices, or composite' });
-          continue;
-        }
-        swell.model = model;
-        swell.parameters.set('MODEL', model.toUpperCase());
-        continue;
-      }
-
-      if (parameter === 'ratebeat') {
-        const beats = Number(directive.value);
-        if (!Number.isFinite(beats) || beats <= 0) {
-          diagnostics.push({ line: directive.line, message: 'MOD rate beat value must be greater than 0' });
-          continue;
-        }
-        swell.frequency = Math.max(0.001, clockBpm / 60 / beats);
-        swell.parameters.set('RATE', `${formatNumber(beats)} BEAT`);
-        continue;
-      }
-
-      if (parameter === 'freq') {
-        const value = Number(directive.value);
-        if (!Number.isFinite(value) || value <= 0 || value > 10000) {
-          diagnostics.push({ line: directive.line, message: 'MOD rate resolves outside the supported frequency range' });
-          continue;
-        }
-        swell.frequency = value;
-        swell.parameters.set('RATE', `${formatNumber(value)} HZ`);
-        continue;
-      }
-
-      if (parameter === 'slope' || parameter === 'shape' || parameter === 'smooth' || parameter === 'shift') {
-        const value = Number(directive.value);
-        if (!Number.isFinite(value) || value < 0 || value > 100) {
-          diagnostics.push({ line: directive.line, message: `MOD ${parameter} expects 0..100` });
-          continue;
-        }
-        swell[parameter] = value;
-        swell.parameters.set(parameter.toUpperCase(), `${formatNumber(value)}%`);
-        continue;
-      }
-
-      if (parameter === 'spread' || parameter === 'bias' || parameter === 'steps' || parameter === 'deja' || parameter === 'diversity') {
-        const value = Number(directive.value);
-        if (!Number.isFinite(value) || value < 0 || value > 100) {
-          diagnostics.push({ line: directive.line, message: `MOD dices ${parameter} expects 0..100` });
-          continue;
-        }
-        swell[parameter] = value;
-        swell.parameters.set(parameter.toUpperCase(), `${formatNumber(value)}%`);
-        continue;
-      }
-
-      if (parameter === 'length') {
-        const value = Number(directive.value);
-        if (!Number.isInteger(value) || value < 1 || value > 16) {
-          diagnostics.push({ line: directive.line, message: 'MOD dices length expects 1..16' });
-          continue;
-        }
-        swell.length = value;
-        swell.parameters.set('LENGTH', `${value}`);
-        continue;
-      }
-
-      if (parameter === 'output') {
-        const modes: Record<string, number> = { different: 0, amplitude: 1, phase: 2, frequency: 3 };
-        const mode = modes[directive.value.toLowerCase()];
-        if (mode === undefined) {
-          diagnostics.push({ line: directive.line, message: 'MOD relation expects phase, amplitude, frequency, or different' });
-          continue;
-        }
-        swell.outputMode = mode;
-        swell.parameters.set('RELATION', directive.value.toUpperCase());
-        continue;
-      }
-
-      if (parameter === 'range') {
-        const normalized = directive.value.toLowerCase();
-        if (normalized !== 'control' && normalized !== 'audio') {
-          diagnostics.push({ line: directive.line, message: 'MOD range expects control or audio' });
-          continue;
-        }
-        swell.range = normalized === 'audio' ? 1 : 0;
-        swell.parameters.set('RANGE', normalized.toUpperCase());
-      }
+      const error = applyModSetDirective(swell, directive, clockBpm, formatNumber);
+      if (error) diagnostics.push({ line: directive.line, message: error });
     }
 
+    for (const [name, metadata] of languageMods) {
+      const mod = swells.get(name);
+      if (mod?.model === 'generic') {
+        diagnostics.push({
+          line: 1,
+          message: `MOD '${metadata.displayName}' requires an explicit model (for example: model lfo, model swell, or model dices)`,
+        });
+      }
+    }
 
     const variableViews: VariableViewState[] = [];
     const seenVariableViews = new Set<string>();
@@ -2730,7 +2644,7 @@ export class SonusRuntime {
 
           if (parameter === 'freq') continue;
           if (parameter === 'model') continue;
-          if (parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph') continue;
+          if (parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph' || parameter === 'density') continue;
         }
 
         match = bodyLine.match(/^([A-Za-z_]\w*)\s*=\s*(.+)$/);
@@ -2797,7 +2711,7 @@ export class SonusRuntime {
         else if (swell) value = `${formatNumber(swell.frequency)} HZ`;
       } else if (parameter === 'model' && voice) {
         value = voice.engine === 'macro' ? formatVoiceModel(voice.model) : voice.soundId.toUpperCase();
-      } else if ((parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph' || parameter === 'width') && voice) {
+      } else if ((parameter === 'harmo' || parameter === 'timbre' || parameter === 'morph' || parameter === 'width' || parameter === 'density') && voice) {
         value = `${formatNumber(voice[parameter])}%`;
       } else if (parameter === 'level' && gain) {
         value = `${formatNumber(gain.level)}%`;
@@ -2849,11 +2763,11 @@ export class SonusRuntime {
     const moduleModViewSignals = (name: string): string[] => {
       const mod = swells.get(name);
       if (!mod) return [];
-      if (mod.model === 'dices') return [`${name}.x1`, `${name}.x2`, `${name}.x3`, `${name}.y`];
-      if (mod.model === 'composite') {
-        return (languageCompositeOutputs.get(name) ?? []).map((output) => `${name}.${output.name}`);
-      }
-      return [1, 2, 3, 4].map((port) => `${name}.out${port}`);
+      return modViewSignals(
+        name,
+        mod,
+        (languageCompositeOutputs.get(name) ?? []).map((output) => output.name),
+      );
     };
 
     for (const name of moduleViews) {
@@ -2865,11 +2779,15 @@ export class SonusRuntime {
           signal: signals[0],
           signals,
           signalKind: 'signal',
-          port: mod.model === 'dices'
+          port: mod.model === 'lfo'
+            ? signals.map((signal) => signal.slice(signal.lastIndexOf('.') + 1).toUpperCase()).join(' / ')
+            : mod.model === 'dices'
             ? 'X1 / X2 / X3 / Y'
             : mod.model === 'composite'
               ? signals.map((signal) => signal.slice(signal.lastIndexOf('.') + 1).toUpperCase()).join(' / ')
-              : 'OUT 1-4',
+              : mod.model === 'swell'
+                ? 'OUT 1-4'
+                : 'MOD',
         });
       } else if (voices.has(name)) {
         const voice = voices.get(name)!;
@@ -3265,11 +3183,13 @@ export class SonusRuntime {
           .map(([name]) => buildCompositeDefinition(name, 'mod', true, 100, null, false)),
       ],
       basicVoices: [...voices.entries()]
-        .filter(([, definition]) => definition.engine === 'oscillator')
+        .filter(([, definition]) => definition.engine === 'oscillator' || definition.engine === 'noise')
         .map(([name, definition]) => ({
           name,
           enabled: !definition.disabled,
-          waveform: definition.soundId as 'sine' | 'triangle' | 'sawtooth' | 'ramp' | 'square',
+          waveform: (definition.engine === 'noise' ? 'noise' : definition.soundId) as 'sine' | 'triangle' | 'sawtooth' | 'ramp' | 'square' | 'noise',
+          noiseModel: definition.engine === 'noise' ? definition.soundId.replace(/^noise\./, '') as 'white' | 'dust' | 'clocked' | 'fractal' : null,
+          density: definition.density,
           level: definition.level,
           frequency: definition.frequency,
           dynamicPitch: languageSequences.has(name) || languageTuringVoiceSources.has(name) || languageConstellationReaders.has(name) || languageSnakeReaders.has(name),
@@ -3289,6 +3209,16 @@ export class SonusRuntime {
           timbre: definition.timbre,
           morph: definition.morph,
         })),
+      lfos: [...swells.entries()]
+        .filter(([, definition]) => definition.model === 'lfo')
+        .map(([name, definition]) => ({
+          name,
+          frequency: definition.frequency,
+          outputs: [...definition.outputs],
+        })),
+      noiseMods: [...swells.entries()]
+        .filter(([, definition]) => definition.model === 'noise')
+        .map(([name, definition]) => ({ name, noiseModel: definition.noiseModel, frequency: definition.frequency, density: definition.density })),
       swells: [...swells.entries()]
         .filter(([, definition]) => definition.model === 'swell')
         .map(([name, definition]) => ({
@@ -4972,6 +4902,126 @@ export class SonusRuntime {
       }
     }
 
+    if (languageControlParameters.length > 0) {
+      const parsedControls = languageControlParameters.map((definition) => ({
+        ...definition,
+        ast: parseControlExpression(definition.expression),
+        statePrefix: `${definition.ownerKind}:${definition.owner}.${definition.parameter}:${definition.expression}`,
+      }));
+      const applyControlValue = (control: typeof parsedControls[number], rawValue: number): void => {
+        const value = Math.max(control.min, Math.min(control.max, rawValue));
+        if (control.ownerKind === 'voice') {
+          if (control.parameter === 'level') this.audio.setVoiceLevel(control.owner, value);
+          else this.audio.setVoiceParameter(
+            control.owner,
+            control.parameter as Parameters<AudioEngine['setVoiceParameter']>[1],
+            value,
+          );
+          return;
+        }
+        if (control.ownerKind === 'filter') {
+          if (control.parameter === 'cutoff') {
+            this.audio.setFilterCutoff(control.owner, 20 * (1000 ** (value / 100)));
+          } else if (control.parameter === 'resonance') this.audio.setFilterResonance(control.owner, value);
+          else if (control.parameter === 'drive') this.audio.setFilterDrive(control.owner, value);
+          return;
+        }
+        this.audio.setMistParameter(
+          control.owner,
+          control.parameter as Parameters<AudioEngine['setMistParameter']>[1],
+          value,
+        );
+      };
+      this.scheduler.addWallJob('continuous-control-expressions', 1000 / 60, () => {
+        const nowSeconds = performance.now() / 1000;
+        const bpm = Math.max(1e-9, this.audio.getClockStatus().bpm || clockBpm || 120);
+        for (const control of parsedControls) {
+          try {
+            const value = evaluateControlExpression(control.ast, {
+              resolveScalar: (path) => {
+                if (path.length === 1) {
+                  const scalar = variables.get(path[0]);
+                  return typeof scalar === 'number' && Number.isFinite(scalar) ? scalar : undefined;
+                }
+                const scalar = resolveMember(path);
+                return typeof scalar === 'number' && Number.isFinite(scalar) ? scalar : undefined;
+              },
+              resolveMod: (path) => {
+                if (path.length !== 2 || !swells.has(path[0])) return undefined;
+                const port = path[1].toLowerCase();
+                const channel = port === 'out' || port === 'out1' || port === 'x1' ? 1
+                  : port === 'out2' || port === 'x2' ? 2
+                  : port === 'out3' || port === 'x3' ? 3
+                  : port === 'out4' || port === 'y' ? 4 : 0;
+                if (channel === 0) return undefined;
+                const sample = this.audio.readModOutput(path[0], channel);
+                return sample === null || !Number.isFinite(sample) ? undefined : Math.max(-1, Math.min(1, sample));
+              },
+              nowSeconds,
+              bpm,
+              random: () => this.nextRandom(),
+              state: this.inlineControlState,
+              statePrefix: control.statePrefix,
+            });
+            applyControlValue(control, value);
+          } catch (error) {
+            if (!(error instanceof ControlExpressionError)) console.error(error);
+          }
+        }
+      });
+    }
+
+    const dynamicLfoLevels = [...swells.entries()]
+      .filter(([, definition]) => definition.model === 'lfo')
+      .flatMap(([name, definition]) => definition.outputs.flatMap((output, index) =>
+        output?.levelExpression ? [{ name, channel: index + 1, expression: output.levelExpression }] : [],
+      ));
+
+    if (dynamicLfoLevels.length > 0) {
+      const parsedControls = dynamicLfoLevels.map((definition) => ({
+        ...definition,
+        ast: parseControlExpression(definition.expression),
+        statePrefix: `mod:${definition.name}.out${definition.channel}:level:${definition.expression}`,
+      }));
+      this.scheduler.addWallJob('control-expressions', 1000 / 60, () => {
+        const nowSeconds = performance.now() / 1000;
+        const bpm = Math.max(1e-9, this.audio.getClockStatus().bpm || clockBpm || 120);
+        for (const control of parsedControls) {
+          try {
+            const value = evaluateControlExpression(control.ast, {
+              resolveScalar: (path) => {
+                if (path.length === 1) {
+                  const scalar = variables.get(path[0]);
+                  return typeof scalar === 'number' && Number.isFinite(scalar) ? scalar : undefined;
+                }
+                const scalar = resolveMember(path);
+                return typeof scalar === 'number' && Number.isFinite(scalar) ? scalar : undefined;
+              },
+              resolveMod: (path) => {
+                if (path.length !== 2 || !swells.has(path[0])) return undefined;
+                const port = path[1].toLowerCase();
+                const channel = port === 'out' || port === 'out1' || port === 'x1' ? 1
+                  : port === 'out2' || port === 'x2' ? 2
+                  : port === 'out3' || port === 'x3' ? 3
+                  : port === 'out4' || port === 'y' ? 4 : 0;
+                if (channel === 0) return undefined;
+                const value = this.audio.readModOutput(path[0], channel);
+                return value === null || !Number.isFinite(value) ? undefined : Math.max(-1, Math.min(1, value));
+              },
+              nowSeconds,
+              bpm,
+              random: () => this.nextRandom(),
+              state: this.inlineControlState,
+              statePrefix: control.statePrefix,
+            });
+            this.audio.setBasicModOutputLevel(control.name, control.channel, Math.max(0, Math.min(100, value)));
+          } catch (error) {
+            if (!(error instanceof ControlExpressionError)) console.error(error);
+          }
+        }
+      });
+    }
+
     this.scheduler.start();
 
       for (const handler of whenHandlers) {
@@ -5290,6 +5340,10 @@ function parseGainDeclaration(line: string): ObjectDeclaration | null {
 
 function parseVoiceDeclaration(line: string): ObjectDeclaration | null {
   return parseDeclaration(line, 'Voice');
+}
+
+function parseModDeclaration(line: string): ObjectDeclaration | null {
+  return parseDeclaration(line, 'Mod');
 }
 
 function parseSwellDeclaration(line: string): ObjectDeclaration | null {

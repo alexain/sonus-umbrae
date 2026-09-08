@@ -12,8 +12,8 @@ interface GainDefinition {
   parameters: Map<string, string>;
 }
 
-type VoiceEngineKind = 'macro' | 'matter' | 'resonator' | 'oscillator' | 'composite' | 'sample';
-type VoiceParameterName = 'harmo' | 'timbre' | 'morph' | 'width' | 'geometry' | 'structure' | 'brightness' | 'damping' | 'position' | 'space' | 'bow' | 'bowTimbre' | 'blow' | 'blowTimbre' | 'strike' | 'strikeTimbre';
+type VoiceEngineKind = 'macro' | 'matter' | 'resonator' | 'oscillator' | 'noise' | 'composite' | 'sample';
+type VoiceParameterName = 'harmo' | 'timbre' | 'morph' | 'width' | 'density' | 'geometry' | 'structure' | 'brightness' | 'damping' | 'position' | 'space' | 'bow' | 'bowTimbre' | 'blow' | 'blowTimbre' | 'strike' | 'strikeTimbre';
 
 interface VoiceDefinition {
   disabled: boolean;
@@ -28,6 +28,7 @@ interface VoiceDefinition {
   timbre: number;
   morph: number;
   width: number;
+  density: number;
   geometry: number;
   structure: number;
   brightness: number;
@@ -54,7 +55,7 @@ interface VoiceDefinition {
 }
 
 interface SwellDefinition {
-  model: 'swell' | 'dices' | 'composite';
+  model: 'generic' | 'lfo' | 'noise' | 'swell' | 'dices' | 'composite';
   frequency: number;
   slope: number;
   shape: number;
@@ -432,6 +433,7 @@ export function applyVoiceCall(
     case 'timbre':
     case 'morph':
     case 'width':
+    case 'density':
     case 'geometry':
     case 'structure':
     case 'brightness':
@@ -521,6 +523,13 @@ export function applyVoiceModelValue(voice: VoiceDefinition, value: ScalarValue)
     if (normalized === 'sample') {
       voice.engine = 'sample'; voice.soundId = normalized; voice.lpg = false; voice.parameters.set('MODEL', 'SAMPLE'); return null;
     }
+    if (/^noise\.(?:white|dust|clocked|fractal)$/.test(normalized)) {
+      voice.engine = 'noise';
+      voice.soundId = normalized;
+      voice.lpg = false;
+      voice.parameters.set('MODEL', normalized.toUpperCase());
+      return null;
+    }
     if (normalized === 'matter') {
       voice.engine = 'matter';
       voice.soundId = normalized;
@@ -551,7 +560,7 @@ export function applyVoiceModelValue(voice: VoiceDefinition, value: ScalarValue)
     }
   }
   const model = parseVoiceModelValue(value);
-  if (model === null) return 'model expects macro.*, matter, resonator.*, sine, triangle, sawtooth, ramp, square, composite, or sample';
+  if (model === null) return 'model expects macro.*, noise.white, noise.dust, noise.clocked, noise.fractal, matter, resonator.*, sine, triangle, sawtooth, ramp, square, composite, or sample';
   voice.engine = 'macro';
   voice.model = model;
   voice.soundId = formatVoiceModelId(model);

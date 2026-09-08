@@ -9,6 +9,7 @@ DAISYSP="$ROOT/vendor/daisysp"
 DSPARK="$ROOT/vendor/dspark"
 MACRO_OUTPUT="$ROOT/public/dsp/macro.wasm"
 DAISY_OSCILLATORS_OUTPUT="$ROOT/public/dsp/daisy-oscillators.wasm"
+NOISE_OUTPUT="$ROOT/public/dsp/noise.wasm"
 COMPOSITE_OUTPUT="$ROOT/public/dsp/composite.wasm"
 SWELL_OUTPUT="$ROOT/public/dsp/swell.wasm"
 DICES_OUTPUT="$ROOT/public/dsp/dices.wasm"
@@ -243,6 +244,24 @@ em++ \
   -o "$DAISY_OSCILLATORS_OUTPUT"
 
 echo "Built $DAISY_OSCILLATORS_OUTPUT (Electrosmith DaisySP Oscillator backend)"
+
+echo "Building DaisySP white-noise module..."
+em++ \
+  -std=c++17 \
+  -O3 \
+  -I"$DAISYSP/Source" \
+  -I"$DAISYSP/Source/Utility" \
+  "$ROOT/dsp/noise_bridge.cc" \
+  "$DAISYSP/Source/Noise/clockednoise.cpp" \
+  -s STANDALONE_WASM=1 \
+  -s ALLOW_MEMORY_GROWTH=0 \
+  -s INITIAL_MEMORY=4194304 \
+  -s FILESYSTEM=0 \
+  -s EXPORTED_FUNCTIONS='["_su_noise_create","_su_noise_destroy","_su_noise_set_model","_su_noise_set_frequency","_su_noise_out","_su_noise_process"]' \
+  -Wl,--no-entry \
+  -o "$NOISE_OUTPUT"
+
+echo "Built $NOISE_OUTPUT (Electrosmith DaisySP white/dust/clocked/fractal noise backend)"
 
 echo "Building composite VOICE module..."
 em++ \

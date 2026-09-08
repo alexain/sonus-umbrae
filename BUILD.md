@@ -105,6 +105,7 @@ The generated WASM artifacts are written to:
 ```text
 public/dsp/macro.wasm
 public/dsp/daisy-oscillators.wasm
+public/dsp/noise.wasm
 public/dsp/composite.wasm
 public/dsp/swell.wasm
 public/dsp/dices.wasm
@@ -115,7 +116,7 @@ public/dsp/sky.wasm
 public/dsp/daisy-filters.wasm
 ```
 
-`macro.wasm` provides the Mutable/Plaits `macro.*` VOICE backend, `daisy-oscillators.wasm` provides the basic `sine`, `triangle`, `sawtooth`, `ramp`, and `square` VOICE backend, `composite.wasm` provides the audio-rate graph backend for `sound composite`, `swell.wasm` provides the Tides-derived four-output modulation backend, `dices.wasm` provides the Marbles-derived random-voltage `MOD dices` backend, and `mist.wasm` provides the current Mist stereo `FX` backend. `sky.wasm` provides the ambient `sky` reverb backed by CloudSeedCore. `matter.wasm` and `resonator.wasm` provide the physical-model and resonator engines. `daisy-filters.wasm` is a separate DaisySP filter-area module containing the SVF backend. The oscillator and filter areas intentionally remain separate WASM modules.
+`macro.wasm` provides the Mutable/Plaits `macro.*` VOICE backend, `daisy-oscillators.wasm` provides the basic `sine`, `triangle`, `sawtooth`, `ramp`, and `square` VOICE backend, `noise.wasm` provides the shared DaisySP `WhiteNoise` backend used by `VOICE sound noise.white` and `MOD model noise`, `composite.wasm` provides the audio-rate graph backend for `sound composite`, `swell.wasm` provides the Tides-derived four-output modulation backend, `dices.wasm` provides the Marbles-derived random-voltage `MOD dices` backend, and `mist.wasm` provides the current Mist stereo `FX` backend. `sky.wasm` provides the ambient `sky` reverb backed by CloudSeedCore. `matter.wasm` and `resonator.wasm` provide the physical-model and resonator engines. `daisy-filters.wasm` is a separate DaisySP filter-area module containing the SVF backend. The oscillator and filter areas intentionally remain separate WASM modules.
 
 Generated WASM files are ignored by Git and should be rebuilt locally.
 

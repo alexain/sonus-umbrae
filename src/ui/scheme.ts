@@ -1,12 +1,6 @@
 import type { SchemeModel, SchemeNode } from '../language/runtime';
 import { drawSchemeConnections, layoutScheme } from './scheme-layout';
-import {
-  effectiveScopeRange,
-  isDicesSignal,
-  parseModuleViewScales,
-  scopeScaleLabel,
-  type ModuleViewScale,
-} from './monitor-panels';
+import { isDicesSignal, naturalScopeRange } from './monitor-panels';
 
 type SchemeRendererOptions = {
   viewport: HTMLElement;
@@ -20,16 +14,15 @@ type SchemeRendererOptions = {
 export class SchemeRenderer {
   constructor(private readonly options: SchemeRendererOptions) {}
 
-  render(rawModel: SchemeModel, source: string, commentStart: (line: string) => number): void {
+  render(rawModel: SchemeModel): void {
     const model = this.normalizeModel(rawModel);
-    const moduleViewScales = parseModuleViewScales(source, commentStart);
 
     this.options.nodes.replaceChildren();
     this.options.edges.replaceChildren();
 
     const nodeElements = new Map<string, HTMLElement>();
     for (const node of model.nodes) {
-      const element = this.buildNode(node, moduleViewScales.get(node.id));
+      const element = this.buildNode(node);
       nodeElements.set(node.id, element);
       this.options.nodes.append(element);
     }
@@ -69,7 +62,7 @@ export class SchemeRenderer {
     return { nodes, connections: rawModel.connections };
   }
 
-  private buildNode(node: SchemeNode, viewScale?: ModuleViewScale): HTMLElement {
+  private buildNode(node: SchemeNode): HTMLElement {
     const element = document.createElement('section');
     element.className = 'scheme-node scheme-module-node';
     element.dataset.nodeId = node.id;
@@ -102,11 +95,10 @@ export class SchemeRenderer {
       label.className = 'scheme-view-label';
       const viewSignals = view.signals?.length ? view.signals : [view.signal];
       const viewIsDices = viewSignals.some(isDicesSignal);
-      const scaleLabel = scopeScaleLabel(viewSignals, viewScale);
       label.textContent = view.display === 'sample'
         ? `${view.sampleAlias ?? 'SAMPLE'} · ${view.sampleStart ?? 0}%–${view.sampleEnd ?? 100}%`
         : viewIsDices
-          ? `X1 / X2 / X3 / Y${scaleLabel ? ` · ${scaleLabel}` : ''}`
+          ? 'X1 / X2 / X3 / Y'
           : view.port;
 
       const canvas = document.createElement('canvas');
@@ -121,7 +113,7 @@ export class SchemeRenderer {
       } else {
         canvas.className = `scope-canvas scheme-scope view-${view.signalKind}`;
         canvas.dataset.signal = view.signal;
-        canvas.dataset.scopeRange = String(effectiveScopeRange(viewSignals, viewScale));
+        canvas.dataset.scopeRange = String(naturalScopeRange(viewSignals));
         if (view.signals?.length) {
           canvas.dataset.signals = view.signals.join(',');
           canvas.dataset.kind = 'multi-signal';

@@ -23,10 +23,7 @@ import { AssetLibrary } from './editor/assets';
 import { updateSampleWaveformViews as renderSampleWaveformViews } from './ui/sample-waveform';
 import { SchemeRenderer } from './ui/scheme';
 import { ScopeRenderer } from './ui/scopes';
-import {
-  MonitorPanels,
-  parseModuleViewScales,
-} from './ui/monitor-panels';
+import { MonitorPanels } from './ui/monitor-panels';
 import {
   buildConstellationPanel,
   buildDrumkitPanel,
@@ -1400,7 +1397,6 @@ function syncViews(): void {
   const drumkitViews = runtime.getDrumkitViews();
   const scheme = runtime.getSchemeModel();
   const nodes = new Map(scheme.nodes.map((node) => [node.id, node]));
-  const moduleViewScales = parseModuleViewScales(sourceText(), commentStart);
   const panels: HTMLElement[] = [];
 
   if (appConfig.showVariables) panels.push(monitorPanels.buildVariablesPanel(variables));
@@ -1485,7 +1481,6 @@ function syncViews(): void {
       compositeSignals,
       parameterDetails: details,
       sampleView,
-      viewScale: moduleViewScales.get(node.id),
       defaultCollapsed: false,
     }));
   }
@@ -1544,7 +1539,7 @@ function drawScopes(): void {
 
 
 function renderScheme(): void {
-  schemeRenderer.render(runtime.getSchemeModel(), sourceText(), commentStart);
+  schemeRenderer.render(runtime.getSchemeModel());
 }
 
 

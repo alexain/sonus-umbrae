@@ -46,6 +46,11 @@ const VOICE_TEMPLATES: Record<string, VoiceTemplate> = {
   'resonator.strings': { sound: 'resonator.strings', parameters: ['structure 50', 'brightness 50', 'damping 50', 'position 50'] },
   'resonator.string': { sound: 'resonator.string', parameters: ['structure 50', 'brightness 50', 'damping 50', 'position 50'] },
 
+  'noise.white': { sound: 'noise.white' },
+  'noise.dust': { sound: 'noise.dust' },
+  'noise.clocked': { sound: 'noise.clocked' },
+  'noise.fractal': { sound: 'noise.fractal' },
+
   matter: { sound: 'matter', parameters: ['geometry 50', 'brightness 50', 'damping 50', 'position 50', 'space 50'] },
 };
 
@@ -192,6 +197,69 @@ function expandDrumkit(name: string): SnippetExpansion {
   };
 }
 
+function expandMod(name: string, rawModel: string): SnippetExpansion | null {
+  const model = rawModel.toLowerCase();
+  if (model === 'lfo') {
+    return {
+      text: [
+        `MOD ${name}:`,
+        '    model lfo',
+        '    rate 0.1 hz',
+      ].join('\n'),
+      label: 'MOD LFO',
+    };
+  }
+  if (model === 'noise' || model === 'noise.white' || model === 'noise.dust' || model === 'noise.clocked' || model === 'noise.fractal') {
+    const noiseModel = model === 'noise' ? 'noise.white' : model;
+    return {
+      text: [
+        `MOD ${name}:`,
+        `    model ${noiseModel}`,
+      ].join('\n'),
+      label: `MOD ${noiseModel.toUpperCase()}`,
+    };
+  }
+  if (model === 'swell') {
+    return {
+      text: [
+        `MOD ${name}:`,
+        '    model swell',
+        '    rate 0.25 hz',
+        '    shape sine',
+        '    relation phase',
+        '    range control',
+      ].join('\n'),
+      label: 'MOD SWELL',
+    };
+  }
+  if (model === 'dices') {
+    return {
+      text: [
+        `MOD ${name}:`,
+        '    model dices',
+        '    rate 1 beat',
+        '    spread 50',
+        '    bias 50',
+        '    steps 50',
+        '    deja 0',
+        '    length 8',
+        '    diversity 50',
+      ].join('\n'),
+      label: 'MOD DICES',
+    };
+  }
+  if (model === 'composite') {
+    return {
+      text: [
+        `MOD ${name}:`,
+        '    model composite',
+      ].join('\n'),
+      label: 'MOD COMPOSITE',
+    };
+  }
+  return null;
+}
+
 function expandClock(parts: readonly string[]): SnippetExpansion | null {
   if (parts.length === 2 && /^\d+(?:\.\d+)?$/.test(parts[1])) {
     const bpm = Number(parts[1]);
@@ -224,6 +292,7 @@ export function expandEditorSnippet(raw: string): SnippetExpansion | null {
   if (kind === 'env' && parts.length === 3) return expandEnvelope(parts[1], parts[2]);
   if (kind === 'fx' && parts.length === 3) return expandFx(parts[1], parts[2]);
   if (kind === 'seq' && parts.length === 3) return expandSeq(parts[1], parts[2]);
+  if (kind === 'mod' && parts.length === 3) return expandMod(parts[1], parts[2]);
   if ((kind === 'd' || kind === 'drum' || kind === 'drumkit') && parts.length === 2) return expandDrumkit(parts[1]);
 
   return null;

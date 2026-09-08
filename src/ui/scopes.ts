@@ -1,5 +1,5 @@
 import type { AudioEngine } from '../audio/engine';
-import { naturalScopeRange } from './monitor-panels';
+import { modSignalSlot, naturalScopeRange } from './monitor-panels';
 
 export class ScopeRenderer {
   constructor(private readonly audioEngine: AudioEngine) {}
@@ -91,7 +91,8 @@ export class ScopeRenderer {
     signals.forEach((traceSignal, traceIndex) => {
       const data = new Float32Array(512);
       if (!this.audioEngine.readOscilloscope(traceSignal, data)) return;
-      const traceColor = traceColors[traceIndex % traceColors.length];
+      const slot = modSignalSlot(traceSignal);
+      const traceColor = traceColors[slot ? slot - 1 : traceIndex % traceColors.length];
       ctx.strokeStyle = traceColor;
       ctx.shadowColor = traceColor;
       ctx.beginPath();

@@ -2,62 +2,22 @@ import type { ParameterViewState, SchemeModel } from '../language/runtime';
 
 const PANEL_STATE_KEY = 'sonus-umbrae.monitor-panels';
 
-export type ModuleViewScale =
-  | { mode: 'default' }
-  | { mode: 'volts'; value: number }
-  | { mode: 'zoom'; value: number };
-
-export function parseModuleViewScales(source: string, commentStart: (line: string) => number): Map<string, ModuleViewScale> {
-  const result = new Map<string, ModuleViewScale>();
-  const scopes: Array<{ kind: 'voice' | 'fx' | 'other'; name: string; indentation: number }> = [];
-
-  for (const rawLine of source.split('\n')) {
-    const commentAt = commentStart(rawLine);
-    const code = commentAt < 0 ? rawLine : rawLine.slice(0, commentAt);
-    const trimmed = code.trim();
-    if (!trimmed) continue;
-    const indentation = code.length - code.trimStart().length;
-    while (scopes.length > 0 && indentation <= scopes[scopes.length - 1].indentation) scopes.pop();
-
-    const owner = trimmed.match(/^_?(VOICE|FX)\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+WITH\s+VIEW(?:\s+\d+(?:\.\d+)?\s*[VX])?)?\s*:/i);
-    if (owner) {
-      scopes.push({ kind: owner[1].toLowerCase() as 'voice' | 'fx', name: owner[2], indentation });
-      continue;
-    }
-
-    const mod = trimmed.match(/^MOD\s+([A-Za-z_][A-Za-z0-9_]*)\s+WITH\s+VIEW(?:\s+(\d+(?:\.\d+)?)\s*([VX]))?\s*:/i);
-    if (!mod) continue;
-    const ownerScope = [...scopes].reverse().find((scope) => scope.kind === 'voice' || scope.kind === 'fx');
-    const internalName = ownerScope ? `__mod_${ownerScope.name}_${mod[1]}` : mod[1];
-    if (mod[2] === undefined) result.set(internalName, { mode: 'default' });
-    else if (mod[3].toLowerCase() === 'v') result.set(internalName, { mode: 'volts', value: Number(mod[2]) });
-    else result.set(internalName, { mode: 'zoom', value: Number(mod[2]) });
-  }
-  return result;
+export function modSignalSlot(signal: string): 1 | 2 | 3 | 4 | null {
+  const token = signal.slice(signal.lastIndexOf('.') + 1).toLowerCase();
+  if (token === 'out' || token === 'out1' || token === 'x1') return 1;
+  if (token === 'out2' || token === 'x2') return 2;
+  if (token === 'out3' || token === 'x3') return 3;
+  if (token === 'out4' || token === 'y') return 4;
+  return null;
 }
 
 export function isDicesSignal(signal: string): boolean {
   return /\.(?:x1|x2|x3|y)$/i.test(signal);
 }
 
-export function naturalScopeRange(signals: readonly string[]): number {
-  return signals.some(isDicesSignal) ? 5 : 1;
-}
-
-export function effectiveScopeRange(signals: readonly string[], scale: ModuleViewScale | undefined): number {
-  const natural = naturalScopeRange(signals);
-  if (!scale || scale.mode === 'default') return natural;
-  if (scale.mode === 'volts') return Math.max(0.0001, scale.value);
-  return Math.max(0.0001, natural / scale.value);
-}
-
-export function scopeScaleLabel(signals: readonly string[], scale: ModuleViewScale | undefined): string {
-  const range = effectiveScopeRange(signals, scale);
-  if (signals.some(isDicesSignal) || scale?.mode === 'volts') {
-    return `±${Number.isInteger(range) ? range : Number(range.toFixed(2))}V`;
-  }
-  if (scale?.mode === 'zoom') return `${scale.value}X`;
-  return '';
+export function naturalScopeRange(_signals: readonly string[]): number {
+  // All MOD backends are normalized before they reach routing or views.
+  return 1;
 }
 
 export class MonitorPanels {
@@ -196,7 +156,6 @@ export class MonitorPanels {
     stereoLegend?: boolean;
     parameterDetails?: ParameterViewState[];
     sampleView?: { owner?: string; sampleAlias?: string; sampleStart?: number; sampleEnd?: number; sampleSlices?: number };
-    viewScale?: ModuleViewScale;
     defaultCollapsed: boolean;
   }): HTMLElement {
     const card = this.createCard(options.id, options.title, options.defaultCollapsed);
@@ -231,7 +190,6 @@ export class MonitorPanels {
       const label = document.createElement('div');
       label.className = 'monitor-section-label';
       const compositeIsDices = options.compositeSignals!.some(isDicesSignal);
-      const scaleLabel = scopeScaleLabel(options.compositeSignals!, options.viewScale);
       const compositePortNames = options.compositeSignals!.map((signal) =>
         signal.slice(signal.lastIndexOf('.') + 1).toUpperCase()
       );
@@ -240,10 +198,10 @@ export class MonitorPanels {
         ? 'STEREO OUT'
         : (/: (?:MIST|FX)$/.test(options.title))
           ? 'OUT L / R'
-          : compositeIsDices
-            ? `X1 / X2 / X3 / Y${scaleLabel ? ` · ${scaleLabel}` : ''}`
-            : isGenericMod
-              ? `${compositePortNames.join(' / ')}${scaleLabel ? ` · ${scaleLabel}` : ''}`
+          : isGenericMod
+            ? ''
+            : compositeIsDices
+              ? 'X1 / X2 / X3 / Y'
               : options.compositeSignals!.length === 2
                 ? 'OUT / AUX'
                 : compositePortNames.join(' / ');
@@ -253,19 +211,20 @@ export class MonitorPanels {
         legend.className = 'scope-stereo-legend';
         legend.innerHTML = '<span class="scope-legend-l">● L</span><span class="scope-legend-r">● R</span>';
         label.append(legend);
-      } else if (isGenericMod && (options.compositeSignals?.length ?? 0) > 1) {
+      } else if (isGenericMod) {
         const legend = document.createElement('span');
         legend.className = 'scope-stereo-legend';
-        legend.innerHTML = compositePortNames.map((name, index) =>
-          `<span style="color:var(--scope-trace-${(index % 4) + 1})">● ${name}</span>`
-        ).join('');
+        legend.innerHTML = compositePortNames.map((name, index) => {
+          const slot = modSignalSlot(options.compositeSignals![index]) ?? ((index % 4) + 1);
+          return `<span style="color:var(--scope-trace-${slot})">● ${name}</span>`;
+        }).join('');
         label.append(legend);
       }
       const canvas = document.createElement('canvas');
       canvas.className = 'scope-canvas view-signal composite-scope';
       canvas.dataset.signals = options.compositeSignals!.join(',');
       canvas.dataset.kind = 'multi-signal';
-      canvas.dataset.scopeRange = String(effectiveScopeRange(options.compositeSignals!, options.viewScale));
+      canvas.dataset.scopeRange = String(naturalScopeRange(options.compositeSignals!));
       if (isGenericMod) {
         canvas.dataset.modScope = 'true';
         canvas.dataset.modName = options.id;
@@ -285,7 +244,7 @@ export class MonitorPanels {
       canvas.className = `scope-canvas view-${signal.kind}`;
       canvas.dataset.signal = signal.signal;
       canvas.dataset.kind = signal.kind;
-      canvas.dataset.scopeRange = String(effectiveScopeRange([signal.signal], options.viewScale));
+      canvas.dataset.scopeRange = String(naturalScopeRange([signal.signal]));
       canvas.setAttribute('aria-label', `${signal.signal} ${signal.kind} monitor`);
       section.append(label, canvas);
       body.append(section);
