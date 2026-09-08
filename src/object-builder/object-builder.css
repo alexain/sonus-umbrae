@@ -430,3 +430,42 @@
   .object-builder-pitch-timing-grid { grid-template-columns: 1fr; }
   .object-builder-timing-column { border-left: 0; border-top: 1px solid var(--line); padding: 18px 4px 12px; }
 }
+
+/* LOGIC builder ---------------------------------------------------------- */
+.object-builder-logic-section { margin-top: 22px; }
+.object-builder-logic-list { display: grid; gap: 8px; margin-bottom: 10px; }
+.object-builder-logic-add { width: 100%; text-align: center; }
+.object-builder-logic-card {
+  display: grid;
+  grid-template-columns: minmax(0,1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+}
+.object-builder-logic-card > div:first-child { min-width: 0; display: grid; gap: 4px; }
+.object-builder-logic-card strong { font-size: 12px; letter-spacing: .07em; font-weight: 500; }
+.object-builder-logic-card span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--phosphor-dim); font-size: 11px; }
+.object-builder-logic-card > div:last-child { display: flex; gap: 6px; }
+.object-builder-logic-card button { border: 1px solid var(--line); background: transparent; color: var(--phosphor); padding: 5px 7px; font: inherit; font-size: 10px; cursor: pointer; }
+.object-builder-logic-dialog { width: min(680px, calc(100vw - 56px)); }
+.object-builder-logic-modal-row { grid-template-columns: 120px minmax(0,1fr); margin-bottom: 0; }
+.object-builder-logic-inputs { display: grid; gap: 8px; }
+.object-builder-logic-source-row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; align-items: center; }
+.object-builder-logic-source-row:has(input[type=text]) { grid-template-columns: minmax(120px,.7fr) minmax(0,1.3fr) auto; }
+.object-builder-logic-source-row > button { min-width: 34px; padding: 6px 8px; }
+.object-builder-logic-card button:disabled { opacity: .35; cursor: not-allowed; }
+
+/* LOGIC operator modal reuses the shared timing editor in a persistent side pane. */
+.object-builder-logic-dialog-wide { width: min(1120px, calc(100vw - 56px)); }
+.object-builder-logic-workspace { display: grid; grid-template-columns: minmax(360px, .9fr) minmax(420px, 1.1fr); gap: 18px; align-items: start; }
+.object-builder-logic-operator-fields { min-width: 0; }
+.object-builder-logic-timing-pane { min-width: 0; border-left: 1px solid var(--line); padding-left: 18px; min-height: 420px; }
+.object-builder-logic-timing-pane > .object-builder-secondary-hint { margin-top: 10px; }
+.object-builder-logic-timing-pane .object-builder-timing-column { border-left: 0; padding: 2px 4px 12px; }
+.object-builder-logic-inline-edit { min-width: 88px !important; white-space: nowrap; }
+.object-builder-logic-source-row { grid-template-columns: minmax(0,1fr) auto auto; }
+@media (max-width: 900px) {
+  .object-builder-logic-workspace { grid-template-columns: 1fr; }
+  .object-builder-logic-timing-pane { border-left: 0; border-top: 1px solid var(--line); padding: 18px 0 0; min-height: 0; }
+}

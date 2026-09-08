@@ -3,6 +3,7 @@ import { OBJECT_BUILDER_CATALOG, builderModelDefinition } from './catalog';
 import type { BuilderObjectDefinition, BuilderParameterDefinition } from './types';
 import { VoiceBuilderPanel } from './voice-builder';
 import { RoutingPanel } from './routing-panel';
+import { LogicBuilderPanel } from './logic-builder';
 
 export interface ObjectBuilderOptions {
   editor: HTMLTextAreaElement;
@@ -19,6 +20,7 @@ export class ObjectBuilder {
   private clockMode: 'master' | 'derived' = 'master';
   private existingMasterLine: { start: number; end: number; text: string } | null = null;
   private voicePanel: VoiceBuilderPanel | null = null;
+  private logicPanel: LogicBuilderPanel | null = null;
   private readonly filterRouting: RoutingPanel;
 
   constructor(private readonly options: ObjectBuilderOptions) {
@@ -37,7 +39,7 @@ export class ObjectBuilder {
     this.overlay.classList.remove('hidden');
     this.render();
   }
-  close(): void { this.voicePanel?.closeSecondaryModal(); this.filterRouting.closeExpanded(); this.overlay.classList.add('hidden'); this.options.editor.focus(); }
+  close(): void { this.voicePanel?.closeSecondaryModal(); this.logicPanel?.closeSecondaryModal(); this.filterRouting.closeExpanded(); this.overlay.classList.add('hidden'); this.options.editor.focus(); }
   isOpen(): boolean { return !this.overlay.classList.contains('hidden'); }
 
   private mount(): void {
@@ -76,9 +78,14 @@ export class ObjectBuilder {
     this.overlay.querySelectorAll('.object-builder-kind').forEach((el) => el.classList.toggle('active', (el as HTMLElement).dataset.kind === this.selected.kind));
     this.form.replaceChildren();
     this.voicePanel = null;
+    this.logicPanel = null;
     if (this.selected.kind === 'voice') {
       this.voicePanel = new VoiceBuilderPanel(this.form, this.options.editor, () => this.refreshPreview(), this.suggestAvailableName('myVoice'));
       this.voicePanel.mount(); this.refreshPreview(); return;
+    }
+    if (this.selected.kind === 'logic') {
+      this.logicPanel = new LogicBuilderPanel(this.form, this.options.editor, () => this.refreshPreview(), this.suggestAvailableName('myLogic'));
+      this.logicPanel.mount(); this.refreshPreview(); return;
     }
     const title = document.createElement('h2'); title.textContent = this.selected.label.toUpperCase(); this.form.append(title);
     if (this.selected.kind === 'clock') { this.renderClockForm(); this.refreshPreview(); return; }
@@ -329,7 +336,9 @@ export class ObjectBuilder {
     const ports = modelDef?.ports ?? this.selected.ports;
     const diagram = this.selected.kind === 'voice' && this.voicePanel
       ? this.voicePanel.previewDescription()
-      : (ports.length ? ports.map((p) => `${p.direction === 'input' ? '→' : '←'} ${p.label}  ${p.domain.toUpperCase()}`).join('\n') : 'NO EXTERNAL PORTS');
+      : this.selected.kind === 'logic' && this.logicPanel
+        ? this.logicPanel.previewDescription()
+        : (ports.length ? ports.map((p) => `${p.direction === 'input' ? '→' : '←'} ${p.label}  ${p.domain.toUpperCase()}`).join('\n') : 'NO EXTERNAL PORTS');
     if (this.selected.kind === 'voice' && this.voicePanel) {
       this.info.innerHTML = `<h3>OUTPUT ROUTING</h3>`;
       this.info.append(this.voicePanel.renderRoutingPreview());
@@ -352,6 +361,7 @@ export class ObjectBuilder {
     void data;
     if (this.selected.kind === 'clock') return this.generateClockCode(value, checked);
     if (this.selected.kind === 'voice' && this.voicePanel) return this.voicePanel.generateCode();
+    if (this.selected.kind === 'logic' && this.logicPanel) return this.logicPanel.generateCode();
     if (this.selected.kind === 'filter') return this.generateFilterCode(value);
     const name = value('name') || this.selected.kind;
     const model = value('model');
@@ -505,6 +515,10 @@ export class ObjectBuilder {
     if (this.selected.kind === 'voice' && this.voicePanel) {
       const voiceError = this.voicePanel.validate();
       if (voiceError) { this.showError(voiceError); return false; }
+    }
+    if (this.selected.kind === 'logic' && this.logicPanel) {
+      const logicError = this.logicPanel.validate();
+      if (logicError) { this.showError(logicError); return false; }
     }
     if (this.selected.kind === 'filter' && this.filterEmbedded()) {
       const voiceName = this.selectedEmbedVoiceName();

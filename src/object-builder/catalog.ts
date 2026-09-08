@@ -211,7 +211,7 @@ export const OBJECT_BUILDER_CATALOG: readonly BuilderObjectDefinition[] = [
     kind: 'logic', keyword: 'LOGIC', label: 'Logic', named: true, supportsView: true, preview: 'logic-diagram',
     ports: [{ id: 'nodes', label: 'Named nodes', domain: 'event', direction: 'output', dynamic: true }],
     parameters: [nameParameter, viewParameter,
-      { id: 'nodes', label: 'Logic nodes', control: 'pattern', description: 'AND, OR, XOR, NAND, NOR, divider, counter and flipflop nodes.' },
+      { id: 'nodes', label: 'Logic operators', control: 'pattern', description: 'AND, OR, XOR, NAND, NOR, divider, counter and flipflop operators.' },
     ],
   }
 ] as const;

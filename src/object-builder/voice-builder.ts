@@ -2,6 +2,7 @@ import { builderModelDefinition } from './catalog';
 import type { BuilderModelDefinition, BuilderParameterDefinition } from './types';
 import { findScaleDefinition, scalesForEdo, type SupportedEdo } from '../language/scales';
 import { RoutingPanel } from './routing-panel';
+import { TimingEditor } from './timing-editor';
 
 type SoundParamValue = { value: string | boolean; live: boolean };
 type PitchKind = 'notes' | 'freqs' | 'scale' | 'reference';
@@ -356,189 +357,18 @@ export class VoiceBuilderPanel {
     pitchColumn.append(pitchHeading, this.labeledControl('Type', pitchType), pitchPanels);
 
     // TIMING ----------------------------------------------------------------
-    const timingColumn = document.createElement('section'); timingColumn.className = 'object-builder-timing-column';
-    const timingHeader = document.createElement('div'); timingHeader.className = 'object-builder-timing-column-header';
-    const timingHeading = document.createElement('h3'); timingHeading.textContent = 'TIMING';
-    const timingToggle = document.createElement('label'); timingToggle.className = 'object-builder-timing-enable';
-    const timingCheck = document.createElement('input'); timingCheck.type = 'checkbox'; timingCheck.checked = this.timingEnabled;
-    timingToggle.append(timingCheck, document.createTextNode(' Enabled')); timingHeader.append(timingHeading, timingToggle);
-    const timingFields = document.createElement('div'); timingFields.className = 'object-builder-timing-fields';
-
-    const timingType = document.createElement('select');
-    timingType.append(new Option('Every', 'every'), new Option('Euclidean', 'euclidean'), new Option('Pattern', 'pattern'), new Option('Reference', 'reference'));
-    timingType.value = this.behaviorKind === 'none' ? 'every' : this.behaviorKind;
-
-    const modeOptions = (includeShuffle = false): HTMLSelectElement => {
-      const select = document.createElement('select');
-      const modes = includeShuffle ? ['forward','reverse','pendulum','random','shuffle','walk'] : ['forward','reverse','pendulum','random','walk'];
-      for (const mode of modes) select.append(new Option(mode[0].toUpperCase() + mode.slice(1), mode));
-      return select;
-    };
-    const renderModePreview = (container: HTMLElement, mode: string): void => {
-      const patterns: Record<string, string[]> = {
-        forward: ['1','2','3','4'], reverse: ['4','3','2','1'], pendulum: ['1','2','3','4','3','2'],
-        random: ['2','4','1','3'], shuffle: ['3','1','4','2'], walk: ['2','3','2','1','2','3'],
-      };
-      container.replaceChildren();
-      const values = patterns[mode] ?? patterns.forward;
-      values.forEach((value, index) => {
-        const node = document.createElement('span'); node.className = 'object-builder-reader-node'; node.textContent = value; container.append(node);
-        if (index < values.length - 1) { const arrow = document.createElement('i'); arrow.textContent = mode === 'walk' ? '↔' : '→'; container.append(arrow); }
-      });
-    };
-
-    const everyParts = this.behaviorEveryParts();
-    const everyPanel = document.createElement('div'); everyPanel.className = 'object-builder-timing-mode-panel';
-    const everyMain = document.createElement('div'); everyMain.className = 'object-builder-timing-compact-row';
-    const amount = document.createElement('input'); amount.type = 'text'; amount.value = everyParts.amount;
-    const unit = document.createElement('select'); for (const u of ['beat','sec','ms']) unit.append(new Option(u,u)); unit.value = everyParts.unit;
-    const everyMode = modeOptions(true); everyMode.value = this.behaviorKind === 'every' ? this.timingReaderMode : 'forward';
-    everyMain.append(this.labeledControl('Interval', amount), this.labeledControl('Unit', unit), this.labeledControl('Mode', everyMode));
-    const walkAmount = document.createElement('input'); walkAmount.type = 'number'; walkAmount.min = '0.01'; walkAmount.step = '0.01'; walkAmount.value = this.timingReaderAmount;
-    const walkField = this.labeledControl('Walk amount', walkAmount); walkField.classList.add('object-builder-walk-amount');
-    const everyModePreview = document.createElement('div'); everyModePreview.className = 'object-builder-reader-preview';
-    const redrawEveryMode = (): void => { walkField.hidden = everyMode.value !== 'walk'; renderModePreview(everyModePreview, everyMode.value); };
-    everyMode.addEventListener('change', redrawEveryMode); redrawEveryMode();
-    everyPanel.append(everyMain, walkField, everyModePreview);
-
-    const euclidParts = this.behaviorEuclideanParts();
-    const euclidPanel = document.createElement('div'); euclidPanel.className = 'object-builder-timing-mode-panel';
-    const steps = document.createElement('input'); steps.type = 'number'; steps.min = '1'; steps.max = '32'; steps.step = '1'; steps.value = String(Math.min(32, Number(euclidParts.steps) || 16));
-    euclidPanel.append(this.labeledControl('Steps', steps));
-    let pulseCount = Math.max(1, Math.min(Number(steps.value) || 16, Number(euclidParts.pulses) || 1));
-    let rotateCount = Math.max(0, Math.min((Number(steps.value) || 16) - 1, Number(euclidParts.rotate) || 0));
-    const euclidPreviewRow = document.createElement('div'); euclidPreviewRow.className = 'object-builder-euclidean-preview-row';
-    const minusPulse = document.createElement('button'); minusPulse.type = 'button'; minusPulse.className = 'object-builder-euclidean-pulse-button'; minusPulse.textContent = '−'; minusPulse.title = 'Remove one pulse';
-    const plusPulse = document.createElement('button'); plusPulse.type = 'button'; plusPulse.className = 'object-builder-euclidean-pulse-button'; plusPulse.textContent = '+'; plusPulse.title = 'Add one pulse';
-    const euclidPreview = document.createElement('div'); euclidPreview.className = 'object-builder-euclidean-preview';
-    const rotateRow = document.createElement('div'); rotateRow.className = 'object-builder-rotate-row';
-    const rotateLeft = document.createElement('button'); rotateLeft.type = 'button'; rotateLeft.textContent = '◀'; rotateLeft.title = 'Rotate left';
-    const rotateValue = document.createElement('output'); rotateValue.textContent = String(rotateCount);
-    const rotateRight = document.createElement('button'); rotateRight.type = 'button'; rotateRight.textContent = '▶'; rotateRight.title = 'Rotate right';
-    rotateRow.append(this.hint('Rotate'), rotateLeft, rotateValue, rotateRight);
-    const renderEuclidean = (): void => {
-      const stepCount = Math.max(1, Math.min(32, Math.floor(Number(steps.value) || 16)));
-      if (Number(steps.value) !== stepCount) steps.value = String(stepCount);
-      pulseCount = Math.max(1, Math.min(stepCount, pulseCount)); rotateCount = ((rotateCount % stepCount) + stepCount) % stepCount;
-      rotateValue.textContent = String(rotateCount);
-      minusPulse.disabled = !timingCheck.checked || pulseCount <= 1; plusPulse.disabled = !timingCheck.checked || pulseCount >= stepCount;
-      const size = 190, center = 95, radius = 72;
-      const base = Array.from({ length: stepCount }, (_, step) => ((step * pulseCount) % stepCount) < pulseCount);
-      const rotated = rotateCount === 0 ? base : base.map((_, step) => base[(step - rotateCount + stepCount) % stepCount]);
-      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); svg.setAttribute('viewBox', `0 0 ${size} ${size}`);
-      svg.setAttribute('aria-label', `${pulseCount} pulses over ${stepCount} steps, rotate ${rotateCount}`);
-      const ring = document.createElementNS(svg.namespaceURI, 'circle'); ring.setAttribute('cx', String(center)); ring.setAttribute('cy', String(center)); ring.setAttribute('r', String(radius)); ring.setAttribute('class', 'euclidean-ring'); svg.append(ring);
-      rotated.forEach((hit, step) => {
-        const angle = -Math.PI / 2 + (step / stepCount) * Math.PI * 2;
-        const dot = document.createElementNS(svg.namespaceURI, 'circle'); dot.setAttribute('cx', String(center + Math.cos(angle) * radius)); dot.setAttribute('cy', String(center + Math.sin(angle) * radius));
-        dot.setAttribute('r', hit ? '5.5' : '3.5'); dot.setAttribute('class', hit ? 'euclidean-step active' : 'euclidean-step'); svg.append(dot);
-      });
-      const label = document.createElementNS(svg.namespaceURI, 'text'); label.setAttribute('x', String(center)); label.setAttribute('y', String(center + 4)); label.setAttribute('text-anchor', 'middle'); label.setAttribute('class', 'euclidean-label'); label.textContent = `${pulseCount}/${stepCount}`; svg.append(label);
-      euclidPreview.replaceChildren(svg);
-    };
-    minusPulse.addEventListener('click', () => { pulseCount = Math.max(1, pulseCount - 1); renderEuclidean(); });
-    plusPulse.addEventListener('click', () => { pulseCount = Math.min(Number(steps.value) || 16, pulseCount + 1); renderEuclidean(); });
-    rotateLeft.addEventListener('click', () => { rotateCount -= 1; renderEuclidean(); }); rotateRight.addEventListener('click', () => { rotateCount += 1; renderEuclidean(); });
-    steps.addEventListener('input', renderEuclidean); renderEuclidean(); euclidPreviewRow.append(minusPulse, euclidPreview, plusPulse); euclidPanel.append(euclidPreviewRow, rotateRow);
-
-    const patternParts = this.behaviorPatternParts();
-    const patternPanel = document.createElement('div'); patternPanel.className = 'object-builder-timing-mode-panel';
-    const patternTop = document.createElement('div'); patternTop.className = 'object-builder-timing-compact-row two';
-    const patternSteps = document.createElement('input'); patternSteps.type = 'number'; patternSteps.min = '1'; patternSteps.max = '128'; patternSteps.step = '1'; patternSteps.value = patternParts.steps;
-    const patternMode = modeOptions(false); patternMode.value = patternParts.mode;
-    patternTop.append(this.labeledControl('Steps', patternSteps), this.labeledControl('Mode', patternMode));
-    let patternEvents = new Set<number>(patternParts.events.length ? patternParts.events : [1, 5, 9, 13]);
-    let patternPage = 0;
-    const patternPager = document.createElement('div'); patternPager.className = 'object-builder-pattern-pager';
-    const patternGrid = document.createElement('div'); patternGrid.className = 'object-builder-pattern-grid';
-    const renderPattern = (): void => {
-      const count = Math.max(1, Math.min(128, Math.floor(Number(patternSteps.value) || 16))); patternSteps.value = String(count);
-      patternEvents = new Set([...patternEvents].filter((step) => step <= count)); if (!patternEvents.size) patternEvents.add(1);
-      const pageCount = Math.ceil(count / 32); patternPage = Math.min(patternPage, pageCount - 1);
-      patternPager.replaceChildren();
-      const previous = document.createElement('button'); previous.type = 'button'; previous.className = 'object-builder-pattern-page-nav'; previous.textContent = '‹'; previous.disabled = patternPage === 0;
-      previous.addEventListener('click', () => { patternPage = Math.max(0, patternPage - 1); renderPattern(); }); patternPager.append(previous);
-      for (let page = 0; page < pageCount; page++) {
-        const pageButton = document.createElement('button'); pageButton.type = 'button'; pageButton.className = 'object-builder-pattern-page'; pageButton.textContent = String(page + 1); pageButton.classList.toggle('active', page === patternPage);
-        pageButton.addEventListener('click', () => { patternPage = page; renderPattern(); }); patternPager.append(pageButton);
-      }
-      const next = document.createElement('button'); next.type = 'button'; next.className = 'object-builder-pattern-page-nav'; next.textContent = '›'; next.disabled = patternPage >= pageCount - 1;
-      next.addEventListener('click', () => { patternPage = Math.min(pageCount - 1, patternPage + 1); renderPattern(); }); patternPager.append(next);
-      patternGrid.replaceChildren();
-      const firstStep = patternPage * 32 + 1; const lastStep = Math.min(count, firstStep + 31);
-      for (let step = firstStep; step <= lastStep; step++) {
-        const button = document.createElement('button'); button.type = 'button'; button.className = 'object-builder-pattern-step'; button.textContent = String(step); button.classList.toggle('active', patternEvents.has(step));
-        button.addEventListener('click', () => { if (patternEvents.has(step) && patternEvents.size > 1) patternEvents.delete(step); else patternEvents.add(step); renderPattern(); }); patternGrid.append(button);
-      }
-    };
-    patternSteps.addEventListener('input', () => { patternPage = 0; renderPattern(); }); renderPattern(); patternPanel.append(patternTop, patternPager, patternGrid, this.hint('32 steps per page (16 + 16), up to 128. Click steps to toggle events.'));
-
-    const timingReferencePanel = document.createElement('div'); timingReferencePanel.className = 'object-builder-timing-mode-panel object-builder-reference-panel';
-    const timingReference = document.createElement('select');
-    const timingReferenceInfo = document.createElement('div'); timingReferenceInfo.className = 'object-builder-reference-info';
-    const timingReferences = this.findTimingReferences();
-    if (!timingReferences.length) timingReference.append(new Option('No RHYTHM sources', ''));
-    else for (const item of timingReferences) timingReference.append(new Option(item.name, item.name));
-    const timingReferenceParts = this.behaviorReferenceParts();
-    if (timingReferenceParts.name && timingReferences.some((item) => item.name === timingReferenceParts.name)) timingReference.value = timingReferenceParts.name;
-    const updateTimingReference = (): void => {
-      const item = timingReferences.find((entry) => entry.name === timingReference.value); timingReferenceInfo.replaceChildren();
-      if (!item) { timingReferenceInfo.textContent = 'Declare SET name: RHYTHM ... to reuse a complete timing structure.'; return; }
-      const type = document.createElement('strong'); type.textContent = 'SET · RHYTHM'; const detail = document.createElement('span'); detail.textContent = item.detail; timingReferenceInfo.append(type, detail);
-    };
-    timingReference.addEventListener('change', updateTimingReference); updateTimingReference(); timingReferencePanel.append(this.labeledControl('Rhythm', timingReference), timingReferenceInfo);
-
-    const makeChanceEditor = () => {
-      const row = document.createElement('div'); row.className = 'object-builder-chance-row';
-      const slider = document.createElement('input'); slider.type = 'range'; slider.min = '0'; slider.max = '100'; slider.step = '1';
-      const initial = this.behaviorTimingModifiers(); slider.value = initial.chance;
-      const out = document.createElement('output'); out.textContent = `${slider.value}%`; slider.addEventListener('input', () => out.textContent = `${slider.value}%`);
-      const chanceWrap = document.createElement('div'); chanceWrap.className = 'object-builder-mini-slider'; chanceWrap.append(slider, out);
-      const looseLabel = document.createElement('label'); looseLabel.className = 'object-builder-clock-extra-toggle'; const loose = document.createElement('input'); loose.type = 'checkbox'; loose.checked = initial.loose; looseLabel.append(loose, document.createTextNode(' Loose'));
-      row.append(this.labeledControl('Chance', chanceWrap), looseLabel); return { row, slider, loose };
-    };
-    const chance = makeChanceEditor();
-
-    const makeClockEditor = () => {
-      const wrap = document.createElement('div'); wrap.className = 'object-builder-inline-clock';
-      const source = document.createElement('select'); source.append(new Option('Master', 'master')); for (const c of this.findClockNames()) source.append(new Option(c, c));
-      const extraLabel = document.createElement('label'); extraLabel.className = 'object-builder-clock-extra-toggle'; const extras = document.createElement('input'); extras.type = 'checkbox'; extraLabel.append(extras, document.createTextNode(' Derived / feel'));
-      const head = document.createElement('div'); head.className = 'object-builder-clock-head'; head.append(this.labeledControl('Clock', source), extraLabel);
-      const inline = document.createElement('div'); inline.className = 'object-builder-inline-clock-fields';
-      const rate = document.createElement('input'); rate.type = 'text'; rate.value = '/2'; rate.placeholder = '/4 or *2';
-      const slider = (label: string) => { const input = document.createElement('input'); input.type = 'range'; input.min = '0'; input.max = '100'; input.step = '1'; input.value = '0'; const out = document.createElement('output'); out.textContent = '0'; input.addEventListener('input', () => out.textContent = input.value); const w = document.createElement('div'); w.className = 'object-builder-mini-slider'; w.append(input, out); return { field: this.labeledControl(label, w), input, out }; };
-      const jitter = slider('Jitter'), drifter = slider('Drifter'); inline.append(this.labeledControl('Derived rate', rate), jitter.field, drifter.field);
-      const sync = (): void => { inline.hidden = !extras.checked; }; extras.addEventListener('change', sync); sync(); wrap.append(head, inline);
-      return { wrap, source, extras, rate, jitter: jitter.input, drifter: drifter.input, jitterOut: jitter.out, drifterOut: drifter.out, sync };
-    };
-    const clock = makeClockEditor();
-    const currentClock = this.timingClockParts(this.behaviorValue);
-    clock.source.value = [...clock.source.options].some((option) => option.value === currentClock.clock) ? currentClock.clock : 'master'; clock.extras.checked = currentClock.extras;
-    clock.rate.value = currentClock.rate; clock.jitter.value = currentClock.jitter; clock.drifter.value = currentClock.drifter; clock.jitterOut.textContent = clock.jitter.value; clock.drifterOut.textContent = clock.drifter.value; clock.sync();
-    const clockModifiers = (): string[] => {
-      const sourceName = clock.source.value;
-      if (!clock.extras.checked) return sourceName === 'master' ? [] : [`clock ${sourceName}`];
-      const rateValue = /^[/*]\s*\d+(?:\.\d+)?$/.test(clock.rate.value.trim()) ? clock.rate.value.trim().replace(/\s+/g, '') : '/1';
-      const parent = sourceName === 'master' ? '' : `${sourceName} `; const result = [`clock ${parent}${rateValue}`];
-      if (Number(clock.jitter.value) > 0) result.push(`jitter ${clock.jitter.value}`); if (Number(clock.drifter.value) > 0) result.push(`drifter ${clock.drifter.value}`); return result;
-    };
-    const localModifiers = (): string[] => { const mods: string[] = []; if (Number(chance.slider.value) < 100) mods.push(`chance ${chance.slider.value}`); if (chance.loose.checked) mods.push('loose'); return mods; };
-    const onClause = (mods: string[]): string => mods.length ? ` on ${mods.join(', ')}` : '';
-
-    const timingPanels = [everyPanel, euclidPanel, patternPanel, timingReferencePanel];
-    const syncTiming = (): void => {
-      timingFields.classList.toggle('disabled', !timingCheck.checked); timingType.disabled = !timingCheck.checked;
-      const selected = timingType.value; everyPanel.hidden = selected !== 'every'; euclidPanel.hidden = selected !== 'euclidean'; patternPanel.hidden = selected !== 'pattern'; timingReferencePanel.hidden = selected !== 'reference';
-      chance.row.hidden = selected === 'pattern'; clock.wrap.hidden = selected === 'reference';
-      const beatBased = selected !== 'every' || unit.value === 'beat'; clock.wrap.classList.toggle('disabled', !beatBased);
-      for (const panel of timingPanels) for (const control of panel.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>('input, select, button')) control.disabled = !timingCheck.checked;
-      for (const control of chance.row.querySelectorAll<HTMLInputElement>('input')) control.disabled = !timingCheck.checked;
-      for (const control of clock.wrap.querySelectorAll<HTMLInputElement | HTMLSelectElement>('input, select')) control.disabled = !timingCheck.checked || !beatBased;
-      renderEuclidean();
-    };
-    timingCheck.addEventListener('change', syncTiming); timingType.addEventListener('change', syncTiming); unit.addEventListener('change', syncTiming);
-    timingFields.append(this.labeledControl('Type', timingType), everyPanel, euclidPanel, patternPanel, timingReferencePanel, chance.row, clock.wrap);
-    timingColumn.append(timingHeader, timingFields); syncTiming();
+    const timingEditor = new TimingEditor({
+      editor: this.editor,
+      state: {
+        enabled: this.timingEnabled,
+        kind: this.behaviorKind,
+        value: this.behaviorValue,
+        readerMode: this.timingReaderMode,
+        readerAmount: this.timingReaderAmount,
+      },
+      showEnabledToggle: true,
+    });
+    const timingColumn = timingEditor.mount();
 
     columns.append(pitchColumn, timingColumn); body.append(columns);
     this.openSecondary('PITCH & TIMING', body, () => {
@@ -548,26 +378,12 @@ export class VoiceBuilderPanel {
       else if (selectedKind === 'scale') { this.scaleEdo = Number(edo.value) as SupportedEdo; this.scaleRoot = root.value; this.scaleId = scale.value; this.pitchValue = `pitch scale ${this.scaleRoot} ${this.scaleId}`; }
       else this.pitchValue = reference.value ? `pitch ${reference.value}` : 'pitch notes [C3]';
 
-      this.timingEnabled = timingCheck.checked;
-      if (!this.timingEnabled) { this.behaviorKind = 'none'; this.behaviorValue = ''; this.timingReaderMode = 'forward'; }
-      else if (timingType.value === 'every') {
-        this.behaviorKind = 'every'; this.timingReaderMode = everyMode.value as typeof this.timingReaderMode; this.timingReaderAmount = walkAmount.value || '1';
-        const timingMods = unit.value === 'beat' ? [...clockModifiers(), ...localModifiers()] : localModifiers();
-        this.behaviorValue = `every ${amount.value || '1'} ${unit.value}${onClause(timingMods)}`;
-      } else if (timingType.value === 'euclidean') {
-        this.behaviorKind = 'euclidean'; this.timingReaderMode = 'forward'; const mods = rotateCount > 0 ? [`rotate ${rotateCount}`] : []; mods.push(...clockModifiers(), ...localModifiers());
-        this.behaviorValue = `every euclidean ${pulseCount}/${steps.value || '16'}${onClause(mods)}`;
-      } else if (timingType.value === 'pattern') {
-        this.behaviorKind = 'pattern'; this.timingReaderMode = 'forward';
-        const count = Math.max(1, Math.min(128, Math.floor(Number(patternSteps.value) || 16))); const events = [...patternEvents].filter((step) => step <= count).sort((a,b) => a-b);
-        const mode = patternMode.value !== 'forward' ? `mode ${patternMode.value} ` : '';
-        const patternClock = clockModifiers();
-        // PATTERN needs an explicit master-rate clock to avoid its historical *4 default.
-        const clockText = patternClock.length ? ` on clock ${patternClock[0].replace(/^clock\s+/, '')}${patternClock.slice(1).length ? `, ${patternClock.slice(1).join(', ')}` : ''}` : ' on clock /1';
-        this.behaviorValue = `${mode}pattern [${events.join(' ')}] steps ${count}${clockText}`;
-      } else {
-        this.behaviorKind = 'reference'; this.timingReaderMode = 'forward'; const mods = localModifiers(); this.behaviorValue = timingReference.value ? `rhythm ${timingReference.value}${mods.length ? ` ${mods.join(', ')}` : ''}` : '';
-      }
+      const timingState = timingEditor.getState();
+      this.timingEnabled = timingState.enabled;
+      this.behaviorKind = timingState.kind;
+      this.behaviorValue = timingState.value;
+      this.timingReaderMode = timingState.readerMode;
+      this.timingReaderAmount = timingState.readerAmount;
       this.updateActionSummary('pitch', this.pitchTimingSummary()); this.onChange();
     });
     this.modal?.querySelector('.object-builder-secondary-dialog')?.classList.add('object-builder-pitch-dialog');
