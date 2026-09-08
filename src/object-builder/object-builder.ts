@@ -338,19 +338,21 @@ export class ObjectBuilder {
     return true;
   }
 
-  private insertObjectOnOwnLine(code: string): void {
+  private appendObject(code: string): void {
     const editor = this.options.editor;
     const source = editor.value;
-    const caret = editor.selectionEnd;
 
-    // Object declarations are line-oriented. Insert after the physical line
-    // containing the caret instead of risking concatenation with existing code.
-    const nextLineBreak = source.indexOf('\n', caret);
-    const insertAt = nextLineBreak >= 0 ? nextLineBreak + 1 : source.length;
-    const needsLeadingBreak = insertAt === source.length && source.length > 0 && !source.endsWith('\n');
-    const text = `${needsLeadingBreak ? '\n' : ''}${code}\n\n`;
+    // New top-level declarations always go at the end of the program. This
+    // avoids inserting a declaration inside the object currently under the
+    // editor caret and keeps one blank line between existing and new code.
+    let separator = '';
+    if (source.length > 0) {
+      if (source.endsWith('\n\n')) separator = '';
+      else if (source.endsWith('\n')) separator = '\n';
+      else separator = '\n\n';
+    }
 
-    editor.setRangeText(text, insertAt, insertAt, 'end');
+    editor.setRangeText(`${separator}${code}\n\n`, source.length, source.length, 'end');
   }
 
   private insert(): void {
@@ -362,15 +364,14 @@ export class ObjectBuilder {
       if (existing) {
         editor.setRangeText(code, existing.start, existing.end, 'end');
       } else {
-        const prefix = editor.value.length ? `${code}\n` : code;
-        editor.setRangeText(prefix, 0, 0, 'end');
+        this.appendObject(code);
       }
       editor.dispatchEvent(new Event('input', { bubbles: true }));
       this.close();
       this.options.evaluateAfterAdd();
       return;
     }
-    this.insertObjectOnOwnLine(code);
+    this.appendObject(code);
     editor.dispatchEvent(new Event('input', { bubbles: true }));
     this.close();
     this.options.evaluateAfterAdd();

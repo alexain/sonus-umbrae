@@ -258,3 +258,173 @@
 .object-builder-routing-inline .object-builder-routing-preview-column:first-of-type .object-builder-port.routed i {
   background: var(--route-color, var(--phosphor));
 }
+
+/* Keep dense projects compact: MAIN and used destinations stay inline, while
+   additional compatible destinations are opt-in and the full patch bay can expand. */
+.object-builder-routing-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.object-builder-routing-toolbar .object-builder-routing-disabled {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.object-builder-routing-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.object-builder-routing-add {
+  width: 150px;
+  min-width: 0;
+  background: #050605 !important;
+  color: #d7a92e !important;
+  border: 1px solid rgba(215, 169, 46, 0.35) !important;
+}
+.object-builder-routing-expand {
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+}
+.object-builder-routing-expanded-dialog {
+  width: min(980px, calc(100vw - 48px));
+  max-width: 980px;
+  height: min(82vh, 760px);
+}
+.object-builder-routing-expanded-dialog .object-builder-secondary-body,
+.object-builder-routing-expanded-body {
+  min-height: 0;
+  height: 100%;
+}
+.object-builder-routing-expanded-dialog .object-builder-secondary-body {
+  overflow: auto;
+}
+.object-builder-routing-inline.expanded .object-builder-routing-preview-canvas {
+  min-height: 420px;
+  max-height: 62vh;
+  overflow-y: auto;
+  padding-top: 24px;
+  padding-bottom: 24px;
+}
+
+/* Pitch and timing editor: one pitch type at a time, catalog-backed scales and
+   an optional timing section that serializes only when explicitly enabled. */
+.object-builder-pitch-dialog { width: min(820px, calc(100vw - 56px)); }
+.object-builder-pitch-editor { display: grid; gap: 16px; }
+.object-builder-pitch-panels { min-height: 0; }
+.object-builder-pitch-text-panel, .object-builder-scale-panel, .object-builder-reference-panel { display: grid; gap: 12px; }
+.object-builder-pitch-text-panel input[type="text"] { width: 100%; box-sizing: border-box; border: 1px solid var(--line); background: var(--bg); color: var(--phosphor); padding: 10px 12px; font: inherit; font-size: 15px; line-height: 1.35; }
+.object-builder-scale-top { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.object-builder-scale-map { min-height: 0; border: 1px solid var(--line); padding: 10px 12px 12px; overflow-x: auto; }
+.object-builder-scale-map-title { margin-bottom: 9px; color: var(--phosphor-dim); font-size: 10px; letter-spacing: .05em; text-transform: uppercase; }
+.object-builder-scale-keyboard { position: relative; height: 70px; display: grid; grid-template-columns: repeat(7, 42px); gap: 1px; width: max-content; margin: 0 auto; }
+.object-builder-scale-key.white { position: relative; z-index: 1; box-sizing: border-box; width: 42px; height: 70px; border: 1px solid var(--phosphor); background: color-mix(in srgb, var(--phosphor) 24%, var(--bg)); }
+.object-builder-scale-key.white.active { border-color: #35d6d3; background: color-mix(in srgb, #35d6d3 72%, var(--bg)); }
+.object-builder-scale-key.white.root { box-shadow: inset 0 -4px 0 #35d6d3; }
+.object-builder-scale-key.black { position: absolute; z-index: 3; top: 0; width: 25px; height: 43px; box-sizing: border-box; border: 1px solid var(--phosphor-dim); background: #050505; }
+.object-builder-scale-key.black.active { border-color: #35d6d3; background: #35d6d3; }
+.object-builder-scale-key.black.root { box-shadow: inset 0 -4px 0 #35d6d3; }
+.object-builder-scale-key.black[data-pc="1"] { left: 29px; }
+.object-builder-scale-key.black[data-pc="3"] { left: 72px; }
+.object-builder-scale-key.black[data-pc="6"] { left: 158px; }
+.object-builder-scale-key.black[data-pc="8"] { left: 201px; }
+.object-builder-scale-key.black[data-pc="10"] { left: 244px; }
+.object-builder-edo-map { min-width: 600px; display: grid; grid-template-columns: repeat(var(--edo-columns, 24), minmax(24px, 1fr)); gap: 3px; align-items: end; }
+.object-builder-edo-step { min-width: 24px; display: grid; justify-items: center; gap: 5px; opacity: .24; }
+.object-builder-edo-step i { width: 8px; height: 8px; border: 1px solid currentColor; border-radius: 50%; }
+.object-builder-edo-step span { writing-mode: vertical-rl; font-size: 9px; height: 42px; }
+.object-builder-edo-step.active { opacity: 1; color: #35d6d3; }
+.object-builder-edo-step.active i { background: #35d6d3; border-color: #35d6d3; }
+.object-builder-edo-step.root { opacity: 1; color: #35d6d3; }
+.object-builder-edo-step.root i { width: 12px; height: 12px; }
+.object-builder-reference-info { min-height: 72px; display: grid; gap: 7px; align-content: center; padding: 12px; border: 1px dashed var(--line); }
+.object-builder-reference-info strong { color: var(--phosphor); font-size: 11px; letter-spacing: .06em; }
+.object-builder-reference-info span { color: var(--phosphor-dim); overflow-wrap: anywhere; }
+.object-builder-timing-panel { border-top: 1px solid var(--line); padding-top: 14px; }
+.object-builder-timing-header { display: flex; align-items: center; gap: 7px; margin-bottom: 12px; font-weight: 700; letter-spacing: .08em; }
+.object-builder-timing-fields { display: grid; gap: 12px; transition: opacity .12s ease; }
+.object-builder-timing-fields.disabled { opacity: .32; }
+
+.object-builder-pitch-panels > [hidden] { display: none !important; }
+
+/* Timing editor: type-specific panels, inline derived clocks, and Euclidean preview. */
+.object-builder-timing-mode-panel { display: grid; gap: 12px; }
+.object-builder-timing-mode-panel[hidden] { display: none !important; }
+.object-builder-timing-mode-panel .object-builder-behavior-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.object-builder-inline-clock { display: grid; gap: 10px; }
+.object-builder-inline-clock.disabled { opacity: .32; }
+.object-builder-inline-clock-fields { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.object-builder-inline-clock-fields[hidden] { display: none !important; }
+.object-builder-euclidean-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.object-builder-euclidean-preview { display: grid; place-items: center; min-height: 210px; border: 1px solid var(--line); background: color-mix(in srgb, var(--bg) 96%, var(--phosphor)); }
+.object-builder-euclidean-preview svg { width: 190px; height: 190px; overflow: visible; }
+.object-builder-euclidean-preview .euclidean-ring { fill: none; stroke: var(--line); stroke-width: 1; }
+.object-builder-euclidean-preview .euclidean-step { fill: var(--bg); stroke: var(--phosphor); stroke-width: 1.2; }
+.object-builder-euclidean-preview .euclidean-step.active { fill: #35d6d3; stroke: #35d6d3; }
+.object-builder-euclidean-preview .euclidean-label { fill: var(--phosphor); font: 12px monospace; }
+
+/* Compact timing controls: one clock source plus optional derived/feel controls. */
+.object-builder-timing-compact-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.object-builder-clock-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: end; }
+.object-builder-clock-extra-toggle { display: flex; align-items: center; gap: 7px; min-height: 34px; white-space: nowrap; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+.object-builder-inline-clock-fields { grid-template-columns: minmax(110px, .8fr) minmax(0, 1fr) minmax(0, 1fr); align-items: end; }
+.object-builder-mini-slider { display: grid; grid-template-columns: minmax(0, 1fr) 34px; gap: 8px; align-items: center; }
+.object-builder-mini-slider input[type="range"] { width: 100%; }
+.object-builder-mini-slider output { text-align: right; font-variant-numeric: tabular-nums; }
+.object-builder-reader-preview { min-height: 42px; display: flex; align-items: center; justify-content: center; gap: 8px; border: 1px solid var(--line); }
+.object-builder-reader-preview .object-builder-reader-node { width: 24px; height: 24px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 50%; color: #35d6d3; }
+.object-builder-reader-preview i { font-style: normal; color: var(--phosphor-dim); }
+.object-builder-euclidean-preview-row { display: grid; grid-template-columns: 46px minmax(0, 1fr) 46px; gap: 14px; align-items: center; }
+.object-builder-euclidean-pulse-button { width: 42px; height: 42px; justify-self: center; border: 1px solid var(--line); background: var(--bg); color: var(--phosphor); font: 24px/1 monospace; cursor: pointer; }
+.object-builder-euclidean-pulse-button:disabled { opacity: .28; cursor: default; }
+.object-builder-euclidean-preview-row .object-builder-euclidean-preview { min-height: 200px; }
+
+/* Wide reusable Pitch & Timing workspace. The two domains stay visible side by
+   side while each column swaps only its selected editor view. */
+.object-builder-pitch-dialog { width: min(1180px, calc(100vw - 48px)); }
+.object-builder-pitch-timing-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); min-height: 500px; }
+.object-builder-pitch-column, .object-builder-timing-column { min-width: 0; display: grid; align-content: start; gap: 12px; padding: 2px 22px 12px; }
+.object-builder-pitch-column { padding-left: 4px; }
+.object-builder-timing-column { border-left: 1px solid var(--line); padding-right: 4px; }
+.object-builder-pitch-column > h3, .object-builder-timing-column-header h3 { margin: 0; font-size: 12px; letter-spacing: .1em; }
+.object-builder-timing-column-header { display: flex; align-items: center; justify-content: space-between; min-height: 24px; }
+.object-builder-timing-enable { display: flex; align-items: center; gap: 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+.object-builder-timing-column .object-builder-timing-fields { gap: 10px; }
+.object-builder-timing-column .object-builder-timing-mode-panel { gap: 10px; }
+.object-builder-timing-compact-row.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.object-builder-walk-amount { max-width: 160px; }
+.object-builder-walk-amount[hidden] { display: none !important; }
+.object-builder-chance-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: end; padding-top: 2px; }
+.object-builder-chance-row[hidden] { display: none !important; }
+.object-builder-chance-row .object-builder-clock-extra-toggle { align-self: end; }
+.object-builder-rotate-row { display: grid; grid-template-columns: 1fr 38px 46px 38px; gap: 8px; align-items: center; }
+.object-builder-rotate-row > .object-builder-secondary-hint { margin: 0; }
+.object-builder-rotate-row button { height: 34px; border: 1px solid var(--line); background: var(--bg); color: var(--phosphor); cursor: pointer; }
+.object-builder-rotate-row output { text-align: center; color: #35d6d3; font-variant-numeric: tabular-nums; }
+.object-builder-pattern-pager { display: flex; align-items: center; justify-content: center; gap: 5px; margin: 8px 0 10px; }
+.object-builder-pattern-page, .object-builder-pattern-page-nav { min-width: 26px; height: 24px; padding: 0 6px; border: 1px solid var(--line); background: var(--bg); color: var(--phosphor-dim); font: 11px monospace; cursor: pointer; }
+.object-builder-pattern-page, .object-builder-pattern-page-nav { display: inline-flex; align-items: center; justify-content: center; line-height: 1; text-align: center; }
+.object-builder-pattern-page { padding: 0 6px 3px; }
+.object-builder-pattern-page-nav { padding: 0 6px 3px; }
+.object-builder-pattern-page.active { border-color: #35d6d3; color: #35d6d3; }
+.object-builder-pattern-page-nav:disabled { opacity: .3; cursor: default; }
+.object-builder-pattern-grid { display: grid; grid-template-columns: repeat(16, minmax(0, 1fr)); gap: 4px; }
+.object-builder-pattern-step { min-width: 0; height: 26px; box-sizing: border-box; padding: 0 0 3px; border: 1px solid var(--line); background: var(--bg); color: var(--phosphor-dim); font: 9px monospace; line-height: 1; display: flex; align-items: center; justify-content: center; text-align: center; cursor: pointer; }
+.object-builder-pattern-step.active { color: var(--bg); border-color: #35d6d3; background: #35d6d3; }
+.object-builder-timing-column .object-builder-euclidean-preview { min-height: 178px; }
+.object-builder-timing-column .object-builder-euclidean-preview svg { width: 166px; height: 166px; }
+.object-builder-timing-column .object-builder-euclidean-preview-row { grid-template-columns: 40px minmax(0, 1fr) 40px; gap: 10px; }
+.object-builder-timing-column .object-builder-euclidean-pulse-button { width: 38px; height: 38px; }
+.object-builder-timing-column .object-builder-reader-preview { min-height: 38px; }
+.object-builder-timing-column .object-builder-inline-clock-fields { grid-template-columns: minmax(90px, .75fr) minmax(0, 1fr) minmax(0, 1fr); }
+
+@media (max-width: 900px) {
+  .object-builder-pitch-timing-grid { grid-template-columns: 1fr; }
+  .object-builder-timing-column { border-left: 0; border-top: 1px solid var(--line); padding: 18px 4px 12px; }
+}
