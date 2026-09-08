@@ -31,7 +31,7 @@ const macroModels = [
   'macro.analog-vcf', 'macro.phase', 'macro.terrain', 'macro.strings', 'macro.chiptune',
 ] as const;
 
-const resonatorModels = ['resonator.modal', 'resonator.sympathetic', 'resonator.strings', 'resonator.string'] as const;
+const resonatorModels = ['resonator.modal', 'resonator.sympathetic', 'resonator.string'] as const;
 
 const voiceModels: BuilderModelDefinition[] = [
   ...['sine', 'triangle', 'sawtooth', 'ramp'].map((id) => ({ id, label: id, preview: 'waveform' as const })),
@@ -47,11 +47,14 @@ const voiceModels: BuilderModelDefinition[] = [
       { id: 'harmo', label: 'Harmonics', control: 'slider' as const, min: 0, max: 100, unit: '%', liveCapable: true },
       { id: 'timbre', label: 'Timbre', control: 'slider' as const, min: 0, max: 100, unit: '%', liveCapable: true },
       { id: 'morph', label: 'Morph', control: 'slider' as const, min: 0, max: 100, unit: '%', liveCapable: true },
-      { id: 'lpg', label: 'LPG', control: 'toggle' as const },
+      { id: 'lpg', label: 'Low Pass Gate', control: 'toggle' as const },
     ],
   })),
   { id: 'matter', label: 'matter', parameters: ['geometry', 'brightness', 'damping', 'position', 'space'].map((id) => ({ id, label: id, control: 'slider' as const, min: 0, max: 100, unit: '%', liveCapable: true })) },
-  ...resonatorModels.map((id) => ({ id, label: id, parameters: ['structure', 'brightness', 'damping', 'position'].map((p) => ({ id: p, label: p, control: 'slider' as const, min: 0, max: 100, unit: '%', liveCapable: true })) })),
+  ...resonatorModels.map((id) => ({ id, label: id, parameters: [
+    { id: 'polyphony', label: 'Polyphony', control: 'select' as const, options: ['1 note', '2 notes', '4 notes'], defaultValue: '1 note' },
+    ...['structure', 'brightness', 'damping', 'position'].map((p) => ({ id: p, label: p, control: 'slider' as const, min: 0, max: 100, unit: '%', liveCapable: true })),
+  ] })),
   { id: 'sample', label: 'sample', preview: 'sample-waveform', parameters: [
     { id: 'asset', label: 'Sample', control: 'sample', required: true },
     { id: 'region', label: 'Region', control: 'expression' },
@@ -173,9 +176,9 @@ export const OBJECT_BUILDER_CATALOG: readonly BuilderObjectDefinition[] = [
     kind: 'filter', keyword: 'FILTER', label: 'Filter', named: true, supportsView: false, preview: 'routing',
     ports: [stereoIn, audioOut], parameters: [nameParameter, viewParameter,
       { id: 'model', label: 'Model', control: 'select', options: ['svf'], defaultValue: 'svf' },
-      { id: 'cutoff', label: 'Cutoff', control: 'expression' },
+      { id: 'cutoff', label: 'Cutoff', control: 'slider', min: 0, max: 100, unit: '%', defaultValue: 50 },
       { id: 'resonance', label: 'Resonance', control: 'slider', min: 0, max: 100, unit: '%' },
-      { id: 'drive', label: 'Drive', control: 'slider', min: 0, max: 100, unit: '%' }, routeParameter,
+      { id: 'drive', label: 'Drive', control: 'slider', min: 0, max: 100, unit: '%' },
     ],
   },
   {

@@ -1,14 +1,12 @@
 import { builderModelDefinition } from './catalog';
 import type { BuilderModelDefinition, BuilderParameterDefinition } from './types';
 import { findScaleDefinition, scalesForEdo, type SupportedEdo } from '../language/scales';
+import { RoutingPanel } from './routing-panel';
 
 type SoundParamValue = { value: string | boolean; live: boolean };
-type RoutingMode = 'default' | 'custom' | 'disabled';
 type PitchKind = 'notes' | 'freqs' | 'scale' | 'reference';
 type BehaviorKind = 'none' | 'every' | 'euclidean' | 'pattern' | 'reference';
 type VcaMode = 'none' | 'existing' | 'inline';
-
-interface RoutingConnection { source: string; destination: string; }
 
 const FAMILY_ORDER = ['oscillator', 'noise', 'macro', 'matter', 'resonator', 'sample', 'composite'] as const;
 
@@ -28,6 +26,37 @@ function isLiveCapable(parameter: BuilderParameterDefinition): boolean {
   return parameter.liveCapable === true;
 }
 
+const MACRO_PARAMETER_DISPLAY_NAMES: Record<string, Partial<Record<'harmo' | 'timbre' | 'morph', string>>> = {
+  'macro.analog': { harmo: 'Detuning', timbre: 'Square Shape', morph: 'Triangle Shape' },
+  'macro.waves': { harmo: 'Waveform', timbre: 'Wavefolder', morph: 'Asymmetry' },
+  'macro.fm': { harmo: 'Frequency Ratio', timbre: 'Mod Index', morph: 'Feedback' },
+  'macro.grain': { harmo: 'Formant 2 Ratio', timbre: 'Formant 1 Freq', morph: 'Shape' },
+  'macro.additive': { harmo: 'Bumps', timbre: 'Predominant', morph: 'Bumps Shape' },
+  'macro.wavetable': { harmo: 'Bank', timbre: 'X', morph: 'Y' },
+  'macro.chord': { harmo: 'Chord Type', timbre: 'Inversion', morph: 'Waveform' },
+  'macro.speech': { harmo: 'Type', timbre: 'Voice Timbre', morph: 'Phoneme / Word' },
+  'macro.swarm': { harmo: 'Pitch Random', timbre: 'Grain Density', morph: 'Grain Size' },
+  'macro.noise': { harmo: 'Filter', timbre: 'Clock', morph: 'Resonance' },
+  'macro.particle': { harmo: 'Freq Random', timbre: 'Dust Density', morph: 'Filter' },
+  'macro.string': { harmo: 'Inharmonicity', timbre: 'Dust Density / Brightness', morph: 'Decay' },
+  'macro.analog-vcf': { harmo: 'Resonance', timbre: 'Low-Pass', morph: 'Waveform' },
+  'macro.phase': { harmo: 'Distortion Freq', timbre: 'Distortion Amount', morph: 'Asymmetry' },
+  'macro.terrain': { harmo: 'Terrain', timbre: 'Radius', morph: 'Offset' },
+  'macro.strings': { harmo: 'Chord', timbre: 'Filter & Chorus', morph: 'Waveform' },
+  'macro.chiptune': { harmo: 'Chord', timbre: 'Inversion', morph: 'Pulse Width / Sync' },
+};
+
+function appendSoundParameterLabel(label: HTMLLabelElement, model: string, parameter: BuilderParameterDefinition): void {
+  label.textContent = parameter.label;
+  const displayName = MACRO_PARAMETER_DISPLAY_NAMES[model]?.[parameter.id as 'harmo' | 'timbre' | 'morph'];
+  if (!displayName) return;
+  label.classList.add('object-builder-sound-param-label');
+  const alias = document.createElement('span');
+  alias.className = 'object-builder-sound-param-alias';
+  alias.textContent = displayName;
+  label.append(alias);
+}
+
 export class VoiceBuilderPanel {
   private family = 'oscillator';
   private model = 'sine';
@@ -44,10 +73,7 @@ export class VoiceBuilderPanel {
   private scaleId = 'major';
   private vcaMode: VcaMode = 'none';
   private vcaValue = '';
-  private routingMode: RoutingMode = 'default';
-  private routingConnections: RoutingConnection[] = [];
-  private activeRoutingSource = 'out';
-  private visibleRoutingDestinationGroups = new Set<string>();
+  private readonly routing: RoutingPanel;
   private modal: HTMLElement | null = null;
 
   constructor(
@@ -55,7 +81,15 @@ export class VoiceBuilderPanel {
     private readonly editor: HTMLTextAreaElement,
     private readonly onChange: () => void,
     private readonly initialName = 'myVoice',
-  ) {}
+  ) {
+    this.routing = new RoutingPanel({
+      sources: () => this.outputPorts(),
+      destinations: () => this.routingDestinations(),
+      defaultConnections: () => this.defaultRoutingConnections(),
+      onChange: this.onChange,
+      expandedTitle: 'VOICE ROUTING',
+    });
+  }
 
   mount(): void {
     this.form.replaceChildren();
@@ -101,19 +135,13 @@ export class VoiceBuilderPanel {
       const models = this.modelsForFamily(this.family);
       this.model = models[0]?.id ?? 'sine';
       this.soundParams.clear();
-      this.routingMode = 'default';
-      this.routingConnections = [];
-      this.activeRoutingSource = this.outputPorts()[0]?.id ?? 'out';
-      this.visibleRoutingDestinationGroups.clear();
+      this.routing.reset();
       syncModelSelect(); this.onChange();
     });
     modelSelect.addEventListener('change', () => {
       this.model = modelSelect.value;
       this.soundParams.clear();
-      this.routingMode = 'default';
-      this.routingConnections = [];
-      this.activeRoutingSource = this.outputPorts()[0]?.id ?? 'out';
-      this.visibleRoutingDestinationGroups.clear();
+      this.routing.reset();
       this.updateCustomizeRow(); this.onChange();
     });
     this.form.querySelector('[data-action="soundCustomize"]')?.addEventListener('click', () => this.openSoundEditor());
@@ -137,7 +165,7 @@ export class VoiceBuilderPanel {
     const lines = [`VOICE ${name}${withView}:`];
     lines.push(`    sound ${this.soundExpression()}`);
     for (const [id, state] of this.soundParams) {
-      if (id === 'lpg') continue;
+      if (id === 'lpg' || id === 'polyphony') continue;
       if (state.value === '' || state.value === false) continue;
       lines.push(`    ${state.live ? 'live ' : ''}${id} ${state.value}`);
     }
@@ -148,9 +176,9 @@ export class VoiceBuilderPanel {
     lines.push(`    ${this.pitchValue || 'pitch notes [C3]'}${selection}${behavior}`);
     lines.push(`    ${this.checked('levelLive') ? 'live ' : ''}level ${this.value('level') || '50'}`);
     if (this.vcaValue) lines.push(`    ${this.vcaValue}`);
-    if (this.routingMode === 'disabled') lines.push('    out mute');
-    if (this.routingMode === 'custom') {
-      for (const connection of this.routingConnections) {
+    if (this.routing.getMode() === 'disabled') lines.push('    out mute');
+    if (this.routing.getMode() === 'custom') {
+      for (const connection of this.routing.getConnections()) {
         const source = this.routingSourceSyntax(connection.source);
         lines.push(`    out${source ? ` ${source}` : ''} to ${connection.destination}`);
       }
@@ -160,11 +188,11 @@ export class VoiceBuilderPanel {
 
   previewDescription(): string {
     const outputs = this.outputPorts().map((port) => port.label).join(', ');
-    return `VOICE / ${this.model}\n\nOUTPUTS  ${outputs}\nPITCH    ${this.pitchValue}\nVCA      ${this.vcaValue || 'none'}\nROUTING  ${this.routingSummary()}`;
+    return `VOICE / ${this.model}\n\nOUTPUTS  ${outputs}\nPITCH    ${this.pitchValue}\nVCA      ${this.vcaValue || 'none'}\nROUTING  ${this.routing.summary()}`;
   }
 
   isSecondaryModalOpen(): boolean { return this.modal !== null; }
-  closeSecondaryModal(): void { this.modal?.remove(); this.modal = null; }
+  closeSecondaryModal(): void { this.modal?.remove(); this.modal = null; this.routing.closeExpanded(); }
 
   private availableFamilies(): string[] {
     const present = new Set(this.voiceModels().map((model) => familyForModel(model.id)));
@@ -186,6 +214,10 @@ export class VoiceBuilderPanel {
       const asset = this.soundParams.get('asset')?.value;
       sound = asset && typeof asset === 'string' ? `sample.${asset}` : 'sample';
     }
+    if (this.model.startsWith('resonator.')) {
+      const polyphony = this.soundParams.get('polyphony')?.value;
+      if (typeof polyphony === 'string' && polyphony !== '1 note') sound += ` with ${polyphony}`;
+    }
     if (this.soundParams.get('lpg')?.value === true) sound += ' with lpg';
     return sound;
   }
@@ -198,10 +230,14 @@ export class VoiceBuilderPanel {
     const draft = new Map(this.soundParams);
     for (const parameter of parameters) {
       const row = document.createElement('div'); row.className = 'object-builder-secondary-param';
-      const label = document.createElement('label'); label.textContent = parameter.label;
-      let control: HTMLInputElement;
+      const label = document.createElement('label'); appendSoundParameterLabel(label, this.model, parameter);
+      let control: HTMLInputElement | HTMLSelectElement;
       if (parameter.control === 'toggle') {
         control = document.createElement('input'); control.type = 'checkbox'; control.checked = draft.get(parameter.id)?.value === true;
+      } else if (parameter.control === 'select') {
+        control = document.createElement('select');
+        for (const option of parameter.options ?? []) control.append(new Option(option, option));
+        control.value = String(draft.get(parameter.id)?.value ?? parameter.defaultValue ?? parameter.options?.[0] ?? '');
       } else {
         control = document.createElement('input');
         control.type = parameter.control === 'slider' ? 'range' : parameter.control === 'number' ? 'number' : 'text';
@@ -220,7 +256,7 @@ export class VoiceBuilderPanel {
       row.append(label, control, liveWrap); body.append(row);
       const defaultValue = parameter.control === 'toggle' ? false : parameter.defaultValue ?? (parameter.control === 'slider' ? 50 : '');
       const sync = (): void => {
-        const value = control.type === 'checkbox' ? control.checked : control.value;
+        const value = control instanceof HTMLInputElement && control.type === 'checkbox' ? control.checked : control.value;
         const liveEnabled = live.checked && !live.disabled;
         const matchesDefault = String(value) === String(defaultValue);
         if (matchesDefault && !liveEnabled) draft.delete(parameter.id);
@@ -759,211 +795,16 @@ export class VoiceBuilderPanel {
     return [...new Set(destinations)];
   }
 
-  private routingColor(source: string): string {
-    const palette = ['#f0bf24', '#35d6d3', '#ef6fcf', '#7fdc72'];
-    const index = Math.max(0, this.outputPorts().findIndex((port) => port.id === source));
-    return palette[index % palette.length];
-  }
 
-  private drawRoutingWires(canvas: HTMLElement, svg: SVGSVGElement, connections: RoutingConnection[]): void {
-    const bounds=canvas.getBoundingClientRect(); svg.setAttribute('viewBox',`0 0 ${bounds.width} ${bounds.height}`);
-    for(const connection of connections){const a=canvas.querySelector<HTMLElement>(`.object-builder-port[data-port="${CSS.escape(connection.source)}"] i`);const b=canvas.querySelector<HTMLElement>(`.object-builder-port[data-destination="${CSS.escape(connection.destination)}"] i`);if(!a||!b)continue;const ar=a.getBoundingClientRect(),br=b.getBoundingClientRect();const x1=ar.left+ar.width/2-bounds.left,y1=ar.top+ar.height/2-bounds.top,x2=br.left+br.width/2-bounds.left,y2=br.top+br.height/2-bounds.top;const path=document.createElementNS('http://www.w3.org/2000/svg','path');const c=Math.max(40,(x2-x1)*0.45);path.setAttribute('d',`M ${x1} ${y1} C ${x1+c} ${y1}, ${x2-c} ${y2}, ${x2} ${y2}`);path.style.stroke=this.routingColor(connection.source);svg.append(path);}
-  }
-
-  private defaultRoutingConnections(): RoutingConnection[] {
+  private defaultRoutingConnections(): Array<{ source: string; destination: string }> {
     if (this.model === 'sample') return [{ source: 'L', destination: 'MAIN.L' }, { source: 'R', destination: 'MAIN.R' }];
     if (this.model === 'matter' || this.model.startsWith('resonator.')) return [{ source: 'main', destination: 'MAIN.L' }, { source: 'aux', destination: 'MAIN.R' }];
     if (this.model.startsWith('macro.')) return [{ source: 'main', destination: 'MAIN.L' }, { source: 'main', destination: 'MAIN.R' }];
     return [{ source: 'out', destination: 'MAIN.L' }, { source: 'out', destination: 'MAIN.R' }];
   }
 
-  private effectiveRoutingConnections(): RoutingConnection[] {
-    if (this.routingMode === 'disabled') return [];
-    return this.routingMode === 'custom' ? this.routingConnections : this.defaultRoutingConnections();
-  }
-
-  private sameRouting(a: RoutingConnection[], b: RoutingConnection[]): boolean {
-    const normalize = (items: RoutingConnection[]) => items.map((item) => `${item.source}→${item.destination}`).sort().join('|');
-    return normalize(a) === normalize(b);
-  }
-
-  private routingSummary(): string {
-    if (this.routingMode === 'disabled') return 'Disabled · out mute';
-    const connections = this.effectiveRoutingConnections();
-    if (!connections.length) return 'No connections';
-    const grouped = new Map<string, string[]>();
-    for (const connection of connections) {
-      const list = grouped.get(connection.source) ?? []; list.push(connection.destination); grouped.set(connection.source, list);
-    }
-    return [...grouped].map(([source, destinations]) => `${source} → ${destinations.join(' + ')}`).join(' · ');
-  }
-
-  private routingDestinationGroup(destination: string): string {
-    const dot = destination.indexOf('.');
-    return dot >= 0 ? destination.slice(0, dot) : destination;
-  }
-
-  private visibleRoutingDestinations(showAll: boolean): string[] {
-    const all = this.routingDestinations();
-    if (showAll) return all;
-    const visibleGroups = new Set<string>(['MAIN', ...this.visibleRoutingDestinationGroups]);
-    for (const connection of this.effectiveRoutingConnections()) {
-      visibleGroups.add(this.routingDestinationGroup(connection.destination));
-    }
-    return all.filter((destination) => visibleGroups.has(this.routingDestinationGroup(destination)));
-  }
-
   renderRoutingPreview(): HTMLElement {
-    return this.renderRoutingPanel(false);
-  }
-
-  private renderRoutingPanel(showAll: boolean): HTMLElement {
-    const panel = document.createElement('div');
-    panel.className = `object-builder-routing-preview object-builder-routing-inline${showAll ? ' expanded' : ''}`;
-
-    const toolbar = document.createElement('div');
-    toolbar.className = 'object-builder-routing-toolbar';
-
-    const disabledLabel = document.createElement('label');
-    disabledLabel.className = 'object-builder-routing-disabled';
-    const disabled = document.createElement('input');
-    disabled.type = 'checkbox';
-    disabled.checked = this.routingMode === 'disabled';
-    disabledLabel.append(disabled, document.createTextNode(' Disable output'));
-    toolbar.append(disabledLabel);
-
-    if (!showAll) {
-      const actions = document.createElement('div');
-      actions.className = 'object-builder-routing-actions';
-      const add = document.createElement('select');
-      add.className = 'object-builder-routing-add';
-      add.append(new Option('+ Add destination', ''));
-      const allGroups = [...new Set(this.routingDestinations().map((destination) => this.routingDestinationGroup(destination)))];
-      const visibleGroups = new Set(this.visibleRoutingDestinations(false).map((destination) => this.routingDestinationGroup(destination)));
-      for (const group of allGroups) {
-        if (group === 'MAIN' || visibleGroups.has(group)) continue;
-        add.append(new Option(group, group));
-      }
-      add.disabled = disabled.checked || add.options.length <= 1;
-      add.addEventListener('change', () => {
-        if (!add.value) return;
-        this.visibleRoutingDestinationGroups.add(add.value);
-        this.onChange();
-      });
-
-      const expand = document.createElement('button');
-      expand.type = 'button';
-      expand.className = 'object-builder-routing-expand';
-      expand.title = 'Expand routing';
-      expand.setAttribute('aria-label', 'Expand routing');
-      expand.textContent = '↗';
-      expand.disabled = disabled.checked;
-      expand.addEventListener('click', () => this.openExpandedRouting());
-      actions.append(add, expand);
-      toolbar.append(actions);
-    }
-
-    const canvas = document.createElement('div');
-    canvas.className = 'object-builder-routing-preview-canvas object-builder-routing-canvas';
-    canvas.classList.toggle('disabled', disabled.checked);
-
-    const left = document.createElement('div');
-    left.className = 'object-builder-routing-preview-column object-builder-routing-column';
-    const right = document.createElement('div');
-    right.className = 'object-builder-routing-preview-column object-builder-routing-column';
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.classList.add('object-builder-routing-wires');
-
-    let connections = this.effectiveRoutingConnections().map((item) => ({ ...item }));
-    const ports = this.outputPorts();
-    if (!ports.some((port) => port.id === this.activeRoutingSource)) {
-      this.activeRoutingSource = ports[0]?.id ?? 'out';
-    }
-
-    const redraw = (): void => {
-      svg.replaceChildren();
-      requestAnimationFrame(() => this.drawRoutingWires(canvas, svg, connections));
-      for (const item of left.querySelectorAll<HTMLElement>('.object-builder-port')) {
-        const sourceId = item.dataset.port ?? '';
-        item.classList.toggle('active', sourceId === this.activeRoutingSource);
-        item.classList.toggle('routed', connections.some((entry) => entry.source === sourceId));
-      }
-      for (const item of right.querySelectorAll<HTMLElement>('.object-builder-port')) {
-        item.classList.toggle('connected', connections.some((entry) => entry.source === this.activeRoutingSource && entry.destination === item.dataset.destination));
-      }
-    };
-
-    const commitConnections = (next: RoutingConnection[]): void => {
-      connections = next.map((item) => ({ ...item }));
-      if (this.sameRouting(next, this.defaultRoutingConnections())) {
-        this.routingMode = 'default';
-        this.routingConnections = [];
-      } else {
-        this.routingMode = 'custom';
-        this.routingConnections = next.map((item) => ({ ...item }));
-      }
-      redraw();
-      this.onChange();
-    };
-
-    for (const source of ports) {
-      const port = document.createElement('button');
-      port.type = 'button';
-      port.className = 'object-builder-port object-builder-preview-port';
-      port.dataset.port = source.id;
-      port.style.setProperty('--route-color', this.routingColor(source.id));
-      port.disabled = disabled.checked;
-      port.classList.toggle('active', source.id === this.activeRoutingSource);
-      port.classList.toggle('routed', connections.some((entry) => entry.source === source.id));
-      port.innerHTML = `<span>${source.label}</span><i></i>`;
-      port.addEventListener('click', () => {
-        this.activeRoutingSource = source.id;
-        redraw();
-      });
-      left.append(port);
-    }
-
-    for (const destination of this.visibleRoutingDestinations(showAll)) {
-      const port = document.createElement('button');
-      port.type = 'button';
-      port.className = 'object-builder-port object-builder-preview-port destination';
-      port.dataset.destination = destination;
-      port.disabled = disabled.checked;
-      port.classList.toggle('connected', connections.some((entry) => entry.source === this.activeRoutingSource && entry.destination === destination));
-      port.innerHTML = `<i></i><span>${destination}</span>`;
-      port.addEventListener('click', () => {
-        const next = connections.map((item) => ({ ...item }));
-        const index = next.findIndex((entry) => entry.source === this.activeRoutingSource && entry.destination === destination);
-        if (index >= 0) next.splice(index, 1);
-        else next.push({ source: this.activeRoutingSource, destination });
-        commitConnections(next);
-      });
-      right.append(port);
-    }
-
-    disabled.addEventListener('change', () => {
-      if (disabled.checked) {
-        this.routingMode = 'disabled';
-        this.routingConnections = [];
-      } else {
-        this.routingMode = 'default';
-        this.routingConnections = [];
-      }
-      this.onChange();
-    });
-
-    canvas.append(left, svg, right);
-    panel.append(toolbar, canvas);
-    requestAnimationFrame(() => this.drawRoutingWires(canvas, svg, connections));
-    return panel;
-  }
-
-  private openExpandedRouting(): void {
-    const body = document.createElement('div');
-    body.className = 'object-builder-routing-expanded-body';
-    body.append(this.renderRoutingPanel(true));
-    this.openSecondary('VOICE ROUTING', body, () => this.onChange());
-    this.modal?.querySelector('.object-builder-secondary-dialog')?.classList.add('object-builder-routing-expanded-dialog');
+    return this.routing.renderPreview();
   }
 
   private inlineEnvelopeStages(): Map<string, { value: string; unit: string }> {

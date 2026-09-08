@@ -2,6 +2,7 @@ import './object-builder.css';
 import { OBJECT_BUILDER_CATALOG, builderModelDefinition } from './catalog';
 import type { BuilderObjectDefinition, BuilderParameterDefinition } from './types';
 import { VoiceBuilderPanel } from './voice-builder';
+import { RoutingPanel } from './routing-panel';
 
 export interface ObjectBuilderOptions {
   editor: HTMLTextAreaElement;
@@ -18,15 +19,25 @@ export class ObjectBuilder {
   private clockMode: 'master' | 'derived' = 'master';
   private existingMasterLine: { start: number; end: number; text: string } | null = null;
   private voicePanel: VoiceBuilderPanel | null = null;
+  private readonly filterRouting: RoutingPanel;
 
-  constructor(private readonly options: ObjectBuilderOptions) { this.mount(); }
+  constructor(private readonly options: ObjectBuilderOptions) {
+    this.filterRouting = new RoutingPanel({
+      sources: () => this.filterOutputs(),
+      destinations: () => this.routingDestinations(),
+      defaultConnections: () => [{ source: 'lp', destination: 'MAIN.L' }, { source: 'lp', destination: 'MAIN.R' }],
+      onChange: () => this.refreshPreview(),
+      expandedTitle: 'FILTER ROUTING',
+    });
+    this.mount();
+  }
 
   open(): void {
     this.existingMasterLine = this.findMasterClockLine();
     this.overlay.classList.remove('hidden');
     this.render();
   }
-  close(): void { this.voicePanel?.closeSecondaryModal(); this.overlay.classList.add('hidden'); this.options.editor.focus(); }
+  close(): void { this.voicePanel?.closeSecondaryModal(); this.filterRouting.closeExpanded(); this.overlay.classList.add('hidden'); this.options.editor.focus(); }
   isOpen(): boolean { return !this.overlay.classList.contains('hidden'); }
 
   private mount(): void {
@@ -71,6 +82,7 @@ export class ObjectBuilder {
     }
     const title = document.createElement('h2'); title.textContent = this.selected.label.toUpperCase(); this.form.append(title);
     if (this.selected.kind === 'clock') { this.renderClockForm(); this.refreshPreview(); return; }
+    if (this.selected.kind === 'filter') { this.renderFilterForm(); this.refreshPreview(); return; }
     if (this.selected.models?.length) this.form.append(this.selectRow('model', 'Model', this.selected.models.map((m) => m.id)));
     for (const parameter of this.selected.parameters) {
       const resolved = parameter.id === 'name' && parameter.defaultValue == null
@@ -81,6 +93,149 @@ export class ObjectBuilder {
     this.form.addEventListener('input', () => this.refreshPreview(), { once: true });
     this.form.addEventListener('change', () => { this.renderModelParameters(); this.refreshPreview(); }, { once: true });
     this.renderModelParameters(); this.refreshPreview();
+  }
+
+
+  private renderFilterForm(): void {
+    this.filterRouting.reset();
+    const name = this.parameterRow({ id: 'name', label: 'Name', control: 'text', required: true, defaultValue: this.suggestAvailableName('myFilter') });
+    const model = this.selectRow('model', 'Model', ['svf']);
+    const cutoff = this.parameterRow({ id: 'cutoff', label: 'Cutoff', control: 'slider', min: 0, max: 100, step: 1, unit: '%', defaultValue: 50 });
+    const resonance = this.parameterRow({ id: 'resonance', label: 'Resonance', control: 'slider', min: 0, max: 100, step: 1, unit: '%', defaultValue: 0 });
+    const drive = this.parameterRow({ id: 'drive', label: 'Drive', control: 'slider', min: 0, max: 100, step: 1, unit: '%', defaultValue: 0 });
+    for (const row of [name, model, cutoff, resonance, drive]) this.form.append(row);
+    for (const row of [cutoff, resonance, drive]) this.decorateSliderRow(row);
+
+    const placementTitle = document.createElement('h3');
+    placementTitle.textContent = 'PLACEMENT';
+    this.form.append(placementTitle);
+
+    const embedRow = this.parameterRow({ id: 'embedVoice', label: 'Embed in existing VOICE', control: 'toggle', defaultValue: false });
+    const voiceRow = this.selectRow('embedVoiceName', 'Voice', []);
+    const embed = embedRow.querySelector<HTMLInputElement>('input[name=embedVoice]')!;
+    const voice = voiceRow.querySelector<HTMLSelectElement>('select[name=embedVoiceName]')!;
+    const notice = document.createElement('div');
+    notice.className = 'object-builder-notice';
+
+    const blocks = this.findVoiceBlocks();
+    for (const block of blocks) {
+      const unavailable = block.hasEmbeddedFilter || block.hasExplicitOut;
+      const label = block.hasEmbeddedFilter
+        ? `${block.name} — already has FILTER`
+        : block.hasExplicitOut
+          ? `${block.name} — explicit routing`
+          : block.name;
+      const option = new Option(label, block.name);
+      option.disabled = unavailable;
+      voice.append(option);
+    }
+    const firstAvailable = Array.from(voice.options).find((option) => !option.disabled);
+    if (firstAvailable) voice.value = firstAvailable.value;
+    voice.disabled = true;
+    if (!firstAvailable) embed.disabled = true;
+
+    const refreshPlacement = (): void => {
+      voice.disabled = !embed.checked;
+      if (!blocks.length) notice.textContent = 'No existing VOICE is available for embedding.';
+      else if (!firstAvailable) notice.textContent = 'No compatible VOICE: embedded filters and explicit voice routing must be resolved first.';
+      else if (embed.checked) notice.textContent = `The FILTER will be appended inside VOICE '${voice.value}'. Routing uses that VOICE's .lp/.hp/.bp/.np outputs.`;
+      else notice.textContent = 'Top-level FILTER. Enable embedding to place it inside an existing VOICE.';
+      this.refreshPreview();
+    };
+
+    embed.addEventListener('change', refreshPlacement);
+    voice.addEventListener('change', refreshPlacement);
+    this.form.append(embedRow, voiceRow, notice);
+    refreshPlacement();
+
+    this.form.addEventListener('input', () => this.refreshPreview());
+    this.form.addEventListener('change', () => this.refreshPreview());
+  }
+
+  private decorateSliderRow(row: HTMLElement): void {
+    const input = row.querySelector<HTMLInputElement>('input[type=range]');
+    if (!input) return;
+    const wrap = document.createElement('div'); wrap.className = 'object-builder-slider';
+    const output = document.createElement('output'); output.textContent = input.value;
+    input.replaceWith(wrap); wrap.append(input, output);
+    input.addEventListener('input', () => { output.textContent = input.value; });
+  }
+
+  private filterOutputs(): Array<{ id: string; label: string }> {
+    return [
+      { id: 'lp', label: 'LP' },
+      { id: 'hp', label: 'HP' },
+      { id: 'bp', label: 'BP' },
+      { id: 'np', label: 'NOTCH' },
+    ];
+  }
+
+  private routingDestinations(): string[] {
+    const destinations = ['MAIN.L', 'MAIN.R'];
+    const lines = this.options.editor.value.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i += 1) {
+      const top = lines[i].match(/^\s*(FX|FILTER|VOICE)\s+([A-Za-z_][A-Za-z0-9_]*)\b/i);
+      if (!top) continue;
+      const kind = top[1].toUpperCase(), name = top[2];
+      if (kind === 'FX') destinations.push(`${name}.L`, `${name}.R`);
+      else if (kind === 'FILTER') destinations.push(`${name}.in`);
+      else {
+        let sound = '';
+        for (let j = i + 1; j < lines.length && (lines[j].trim() === '' || /^\s/.test(lines[j])); j += 1) {
+          const match = lines[j].trim().match(/^sound\s+([^\s]+)/i); if (match) { sound = match[1]; break; }
+        }
+        if (sound === 'matter') destinations.push(`${name}.in`, `${name}.in2`);
+        else if (sound.startsWith('resonator.')) destinations.push(`${name}.in`);
+      }
+    }
+    const currentName = (this.form.querySelector('[name=name]') as HTMLInputElement | null)?.value;
+    const embeddedVoice = this.filterEmbedded() ? this.selectedEmbedVoiceName() : '';
+    return [...new Set(destinations)].filter((destination) => {
+      if (currentName && destination.startsWith(`${currentName}.`)) return false;
+      if (embeddedVoice && destination.startsWith(`${embeddedVoice}.`)) return false;
+      return true;
+    });
+  }
+
+  private filterEmbedded(): boolean {
+    return (this.form.querySelector('[name=embedVoice]') as HTMLInputElement | null)?.checked ?? false;
+  }
+
+  private selectedEmbedVoiceName(): string {
+    return (this.form.querySelector('[name=embedVoiceName]') as HTMLSelectElement | null)?.value ?? '';
+  }
+
+  private findVoiceBlocks(): Array<{ name: string; start: number; insertAt: number; hasEmbeddedFilter: boolean; hasExplicitOut: boolean }> {
+    const source = this.options.editor.value;
+    const rawLines = source.match(/.*(?:\r?\n|$)/g)?.filter((line) => line.length > 0) ?? [];
+    const starts: number[] = [];
+    let offset = 0;
+    for (const line of rawLines) { starts.push(offset); offset += line.length; }
+    const blocks: Array<{ name: string; start: number; insertAt: number; hasEmbeddedFilter: boolean; hasExplicitOut: boolean }> = [];
+
+    for (let i = 0; i < rawLines.length; i += 1) {
+      const lineText = rawLines[i].replace(/\r?\n$/, '');
+      if (/^\s/.test(lineText)) continue;
+      const match = lineText.trim().match(/^_?VOICE\s+([A-Za-z_][A-Za-z0-9_]*)\b.*:\s*$/i);
+      if (!match) continue;
+      let endLine = rawLines.length;
+      for (let j = i + 1; j < rawLines.length; j += 1) {
+        const candidate = rawLines[j].replace(/\r?\n$/, '');
+        if (candidate.trim() && !/^\s/.test(candidate)) { endLine = j; break; }
+      }
+      let contentEnd = endLine;
+      while (contentEnd > i + 1 && rawLines[contentEnd - 1].trim() === '') contentEnd -= 1;
+      const body = rawLines.slice(i + 1, endLine).map((line) => line.replace(/\r?\n$/, ''));
+      blocks.push({
+        name: match[1],
+        start: starts[i],
+        insertAt: contentEnd < starts.length ? starts[contentEnd] : source.length,
+        hasEmbeddedFilter: body.some((line) => /^\s+_?FILTER\s+[A-Za-z_][A-Za-z0-9_]*\s*:/i.test(line)),
+        hasExplicitOut: body.some((line) => /^\s+OUT\b/i.test(line)),
+      });
+      i = endLine - 1;
+    }
+    return blocks;
   }
 
   private renderClockForm(): void {
@@ -179,6 +334,10 @@ export class ObjectBuilder {
       this.info.innerHTML = `<h3>OUTPUT ROUTING</h3>`;
       this.info.append(this.voicePanel.renderRoutingPreview());
       const codeTitle = document.createElement('h3'); codeTitle.textContent = 'GENERATED CODE'; this.info.append(codeTitle);
+    } else if (this.selected.kind === 'filter') {
+      this.info.innerHTML = `<h3>OUTPUT ROUTING</h3>`;
+      this.info.append(this.filterRouting.renderPreview());
+      const codeTitle = document.createElement('h3'); codeTitle.textContent = 'GENERATED CODE'; this.info.append(codeTitle);
     } else {
       this.info.innerHTML = `<h3>INFO / PREVIEW</h3><div class="object-builder-diagram"></div><h3>GENERATED CODE</h3>`;
       (this.info.querySelector('.object-builder-diagram') as HTMLElement).textContent = `${(modelDef?.preview ?? this.selected.preview).toUpperCase()}\n\n${diagram}`;
@@ -193,6 +352,7 @@ export class ObjectBuilder {
     void data;
     if (this.selected.kind === 'clock') return this.generateClockCode(value, checked);
     if (this.selected.kind === 'voice' && this.voicePanel) return this.voicePanel.generateCode();
+    if (this.selected.kind === 'filter') return this.generateFilterCode(value);
     const name = value('name') || this.selected.kind;
     const model = value('model');
     const view = checked('view') ? ' with view' : '';
@@ -205,6 +365,32 @@ export class ObjectBuilder {
       if (input.value) lines.push(`    ${input.name} ${input.value}`);
     }
     const out = value('out'); if (out) lines.push(`    out ${out}`);
+    return lines.join('\n');
+  }
+
+  private generateFilterCode(value: (name: string) => string): string {
+    const name = value('name') || 'myFilter';
+    const embedded = this.filterEmbedded();
+    if (!embedded) {
+      const lines = [`FILTER ${name}:`, '    model svf', `    cutoff ${value('cutoff') || '50'}`, `    resonance ${value('resonance') || '0'}`, `    drive ${value('drive') || '0'}`];
+      if (this.filterRouting.getMode() === 'disabled') lines.push('    out mute');
+      else if (this.filterRouting.getMode() === 'custom') {
+        for (const route of this.filterRouting.getConnections()) lines.push(`    out ${route.source} to ${route.destination}`);
+      }
+      return lines.join('\n');
+    }
+
+    const lines = [
+      `    FILTER ${name}:`,
+      '        model svf',
+      `        cutoff ${value('cutoff') || '50'}`,
+      `        resonance ${value('resonance') || '0'}`,
+      `        drive ${value('drive') || '0'}`,
+    ];
+    if (this.filterRouting.getMode() === 'disabled') lines.push('    OUT MUTE');
+    else if (this.filterRouting.getMode() === 'custom') {
+      for (const route of this.filterRouting.getConnections()) lines.push(`    OUT ${route.source} TO ${route.destination}`);
+    }
     return lines.join('\n');
   }
 
@@ -320,6 +506,16 @@ export class ObjectBuilder {
       const voiceError = this.voicePanel.validate();
       if (voiceError) { this.showError(voiceError); return false; }
     }
+    if (this.selected.kind === 'filter' && this.filterEmbedded()) {
+      const voiceName = this.selectedEmbedVoiceName();
+      const block = this.findVoiceBlocks().find((candidate) => candidate.name === voiceName);
+      if (!block) { this.showError('Choose an existing VOICE for the embedded FILTER.'); return false; }
+      if (block.hasEmbeddedFilter) { this.showError(`VOICE '${voiceName}' already contains a FILTER.`); return false; }
+      if (block.hasExplicitOut) {
+        this.showError(`VOICE '${voiceName}' already has explicit OUT routing. Remove or reconcile that routing before embedding a FILTER.`);
+        return false;
+      }
+    }
     if (!this.selected.named || (this.selected.kind === 'clock' && this.clockMode === 'master')) return true;
     const name = (this.form.querySelector('[name="name"]') as HTMLInputElement | null)?.value.trim() ?? '';
     if (!name) {
@@ -355,10 +551,32 @@ export class ObjectBuilder {
     editor.setRangeText(`${separator}${code}\n\n`, source.length, source.length, 'end');
   }
 
+  private insertEmbeddedFilter(code: string): boolean {
+    const voiceName = this.selectedEmbedVoiceName();
+    const block = this.findVoiceBlocks().find((candidate) => candidate.name === voiceName);
+    if (!block) return false;
+    const editor = this.options.editor;
+    const source = editor.value;
+    const before = source.slice(0, block.insertAt);
+    const separator = before.endsWith('\n\n') ? '' : before.endsWith('\n') ? '\n' : '\n\n';
+    editor.setRangeText(`${separator}${code}\n`, block.insertAt, block.insertAt, 'end');
+    return true;
+  }
+
   private insert(): void {
     if (!this.validateBeforeInsert()) return;
     const code = this.generateCode();
     const editor = this.options.editor;
+    if (this.selected.kind === 'filter' && this.filterEmbedded()) {
+      if (!this.insertEmbeddedFilter(code)) {
+        this.showError('The selected VOICE could not be found.');
+        return;
+      }
+      editor.dispatchEvent(new Event('input', { bubbles: true }));
+      this.close();
+      this.options.evaluateAfterAdd();
+      return;
+    }
     if (this.selected.kind === 'clock' && this.clockMode === 'master') {
       const existing = this.findMasterClockLine();
       if (existing) {
