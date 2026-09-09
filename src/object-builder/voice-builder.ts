@@ -451,56 +451,6 @@ export class VoiceBuilderPanel {
     return result.filter((item, index) => result.findIndex((other) => other.name === item.name) === index);
   }
 
-  private findTimingReferences(): Array<{ name: string; detail: string }> {
-    const result: Array<{ name: string; detail: string }> = [];
-    for (const line of this.editor.value.split(/\r?\n/)) {
-      const match = line.match(/^\s*SET\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*RHYTHM\s+(.+)$/i);
-      if (match) result.push({ name: match[1], detail: match[2].trim() });
-    }
-    return result.filter((item, index) => result.findIndex((other) => other.name === item.name) === index);
-  }
-
-  private behaviorTimingModifiers(): { chance: string; loose: boolean } {
-    return {
-      chance: this.behaviorValue.match(/\bchance\s+(\d+(?:\.\d+)?)/i)?.[1] ?? '100',
-      loose: /(?:^|[,\s])loose(?:,|$)/i.test(this.behaviorValue),
-    };
-  }
-
-  private behaviorPatternParts(): { steps: string; mode: string; events: number[] } {
-    const match = this.behaviorValue.match(/^(?:mode\s+(forward|reverse|pendulum|walk|random)\s+)?pattern\s+\[([^\]]+)\](?:\s+steps\s+(\d+))?/i);
-    if (!match) return { steps: '16', mode: 'forward', events: [1, 5, 9, 13] };
-    const events = match[2].trim().split(/\s+/).map((token) => Number(token.match(/^\d+/)?.[0])).filter((value) => Number.isInteger(value) && value > 0);
-    return { steps: match[3] ?? '16', mode: match[1]?.toLowerCase() ?? 'forward', events };
-  }
-
-  private behaviorReferenceParts(): { name: string } {
-    return { name: this.behaviorValue.match(/^rhythm\s+([A-Za-z_][A-Za-z0-9_]*)/i)?.[1] ?? '' };
-  }
-
-  private timingClockParts(value: string): { clock: string; extras: boolean; rate: string; jitter: string; drifter: string } {
-    const match = value.match(/\bon\s+clock\s+([^,]+)(.*)$/i);
-    if (!match) return { clock: 'master', extras: false, rate: '/2', jitter: '0', drifter: '0' };
-    const head = match[1].trim();
-    const derived = head.match(/^(?:(\w+)\s+)?([/*]\s*\d+(?:\.\d+)?)$/);
-    const tail = match[2] ?? '';
-    const jitter = tail.match(/\bjitter\s+(\d+(?:\.\d+)?)/i)?.[1] ?? '0';
-    const drifter = tail.match(/\bdrifter\s+(\d+(?:\.\d+)?)/i)?.[1] ?? '0';
-    if (derived) return { clock: derived[1] ?? 'master', extras: true, rate: derived[2].replace(/\s+/g, ''), jitter, drifter };
-    return { clock: head, extras: false, rate: '/2', jitter: '0', drifter: '0' };
-  }
-
-  private behaviorEveryParts(): { amount: string; unit: string; clock: string; extras: boolean; rate: string; jitter: string; drifter: string } {
-    const match = this.behaviorValue.match(/^every\s+([^\s]+)\s+(beat|sec|ms)/i);
-    return { amount: match?.[1] ?? '1', unit: match?.[2] ?? 'beat', ...this.timingClockParts(this.behaviorValue) };
-  }
-
-  private behaviorEuclideanParts(): { pulses: string; steps: string; rotate: string; clock: string; extras: boolean; rate: string; jitter: string; drifter: string } {
-    const match = this.behaviorValue.match(/^every\s+euclidean\s+(\d+)\/(\d+)/i);
-    const rotate = this.behaviorValue.match(/\brotate\s+(\d+)/i)?.[1] ?? '0';
-    return { pulses: match?.[1] ?? '1', steps: match?.[2] ?? '16', rotate, ...this.timingClockParts(this.behaviorValue) };
-  }
-
   private openVcaEditor(): void {
     const body = document.createElement('div'); body.className = 'object-builder-secondary-fields';
     const existing = document.createElement('select');
@@ -636,7 +586,6 @@ export class VoiceBuilderPanel {
   }
 
   private findEnvelopeNames(): string[] { const out:string[]=[]; for(const line of this.editor.value.split(/\r?\n/)){const m=line.match(/^\s*SET\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*ENVELOPE\b/i);if(m)out.push(m[1]);} return [...new Set(out)]; }
-  private findClockNames(): string[] { const out:string[]=[]; for(const line of this.editor.value.split(/\r?\n/)){const m=line.match(/^\s*CLOCK\s+([A-Za-z_][A-Za-z0-9_]*)\b/i);if(m&&!/^set$/i.test(m[1]))out.push(m[1]);} return [...new Set(out)]; }
 
   private envelopeSvg(stages: HTMLElement): string {
     const fraction = (id: string): number => {

@@ -36,7 +36,6 @@ function hint(text: string): HTMLElement { const el = document.createElement('di
 
 export class TimingEditor {
   private state: TimingEditorState;
-  private root: HTMLElement | null = null;
   private readState: (() => TimingEditorState) | null = null;
 
   constructor(private readonly options: TimingEditorOptions) {
@@ -120,7 +119,7 @@ export class TimingEditor {
     enabled.addEventListener('change',sync);type.addEventListener('change',sync);unit.addEventListener('change',sync);fields.append(field('Type',type),every,euclid,pattern,reference,chanceRow,clockWrap);column.append(header,fields);sync();
 
     this.readState=()=>{const isEnabled=this.options.showEnabledToggle===false?true:enabled.checked;if(!isEnabled)return{enabled:false,kind:'none',value:'',readerMode:'forward',readerAmount:walkAmount.value||'1'};if(type.value==='every'){const mods=unit.value==='beat'?[...clockModifiers(),...localModifiers()]:localModifiers();return{enabled:true,kind:'every',value:`every ${amount.value||'1'} ${unit.value}${onClause(mods)}`,readerMode:everyMode.value as TimingReaderMode,readerAmount:walkAmount.value||'1'};}if(type.value==='euclidean'){const mods=rotate>0?[`rotate ${rotate}`]:[];mods.push(...clockModifiers(),...localModifiers());return{enabled:true,kind:'euclidean',value:`every euclidean ${pulses}/${steps.value||'16'}${onClause(mods)}`,readerMode:'forward',readerAmount:'1'};}if(type.value==='pattern'){const count=Math.max(1,Math.min(128,Math.floor(Number(patternSteps.value)||16)));const active=[...events].filter(s=>s<=count).sort((a,b)=>a-b);const mode=patternMode.value!=='forward'?`mode ${patternMode.value} `:'';const cm=clockModifiers();const clockText=cm.length?` on clock ${cm[0].replace(/^clock\s+/,'')}${cm.slice(1).length?`, ${cm.slice(1).join(', ')}`:''}`:' on clock /1';return{enabled:true,kind:'pattern',value:`${mode}pattern [${active.join(' ')}] steps ${count}${clockText}`,readerMode:'forward',readerAmount:'1'};}return{enabled:true,kind:'reference',value:refSelect.value?`rhythm ${refSelect.value}${localModifiers().length?` ${localModifiers().join(', ')}`:''}`:'',readerMode:'forward',readerAmount:'1'};};
-    this.root=column; return column;
+    return column;
   }
 
   getState(): TimingEditorState { return this.readState ? this.readState() : { ...this.state }; }

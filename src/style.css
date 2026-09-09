@@ -83,6 +83,40 @@ button, input, textarea { font: inherit; }
   user-select: none;
 }
 
+/* Object Builder launcher: fixed terminal control at the visual center of the statusbar. */
+.statusbar > #object-builder-launcher.object-builder-launcher {
+  position: absolute !important;
+  left: 50% !important;
+  top: 50% !important;
+  transform: translate(-50%, -50%) !important;
+  z-index: 20 !important;
+  display: block !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  border: 1px dashed var(--phosphor) !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  color: var(--phosphor) !important;
+  font: inherit !important;
+  font-size: 15px !important;
+  line-height: 1 !important;
+  letter-spacing: .06em !important;
+  padding: 5px 12px !important;
+  cursor: pointer !important;
+  box-shadow: none !important;
+}
+.statusbar > #object-builder-launcher.object-builder-launcher:hover,
+.statusbar > #object-builder-launcher.object-builder-launcher:focus-visible,
+.statusbar > #object-builder-launcher.object-builder-launcher:active {
+  border-color: var(--phosphor) !important;
+  background: rgba(215, 169, 46, .06) !important;
+  color: var(--phosphor) !important;
+  outline: none !important;
+  box-shadow: none !important;
+}
+
 .brand { margin-right: auto; }
 .status-item { display: inline-flex; align-items: center; gap: 7px; }
 .label { color: var(--phosphor-dim); }
@@ -1334,144 +1368,138 @@ button, input, textarea { font: inherit; }
 .snake-runner.tail-2 { width: 8px; height: 4px; opacity: .38; }
 .snake-runner.hidden { opacity: 0; }
 
-/* LOGIC hardware view */
-.logic-monitor-card .monitor-body { padding: 10px 12px 12px; }
-.logic-hardware-rack {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  min-width: 420px;
-  align-items: start;
+/* LOGIC graph view */
+.logic-monitor-card .monitor-body { padding: 8px 10px 10px; }
+.logic-graph-viewport {
+  width: 100%;
+  overflow: auto;
+  border: 1px solid color-mix(in srgb, currentColor 13%, transparent);
+  border-radius: 4px;
+  background:
+    linear-gradient(color-mix(in srgb, currentColor 3%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, currentColor 3%, transparent) 1px, transparent 1px),
+    color-mix(in srgb, var(--panel-bg, #0d0e0d) 97%, #000 3%);
+  background-size: 16px 16px;
 }
-.logic-module {
-  min-width: 0;
-  color: inherit;
-}
-.logic-module-face {
+.logic-graph {
   position: relative;
-  min-height: 116px;
-  padding: 9px 11px 10px;
+  display: grid;
+  grid-template-columns: repeat(var(--logic-graph-columns), minmax(96px, 118px));
+  grid-template-rows: repeat(var(--logic-graph-rows), minmax(66px, auto));
+  column-gap: 34px;
+  row-gap: 10px;
+  align-items: center;
+  min-width: max-content;
+  min-height: 112px;
+  padding: 16px 18px;
+}
+.logic-graph-wires {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+  z-index: 0;
+}
+.logic-graph-wire {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.2;
+  vector-effect: non-scaling-stroke;
+  opacity: .20;
+  transition: opacity 520ms ease-out, filter 650ms ease-out, stroke-width 520ms ease-out;
+}
+.logic-graph-wire.active {
+  opacity: .92;
+  stroke-width: 1.8;
+  filter: drop-shadow(0 0 3px currentColor);
+  transition-duration: 35ms;
+}
+.logic-graph-source,
+.logic-graph-node,
+.logic-graph-output {
+  position: relative;
+  z-index: 1;
+}
+.logic-graph-source {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 84px;
+  padding: 5px 6px;
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--panel-bg, #0d0e0d) 96%, currentColor 4%);
+  font: 10px/1.1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: .035em;
+  opacity: .78;
+}
+.logic-graph-source > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.logic-graph-terminal {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border: 1px solid color-mix(in srgb, currentColor 58%, transparent);
+  border-radius: 50%;
+  background: color-mix(in srgb, currentColor 12%, #111 88%);
+  box-shadow: inset 0 0 0 2px rgba(0,0,0,.34);
+}
+.logic-graph-node {
+  min-width: 96px;
+  min-height: 62px;
+  padding: 5px 6px 4px;
   border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
   border-radius: 4px;
   background:
-    linear-gradient(180deg, color-mix(in srgb, currentColor 5%, transparent), transparent 32%),
+    linear-gradient(180deg, color-mix(in srgb, currentColor 5%, transparent), transparent 34%),
     color-mix(in srgb, var(--panel-bg, #0d0e0d) 95%, #000 5%);
-  box-shadow:
-    inset 0 1px 0 rgba(255,255,255,.025),
-    inset 0 -1px 0 rgba(0,0,0,.45);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.025), inset 0 -1px 0 rgba(0,0,0,.45);
+  transition: border-color 500ms ease-out, box-shadow 650ms ease-out;
 }
-.logic-module-face::before,
-.logic-module-face::after {
-  content: '';
-  position: absolute;
-  width: 3px;
-  height: 3px;
-  border-radius: 50%;
-  background: currentColor;
-  opacity: .16;
-  top: 5px;
+.logic-graph-node.active {
+  border-color: color-mix(in srgb, currentColor 70%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.035), 0 0 9px color-mix(in srgb, currentColor 18%, transparent);
+  transition-duration: 35ms;
 }
-.logic-module-face::before { left: 5px; }
-.logic-module-face::after { right: 5px; }
-.logic-module-header {
+.logic-graph-node-header {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 10px;
-  padding: 0 4px 7px;
-  border-bottom: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+  gap: 6px;
+  padding: 0 1px 3px;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 13%, transparent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
-.logic-module-op {
-  font: 600 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
-  letter-spacing: .11em;
+.logic-graph-node-header > span:first-child {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .10em;
   opacity: .9;
 }
-.logic-module-name {
+.logic-graph-node-header > span:last-child {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font: 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
-  letter-spacing: .055em;
-  opacity: .62;
-}
-.logic-module-core {
-  display: grid;
-  grid-template-columns: minmax(112px, 146px) 88px 52px;
-  justify-content: center;
-  gap: 8px;
-  align-items: center;
-  min-height: 82px;
-  padding-top: 8px;
-}
-.logic-inputs { display: grid; gap: 7px; align-content: center; }
-.logic-jack-row { display: flex; align-items: center; min-width: 0; gap: 7px; }
-.logic-input-lane { justify-content: flex-end; }
-.logic-output-lane {
-  justify-content: center;
-  align-items: center;
-  flex-direction: column;
-  gap: 5px;
-}
-.logic-port-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font: 11px/1.05 ui-monospace, SFMono-Regular, Menlo, monospace;
-  letter-spacing: .035em;
-  opacity: .82;
-}
-.logic-port-label.long { font-size: 9px; letter-spacing: .01em; }
-.logic-input-lane .logic-port-label { text-align: right; }
-.logic-output-lane .logic-port-label {
-  font-size: 10px;
-  letter-spacing: .09em;
-  opacity: .82;
-}
-.logic-jack {
-  position: relative;
-  flex: 0 0 auto;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  border: 1px solid color-mix(in srgb, currentColor 48%, transparent);
-  background:
-    radial-gradient(circle at 38% 30%, rgba(255,255,255,.13), transparent 31%),
-    color-mix(in srgb, currentColor 10%, #171817 90%);
-  box-shadow:
-    inset 0 0 0 2px rgba(0,0,0,.30),
-    0 1px 1px rgba(0,0,0,.45);
-}
-/* The jack centre is the LED: no separate indicator above the socket. */
-.logic-jack-led {
-  position: absolute;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  background: currentColor;
-  opacity: .08;
-  box-shadow: inset 0 0 0 1px rgba(0,0,0,.55);
-  transition: opacity 520ms ease-out, box-shadow 700ms ease-out;
-}
-.logic-jack-row.active .logic-jack-led {
-  opacity: 1;
-  box-shadow:
-    inset 0 0 0 1px rgba(255,255,255,.18),
-    0 0 5px currentColor,
-    0 0 11px color-mix(in srgb, currentColor 72%, transparent);
-  transition-duration: 35ms;
+  font-size: 9px;
+  letter-spacing: .045em;
+  opacity: .58;
 }
 .logic-gate-wrap {
   display: flex;
   align-items: center;
   justify-content: center;
   min-width: 0;
+  padding-top: 2px;
 }
-.logic-gate { width: 82px; height: 54px; overflow: visible; }
+.logic-gate { width: 56px; height: 36px; overflow: visible; }
 .logic-gate-shape,
 .logic-gate-extra,
 .logic-gate-bubble,
@@ -1488,8 +1516,39 @@ button, input, textarea { font: inherit; }
   font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
   opacity: .72;
 }
+.logic-graph-node-state {
+  position: absolute;
+  right: 5px;
+  bottom: 4px;
+  min-width: 12px;
+  text-align: right;
+  font: 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  opacity: .42;
+}
+.logic-graph-output {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-self: start;
+  padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, currentColor 34%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--panel-bg, #0d0e0d) 93%, currentColor 7%);
+  font: 600 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: .12em;
+  transition: box-shadow 650ms ease-out, border-color 500ms ease-out;
+}
+.logic-graph-output.active {
+  border-color: currentColor;
+  box-shadow: 0 0 10px color-mix(in srgb, currentColor 34%, transparent);
+  transition-duration: 35ms;
+}
+.logic-graph-output.active .logic-graph-terminal {
+  background: currentColor;
+  box-shadow: 0 0 5px currentColor, 0 0 10px color-mix(in srgb, currentColor 60%, transparent);
+}
 @media (max-width: 760px) {
-  .logic-hardware-rack { grid-template-columns: 1fr; min-width: 260px; }
+  .logic-graph { grid-template-columns: repeat(var(--logic-graph-columns), minmax(88px, 108px)); column-gap: 28px; padding: 14px 16px; }
 }
 
 /* Session asset library. WAV files are retained as browser File objects here;

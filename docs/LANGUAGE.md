@@ -1837,27 +1837,29 @@ attached to that spread declaration.
 
 ## LOGIC
 
-`LOGIC` declares a reusable multi-output event circuit. It combines `RHYTHM`
-SET values and earlier nodes in the same object. Each named node becomes a
-public event output addressed as `object.node`.
+`LOGIC` declares a reusable event-domain graph with one public output. Internal
+nodes are private to the object and can be written in any order. The graph must
+explicitly select its final node with `OUT <node>`; consumers address the object
+only as `object.out`.
 
 ```text
 SET groove: RHYTHM pattern [1 5 9 13] steps 16
 SET accents: RHYTHM every euclidean 5/16
+SET fills: RHYTHM every 2 beats
 
 LOGIC gates with view:
-    xor fill [
-        groove,
-        accents
-    ]
+    or result [left, right]
 
-    and strong [
-        groove,
-        accents
-    ]
+    and right [fills, accents]
 
-    divider half [fill] by 2
+    xor left [groove, accents]
+
+    out result
 ```
+
+Node declaration order is not semantic. References can point to nodes written
+before or after the current node; the parser resolves the complete graph after
+the block has been read and evaluates it in dependency order.
 
 The current combinational operators are `and`, `or`, `xor`, `nand`, and
 `nor`. `divider`, `counter`, and `flipflop` are stateful nodes. `divider` and
@@ -1866,48 +1868,61 @@ Node inputs are event pulses, so combinational gates react to pulses that
 coincide in the same scheduler turn. `NOT` is intentionally deferred until
 Sonus Umbrae has an explicit sustained gate/boolean signal type.
 
+Every LOGIC block must form one connected acyclic graph. The parser rejects
+missing inputs, unknown sources, self/cyclic dependencies, an `OUT` that names
+an unknown node, and any node that does not contribute to the selected output.
+This makes orphan branches invalid rather than silently ignoring them.
+
 A LOGIC output can replace an inline timing clause on any property that already
 accepts `every`, `pattern`, or `rhythm`:
 
 ```text
 VOICE lead:
     sound sawtooth
-    pitch notes [C3 E3 G3] logic gates.fill
+    pitch notes [C3 E3 G3] logic gates.out
 
 VOICE bass:
     sound square
-    pitch notes [C2 G2] logic gates.half chance 80
+    pitch notes [C2 G2] logic gates.out chance 80
 ```
 
 `chance`, `coin`, and `loose` remain local consumer modifiers. They do not
 change the LOGIC circuit itself.
 
-`WITH VIEW` draws the object as an animated digital schematic. AND/OR/XOR and
-their inverted variants use conventional logic-gate outlines; divider,
-counter, and flip-flop use digital block symbols. Input conductors illuminate
-when pulses arrive, the gate flashes when it emits, and the named output wire
-lights when the corresponding `object.node` event is produced.
+`WITH VIEW` draws the internal graph as an animated digital schematic. Internal
+node wires can still illuminate for inspection, but only the selected final
+node emits the public `object.out` event.
 
 LOGIC is event-domain only in this first version. Inputs can be reusable `RHYTHM`
-SET values, inline timing expressions such as `every 1 beat`, `every euclidean 5/16`
-or `pattern [1 5 9 13]`, or earlier nodes in the same LOGIC object. For example:
+SET values, another LOGIC object's `.out`, inline timing expressions such as
+`every 1 beat`, `every euclidean 5/16` or `pattern [1 5 9 13]`, or any node in
+the same LOGIC graph. For example:
 
 ```text
 LOGIC gates:
-    xor fill [
-        groove,
-        every 1 beat
+    divider final [combined] by 2
+
+    xor combined [
+        pulse,
+        accent_gate
     ]
 
     and accent_gate [
         every euclidean 5/16,
         pattern [1 5 9 13]
     ]
+
+    xor pulse [
+        groove,
+        every 1 beat
+    ]
+
+    out final
 ```
 
-Inline LOGIC inputs describe trigger structure only; `chance`, `coin`, and `loose`
-remain consumer-local modifiers. MOD/audio-rate inputs and
-continuous comparators belong to a later control-signal extension.
+Inline LOGIC inputs describe trigger structure only; `chance`, `coin`, and
+`loose` remain consumer-local modifiers. MOD/audio-rate inputs and continuous
+comparators belong to a later control-signal extension.
 
 ## REGISTER
 

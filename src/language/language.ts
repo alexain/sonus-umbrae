@@ -11,6 +11,7 @@ import { ControlExpressionError, parseControlExpression, splitTopLevelCommaList,
 
 export { LanguageError, type LanguageDiagnostic } from './diagnostics';
 import { LanguageError, type LanguageDiagnostic } from './diagnostics';
+import { createLogicState, finalizeLogic, parseLogicStatement, type LogicState } from './parser/logic';
 import {
   DRUM_DEFAULTS,
   SONUS606_KIT,
@@ -111,8 +112,6 @@ type SourceDefinition =
   | { kind: 'logic'; display: string; internalName?: string };
 
 
-type LogicOperator = 'and' | 'or' | 'xor' | 'nand' | 'nor' | 'divider' | 'counter' | 'flipflop';
-type LogicState = { name: string; line: number; indentation: number; view: boolean; nodes: Set<string> };
 
 type EnvelopeCurve = 'lin' | 'log';
 type EnvelopeTimeUnit = 'ms' | 'sec' | 'beat';
@@ -2263,67 +2262,6 @@ function compileRegisterProperty(
   throw new LanguageError([{ line, message: `unknown REGISTER property '${property}'` }]);
 }
 
-function compileLogicNode(
-  logic: LogicState,
-  raw: string,
-  line: number,
-  sourceDefinitions: Map<string, SourceDefinition>,
-  emittedClockPreludes: Set<string>,
-): string {
-  const match = raw.trim().match(/^(and|or|xor|nand|nor|divider|counter|flipflop)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[(.*)\](?:\s+(?:by|count)\s+(\d+))?$/i);
-  if (!match) throw new LanguageError([{ line, message: 'LOGIC node expects <operator> <name> [inputs] [BY|COUNT n]' }]);
-  const operator = match[1].toLowerCase() as LogicOperator;
-  const name = match[2];
-  if (logic.nodes.has(name)) throw new LanguageError([{ line, message: `LOGIC '${logic.name}' already defines '${name}'` }]);
-  const rawInputs = match[3].trim();
-  const inputs = (rawInputs.includes(';') ? rawInputs.split(';') : rawInputs.split(','))
-    .map((item) => item.trim())
-    .filter(Boolean);
-  if (operator === 'divider' || operator === 'counter' || operator === 'flipflop') {
-    if (inputs.length !== 1) throw new LanguageError([{ line, message: `LOGIC ${operator.toUpperCase()} expects exactly one input` }]);
-  } else if (inputs.length < 2) {
-    throw new LanguageError([{ line, message: `LOGIC ${operator.toUpperCase()} expects at least two inputs` }]);
-  }
-  const param = match[4] ? Number(match[4]) : (operator === 'divider' || operator === 'counter' ? 2 : 0);
-  if ((operator === 'divider' || operator === 'counter') && (!Number.isInteger(param) || param < 2 || param > 64)) {
-    throw new LanguageError([{ line, message: `LOGIC ${operator.toUpperCase()} expects BY/COUNT 2..64` }]);
-  }
-  const preludes: string[] = [];
-  const resolved = inputs.map((input) => {
-    if (logic.nodes.has(input)) return { kind: 'node', name: input };
-
-    const source = sourceDefinitions.get(input);
-    let spec: EverySpec;
-    if (source) {
-      if (source.kind !== 'rhythm') {
-        throw new LanguageError([{ line, message: `LOGIC input '${input}' must be a RHYTHM SET, inline timing expression, or an earlier node in this LOGIC object` }]);
-      }
-      spec = source.spec;
-    } else {
-      const inlineEvery = input.match(/^every\s+(.+)$/i);
-      const inlinePattern = /^pattern\s+\[/i.test(input);
-      if (!inlineEvery && !inlinePattern) {
-        throw new LanguageError([{ line, message: `unknown LOGIC trigger source '${input}'` }]);
-      }
-      spec = parseEverySpec(inlineEvery ? inlineEvery[1] : input, line, sourceDefinitions);
-      if (spec.chance !== 100 || spec.drift || spec.loose) {
-        throw new LanguageError([{ line, message: 'inline LOGIC inputs do not accept CHANCE, COIN, or LOOSE; apply those modifiers to the consumer instead' }]);
-      }
-    }
-
-    if (spec.clockPrelude && !emittedClockPreludes.has(spec.clockPrelude)) {
-      emittedClockPreludes.add(spec.clockPrelude);
-      preludes.push(spec.clockPrelude);
-    }
-    const runtimeSpec = { ...spec, clockPrelude: '' };
-    return { kind: 'rhythm', name: input, spec: runtimeSpec };
-  });
-  logic.nodes.add(name);
-  sourceDefinitions.set(`${logic.name}.${name}`, { kind: 'logic', display: `LOGIC ${logic.name}.${name}` });
-  const directive = `__logicnode(${JSON.stringify(logic.name)},${JSON.stringify(name)},${JSON.stringify(operator)},${JSON.stringify(JSON.stringify(resolved))},${param});`;
-  return preludes.length > 0 ? `${preludes.join('\n')}\n${directive}` : directive;
-}
-
 function requireSeqReady(seq: SeqState | null, diagnostics: LanguageDiagnostic[]): void {
   if (!seq) return;
   if (!seq.modelId) diagnostics.push({ line: seq.line, message: `SEQ '${seq.name}' requires a model` });
@@ -4186,6 +4124,48 @@ export function compileLanguageSource(source: string, options: { hasSampleAsset?
   let currentMod: ModState | null = null;
   let currentDrumkit: DrumkitState | null = null;
 
+  const finalizeCurrentLogic = (logic: LogicState): void => {
+    const result = finalizeLogic(logic, (input, line) => {
+      const source = sourceDefinitions.get(input);
+      let spec: EverySpec;
+      if (source) {
+        if (source.kind !== 'rhythm' && source.kind !== 'logic') {
+          throw new LanguageError([{ line, message: `LOGIC input '${input}' must be a RHYTHM SET, LOGIC output, inline timing expression, or another node in this LOGIC object` }]);
+        }
+        if (source.kind === 'logic') {
+          spec = {
+            amount: 1, unit: 'beat', chance: 100, drift: false, loose: false,
+            clockSource: `__logic__${input}`, clockPrelude: '', euclidean: null,
+          };
+        } else {
+          spec = source.spec;
+        }
+      } else {
+        const inlineEvery = input.match(/^every\s+(.+)$/i);
+        const inlinePattern = /^pattern\s+\[/i.test(input);
+        if (!inlineEvery && !inlinePattern) {
+          throw new LanguageError([{ line, message: `unknown LOGIC trigger source '${input}'` }]);
+        }
+        spec = parseEverySpec(inlineEvery ? inlineEvery[1] : input, line, sourceDefinitions);
+        if (spec.chance !== 100 || spec.drift || spec.loose) {
+          throw new LanguageError([{ line, message: 'inline LOGIC inputs do not accept CHANCE, COIN, or LOOSE; apply those modifiers to the consumer instead' }]);
+        }
+      }
+
+      const preludes: string[] = [];
+      if (spec.clockPrelude && !emittedLogicClockPreludes.has(spec.clockPrelude)) {
+        emittedLogicClockPreludes.add(spec.clockPrelude);
+        preludes.push(spec.clockPrelude);
+      }
+      return { input: { kind: 'rhythm' as const, name: input, spec: { ...spec, clockPrelude: '' } }, preludes };
+    });
+    const firstNode = [...logic.nodes.values()][0];
+    if (!firstNode) return;
+    const firstIndex = firstNode.line - 1;
+    output[firstIndex] = [...result.preludes, ...result.directives].join('\n');
+    sourceDefinitions.set(`${logic.name}.out`, { kind: 'logic', display: `LOGIC ${logic.name}.out` });
+  };
+
   for (let index = 0; index < lines.length; index += 1) {
     const lineNumber = index + 1;
     const raw = lines[index];
@@ -4205,7 +4185,11 @@ export function compileLanguageSource(source: string, options: { hasSampleAsset?
     const indentation = withoutComment.length - withoutComment.trimStart().length;
 
     try {
-      if (currentLogic && indentation <= currentLogic.indentation) currentLogic = null;
+      if (currentLogic && indentation <= currentLogic.indentation) {
+        const completedLogic = currentLogic;
+        currentLogic = null;
+        finalizeCurrentLogic(completedLogic);
+      }
       if (currentMod && indentation <= currentMod.indentation) currentMod = null;
       if (currentDrumkit && indentation <= currentDrumkit.indentation) { if (!currentDrumkit.kit) diagnostics.push({ line: currentDrumkit.line, message: `DRUMKIT '${currentDrumkit.name}' requires KIT` }); currentDrumkit = null; }
       if (currentSeq && indentation <= currentSeq.indentation) { requireSeqReady(currentSeq, diagnostics); currentSeq = null; }
@@ -4284,7 +4268,7 @@ export function compileLanguageSource(source: string, options: { hasSampleAsset?
           throw new LanguageError([{ line: lineNumber, message: `LOGIC '${name}' conflicts with an existing object or variable` }]);
         }
         logics.add(name);
-        currentLogic = { name, line: lineNumber, indentation, view: Boolean(logicMatch[2]), nodes: new Set() };
+        currentLogic = createLogicState(name, lineNumber, indentation, Boolean(logicMatch[2]));
         output[index] = `__logic(${JSON.stringify(name)},${logicMatch[2] ? 'true' : 'false'});`;
         continue;
       }
@@ -4311,7 +4295,8 @@ export function compileLanguageSource(source: string, options: { hasSampleAsset?
       }
 
       if (currentLogic && indentation > currentLogic.indentation) {
-        output[index] = compileLogicNode(currentLogic, trimmed, lineNumber, sourceDefinitions, emittedLogicClockPreludes);
+        parseLogicStatement(currentLogic, trimmed, lineNumber);
+        output[index] = '';
         continue;
       }
 
@@ -4731,6 +4716,13 @@ export function compileLanguageSource(source: string, options: { hasSampleAsset?
         message: 'each top-level statement must begin with VOICE, FX, FILTER, MOD, SEQ, REGISTER, DRUMKIT, LOGIC, SET, CLOCK, MAIN, or OUT',
       }]);
     } catch (error) {
+      if (error instanceof LanguageError) diagnostics.push(...error.diagnostics);
+      else throw error;
+    }
+  }
+
+  if (currentLogic) {
+    try { finalizeCurrentLogic(currentLogic); } catch (error) {
       if (error instanceof LanguageError) diagnostics.push(...error.diagnostics);
       else throw error;
     }

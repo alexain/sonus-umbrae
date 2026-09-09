@@ -1,4 +1,4 @@
-.object-builder-launcher{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:5;border:1px solid var(--line);background:transparent;color:var(--phosphor);font:inherit;font-size:12px;letter-spacing:.06em;padding:5px 12px;cursor:pointer}.object-builder-launcher:hover,.object-builder-launcher:focus-visible{border-color:var(--phosphor);outline:none;background:rgba(215,169,46,.06)}
+.object-builder-launcher{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:5;border:1px dashed var(--phosphor);background:transparent;color:var(--phosphor);font:inherit;font-size:12px;letter-spacing:.06em;padding:5px 12px;cursor:pointer}.object-builder-launcher:hover,.object-builder-launcher:focus-visible{border-color:var(--phosphor);outline:none;background:rgba(215,169,46,.06);color:var(--phosphor)}
 .object-builder-overlay{position:fixed;inset:0;z-index:40;display:grid;place-items:center;background:rgba(0,0,0,.72);padding:28px}.object-builder-overlay.hidden{display:none}.object-builder-dialog{width:min(1120px,94vw);height:min(760px,88vh);display:grid;grid-template-rows:auto 1fr auto;background:var(--bg);border:1px solid var(--line);box-shadow:0 0 32px rgba(0,0,0,.65)}
 .object-builder-head,.object-builder-foot{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line)}.object-builder-head strong{letter-spacing:.08em}.object-builder-head span{margin-left:auto;color:var(--phosphor-dim);font-size:12px}.object-builder-foot{border-top:1px solid var(--line);border-bottom:0;justify-content:flex-end}.object-builder-body{min-height:0;display:grid;grid-template-columns:220px minmax(360px,1fr) 300px}.object-builder-kinds{overflow:auto;border-right:1px solid var(--line);padding:10px}.object-builder-kind{display:block;width:100%;text-align:left;border:0;border-left:2px solid transparent;background:transparent;color:var(--phosphor-dim);font:inherit;padding:9px 10px;cursor:pointer}.object-builder-kind:hover,.object-builder-kind.active{color:var(--phosphor);border-left-color:var(--phosphor);background:rgba(215,169,46,.05)}
 .object-builder-form{overflow:auto;padding:18px 20px}.object-builder-form h2{margin:0 0 18px;font-size:18px;font-weight:500}.object-builder-row{display:grid;grid-template-columns:150px 1fr;align-items:center;gap:12px;margin:0 0 13px}.object-builder-row label{color:var(--phosphor-dim)}.object-builder-row input,.object-builder-row select{width:100%;box-sizing:border-box;border:1px solid var(--line);background:transparent;color:var(--phosphor);font:inherit;padding:6px 8px}.object-builder-row input[type=checkbox]{width:auto;justify-self:start}.object-builder-info{overflow:auto;border-left:1px solid var(--line);padding:18px}.object-builder-info h3{margin:0 0 12px;font-size:13px;letter-spacing:.08em}.object-builder-diagram{min-height:150px;display:grid;place-items:center;border:1px solid var(--line);margin-bottom:16px;color:var(--phosphor-dim);text-align:center;white-space:pre-line}.object-builder-code{white-space:pre-wrap;border:1px solid var(--line);padding:12px;min-height:110px;color:var(--phosphor);font:inherit;font-size:12px}.object-builder-button{border:1px solid var(--line);background:transparent;color:var(--phosphor);font:inherit;padding:7px 14px;cursor:pointer}.object-builder-button:hover{border-color:var(--phosphor)}.object-builder-button.primary{background:rgba(215,169,46,.07)}
@@ -469,3 +469,125 @@
   .object-builder-logic-workspace { grid-template-columns: 1fr; }
   .object-builder-logic-timing-pane { border-left: 0; border-top: 1px solid var(--line); padding: 18px 0 0; min-height: 0; }
 }
+
+/* LOGIC graph builder ---------------------------------------------------- */
+.object-builder-logic-graph {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  background-image:
+    linear-gradient(color-mix(in srgb, var(--line) 24%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--line) 24%, transparent) 1px, transparent 1px);
+  background-size: 16px 16px;
+}
+.object-builder-logic-graph .object-builder-logic-card {
+  position: relative;
+  min-height: 58px;
+  background: var(--bg);
+}
+.object-builder-logic-card.output {
+  border-color: var(--phosphor);
+  box-shadow: inset 3px 0 0 var(--phosphor);
+}
+.object-builder-logic-card.output::after {
+  content: 'OUT';
+  position: absolute;
+  top: 5px;
+  right: 7px;
+  color: var(--phosphor);
+  font-size: 9px;
+  letter-spacing: .12em;
+}
+.object-builder-logic-card.open-branch {
+  border-style: dashed;
+}
+.object-builder-logic-status {
+  grid-column: 1 / -1;
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  font-size: 10px;
+  letter-spacing: .08em;
+}
+.object-builder-logic-status.valid { color: var(--phosphor); }
+.object-builder-logic-status.invalid { color: #d86f5f; border-color: currentColor; }
+@media(max-width:1050px) {
+  .object-builder-logic-graph { grid-template-columns: 1fr; }
+}
+
+
+/* LOGIC builder node canvas --------------------------------------------- */
+.object-builder-logic-canvas {
+  position: relative;
+  grid-template-columns: repeat(var(--logic-columns, 3), minmax(104px, 1fr));
+  grid-auto-rows: minmax(72px, auto);
+  column-gap: 42px;
+  row-gap: 18px;
+  min-width: max-content;
+  overflow: auto;
+  align-items: center;
+}
+.object-builder-logic-wires {
+  position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%;
+  overflow: visible; pointer-events: none;
+}
+.object-builder-logic-wires path {
+  fill: none; stroke: color-mix(in srgb, var(--phosphor) 58%, var(--line));
+  stroke-width: 1.35; vector-effect: non-scaling-stroke;
+}
+.object-builder-logic-wires path.output { stroke: var(--phosphor); stroke-width: 1.7; }
+.object-builder-logic-source,
+.object-builder-logic-node,
+.object-builder-logic-out-terminal,
+.object-builder-logic-status { position: relative; z-index: 2; }
+.object-builder-logic-source {
+  min-width: 88px; min-height: 34px; display: grid;
+  grid-template-columns: minmax(0,1fr) 10px; gap: 8px; align-items: center;
+  padding: 6px 8px; border: 1px solid var(--line); background: var(--bg);
+  color: var(--phosphor-dim); font-size: 10px;
+}
+.object-builder-logic-source span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.object-builder-logic-source i,
+.object-builder-logic-input-sockets i,
+.object-builder-logic-output-socket,
+.object-builder-logic-out-terminal i {
+  display: block; box-sizing: border-box; width: 8px; height: 8px;
+  border: 1px solid var(--phosphor); border-radius: 50%; background: var(--bg);
+}
+.object-builder-logic-node {
+  min-width: 104px; min-height: 62px !important;
+  grid-template-columns: 10px minmax(0,1fr) 10px !important;
+  gap: 7px !important; padding: 7px 8px !important;
+}
+.object-builder-logic-node > div:nth-child(2) { display: grid; gap: 2px; min-width: 0; }
+.object-builder-logic-node strong { font-size: 12px; }
+.object-builder-logic-node-name { font-size: 10px !important; color: var(--phosphor-dim); }
+.object-builder-logic-node small { color: #35d6d3; font-size: 9px; letter-spacing: .05em; }
+.object-builder-logic-input-sockets {
+  align-self: stretch; display: flex !important; flex-direction: column;
+  justify-content: space-evenly; gap: 3px !important;
+}
+.object-builder-logic-output-socket { justify-self: end; }
+.object-builder-logic-node-actions {
+  position: absolute; left: 5px; right: 5px; bottom: -18px;
+  display: flex !important; justify-content: center; gap: 4px !important;
+  opacity: 0; transition: opacity .1s ease;
+}
+.object-builder-logic-node:hover .object-builder-logic-node-actions,
+.object-builder-logic-node:focus-within .object-builder-logic-node-actions { opacity: 1; }
+.object-builder-logic-node-actions button { padding: 2px 5px; font-size: 8px; background: var(--bg); }
+.object-builder-logic-out-terminal {
+  min-width: 58px; display: grid; grid-template-columns: 8px 1fr; gap: 8px;
+  align-items: center; padding: 8px; border: 1px solid var(--phosphor);
+  background: var(--bg); font-size: 10px; letter-spacing: .12em;
+}
+.object-builder-logic-out-terminal.invalid {
+  border-style: dashed; color: var(--phosphor-dim); border-color: var(--line);
+}
+.object-builder-logic-out-terminal.invalid i { border-color: var(--line); }
+.object-builder-logic-canvas .object-builder-logic-status { grid-row: auto; margin-top: 8px; }

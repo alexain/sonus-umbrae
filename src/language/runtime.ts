@@ -182,6 +182,7 @@ export interface LogicViewNodeState {
 export interface LogicViewState {
   name: string;
   revision: number;
+  outputNode: string;
   nodes: LogicViewNodeState[];
 }
 
@@ -1062,7 +1063,7 @@ export class SonusRuntime {
     const languageLives = new Map<string, LanguageLifeDefinition>();
     const languageConstellations = new Map<string, LanguageConstellationDefinition>();
     const languageSnakes = new Map<string, LanguageSnakeDefinition>();
-    const languageLogics = new Map<string, { view: boolean; nodes: LanguageLogicNodeDefinition[] }>();
+    const languageLogics = new Map<string, { view: boolean; nodes: LanguageLogicNodeDefinition[]; outputNode: string | null }>();
     const languageSnakeReaders = new Map<string, LanguageSnakeReaderDefinition>();
     const languageConstellationReaders = new Map<string, LanguageConstellationReaderDefinition>();
     const languageLifeReaders = new Map<string, LanguageLifeReaderDefinition>();
@@ -1111,11 +1112,17 @@ export class SonusRuntime {
       const controlParameter = directives.parseLanguageControlParameterDirective(line);
       if (controlParameter) { languageControlParameters.push(controlParameter); continue; }
       const logicDeclaration = directives.parseLanguageLogicDirective(line);
-      if (logicDeclaration) { languageLogics.set(logicDeclaration.name, { view: logicDeclaration.view, nodes: [] }); continue; }
+      if (logicDeclaration) { languageLogics.set(logicDeclaration.name, { view: logicDeclaration.view, nodes: [], outputNode: null }); continue; }
       const logicNode = directives.parseLanguageLogicNodeDirective(line);
       if (logicNode) {
         const logic = languageLogics.get(logicNode.owner);
         if (logic) logic.nodes.push(logicNode);
+        continue;
+      }
+      const logicOutput = directives.parseLanguageLogicOutputDirective(line);
+      if (logicOutput) {
+        const logic = languageLogics.get(logicOutput.owner);
+        if (logic) logic.outputNode = logicOutput.node;
         continue;
       }
 
@@ -1900,7 +1907,7 @@ export class SonusRuntime {
     // source order. All module declarations already exist, so references between
     // modules are still independent from declaration order.
     for (const { source: line, line: lineNumber } of lines) {
-      if (directives.parseLanguageControlParameterDirective(line) || directives.parseLanguageLogicDirective(line) || directives.parseLanguageLogicNodeDirective(line) || directives.parseLanguageCompositePitch(line) || directives.parseLanguageCompositeTune(line) || directives.parseLanguageCompositeEdge(line) || directives.parseLanguageCompositeMix(line) || directives.parseLanguageCompositeOutput(line) || parseLanguageDrumkitDirective(line) || parseLanguageDrumkitMetaDirective(line) || parseLanguageDrumSlotDirective(line) || parseLanguageDrumSampleSlotDirective(line) || parseLanguageSampleSlicesDirective(line) || parseLanguageSampleSliceDirective(line) || directives.parseLanguageTuningDirective(line) !== null || directives.parseLanguageClockParentDirective(line) || directives.parseLanguageClockFeelDirective(line) || directives.parseLanguageTuringDeclaration(line) || directives.parseLanguageTuringView(line) || directives.parseLanguageSeqModel(line) || directives.parseLanguageSeqWeights(line) || directives.parseLanguageConstellationParam(line) || directives.parseLanguageConstellationOctaves(line) || directives.parseLanguageConstellationReader(line) || directives.parseLanguageSnakeSize(line) || directives.parseLanguageSnakeMovement(line) || directives.parseLanguageSnakeMatrix(line) || directives.parseLanguageSnakeReader(line) || directives.parseLanguageSeqSize(line) || directives.parseLanguageLifeDensity(line) || directives.parseLanguageLifeReader(line) || directives.parseLanguageLifeEvolve(line) || directives.parseLanguageTuringLength(line) || directives.parseLanguageTuringChange(line) || directives.parseLanguageTuringValues(line) || directives.parseLanguageTuringVoice(line) || directives.parseLanguageInlinePianoDirective(line) || directives.parseLanguageInlineScalarDirective(line) || directives.parseLanguageVcaDirective(line, lineNumber) || directives.parseLanguageEnvelopeDirective(line, lineNumber) || directives.parseLanguageFxMetadata(line) || directives.parseLanguageDelayTime(line) || directives.parseLanguageDelayParam(line, lineNumber) || directives.parseLanguageDelayParamDefault(line, lineNumber) || directives.parseLanguageDelayParamCycle(line, lineNumber) || directives.parseLanguageFxParameterCycleDirective(line, lineNumber) || directives.parseLanguageFxParameterDefaultDirective(line, lineNumber) || directives.parseLanguageFxPitchSequenceDirective(line) || directives.parseLanguageFxPitchCycleDirective(line) || directives.parseLanguageFxModulationDirective(line, lineNumber) || directives.parseLanguageGenerativeCycleDirective(line, lineNumber) || directives.parseLanguageGenerativeDefaultDirective(line, lineNumber) || directives.parseLanguageModMetadata(line) || directives.parseLanguageModSetDirective(line, lineNumber) || directives.parseLanguageParameterDefaultDirective(line, lineNumber) || directives.parseLanguageObjectEveryDirective(line) || directives.parseLanguageDriveEvery(line) || directives.parseLanguageMasterClockDirective(line, lineNumber) || directives.parseLanguageFilterSequenceDirective(line) || directives.parseLanguageSequenceDirective(line) || directives.parseLanguageCycleDirective(line) || directives.parseLanguageSetCycleDirective(line) || directives.parseLanguageParameterCycleDirective(line, lineNumber) || directives.parseLanguageFromDirective(line)) continue;
+      if (directives.parseLanguageControlParameterDirective(line) || directives.parseLanguageLogicDirective(line) || directives.parseLanguageLogicNodeDirective(line) || directives.parseLanguageLogicOutputDirective(line) || directives.parseLanguageCompositePitch(line) || directives.parseLanguageCompositeTune(line) || directives.parseLanguageCompositeEdge(line) || directives.parseLanguageCompositeMix(line) || directives.parseLanguageCompositeOutput(line) || parseLanguageDrumkitDirective(line) || parseLanguageDrumkitMetaDirective(line) || parseLanguageDrumSlotDirective(line) || parseLanguageDrumSampleSlotDirective(line) || parseLanguageSampleSlicesDirective(line) || parseLanguageSampleSliceDirective(line) || directives.parseLanguageTuningDirective(line) !== null || directives.parseLanguageClockParentDirective(line) || directives.parseLanguageClockFeelDirective(line) || directives.parseLanguageTuringDeclaration(line) || directives.parseLanguageTuringView(line) || directives.parseLanguageSeqModel(line) || directives.parseLanguageSeqWeights(line) || directives.parseLanguageConstellationParam(line) || directives.parseLanguageConstellationOctaves(line) || directives.parseLanguageConstellationReader(line) || directives.parseLanguageSnakeSize(line) || directives.parseLanguageSnakeMovement(line) || directives.parseLanguageSnakeMatrix(line) || directives.parseLanguageSnakeReader(line) || directives.parseLanguageSeqSize(line) || directives.parseLanguageLifeDensity(line) || directives.parseLanguageLifeReader(line) || directives.parseLanguageLifeEvolve(line) || directives.parseLanguageTuringLength(line) || directives.parseLanguageTuringChange(line) || directives.parseLanguageTuringValues(line) || directives.parseLanguageTuringVoice(line) || directives.parseLanguageInlinePianoDirective(line) || directives.parseLanguageInlineScalarDirective(line) || directives.parseLanguageVcaDirective(line, lineNumber) || directives.parseLanguageEnvelopeDirective(line, lineNumber) || directives.parseLanguageFxMetadata(line) || directives.parseLanguageDelayTime(line) || directives.parseLanguageDelayParam(line, lineNumber) || directives.parseLanguageDelayParamDefault(line, lineNumber) || directives.parseLanguageDelayParamCycle(line, lineNumber) || directives.parseLanguageFxParameterCycleDirective(line, lineNumber) || directives.parseLanguageFxParameterDefaultDirective(line, lineNumber) || directives.parseLanguageFxPitchSequenceDirective(line) || directives.parseLanguageFxPitchCycleDirective(line) || directives.parseLanguageFxModulationDirective(line, lineNumber) || directives.parseLanguageGenerativeCycleDirective(line, lineNumber) || directives.parseLanguageGenerativeDefaultDirective(line, lineNumber) || directives.parseLanguageModMetadata(line) || directives.parseLanguageModSetDirective(line, lineNumber) || directives.parseLanguageParameterDefaultDirective(line, lineNumber) || directives.parseLanguageObjectEveryDirective(line) || directives.parseLanguageDriveEvery(line) || directives.parseLanguageMasterClockDirective(line, lineNumber) || directives.parseLanguageFilterSequenceDirective(line) || directives.parseLanguageSequenceDirective(line) || directives.parseLanguageCycleDirective(line) || directives.parseLanguageSetCycleDirective(line) || directives.parseLanguageParameterCycleDirective(line, lineNumber) || directives.parseLanguageFromDirective(line)) continue;
 
       const gainDeclaration = parseGainDeclaration(line);
       if (gainDeclaration) {
@@ -4827,6 +4834,7 @@ export class SonusRuntime {
         this.logicViews.set(logicName, {
           name: logicName,
           revision: 0,
+          outputNode: logic.outputNode ?? logic.nodes[logic.nodes.length - 1]?.name ?? '',
           nodes: logic.nodes.map((node) => ({
             name: node.name,
             operator: node.operator,
@@ -4857,6 +4865,11 @@ export class SonusRuntime {
           for (const node of logic.nodes) {
             const activeNames = pendingInputs.get(node.name) ?? new Set<string>();
             const values = node.inputs.map((input) => input.kind === 'node' ? Boolean(nodeOutputs.get(input.name)) : activeNames.has(input.name));
+            for (let inputIndex = 0; inputIndex < node.inputs.length; inputIndex += 1) {
+              if (node.inputs[inputIndex].kind === 'node' && values[inputIndex]) {
+                this.logicPulseUntil.set(`${logicName}:in:${node.name}:${node.inputs[inputIndex].name}`, performance.now() + 140);
+              }
+            }
             let output = false;
             if (node.operator === 'and') output = values.every(Boolean);
             else if (node.operator === 'or') output = values.some(Boolean);
@@ -4880,7 +4893,7 @@ export class SonusRuntime {
             if (output) {
               changed = true;
               this.logicPulseUntil.set(`${logicName}:out:${node.name}`, performance.now() + 180);
-              this.scheduler.emitTrigger(`__logic__${logicName}.${node.name}`);
+              if (node.name === logic.outputNode) this.scheduler.emitTrigger(`__logic__${logicName}.out`);
             }
           }
           pendingInputs.clear();

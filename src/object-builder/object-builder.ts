@@ -43,10 +43,16 @@ export class ObjectBuilder {
   isOpen(): boolean { return !this.overlay.classList.contains('hidden'); }
 
   private mount(): void {
-    const launch = document.createElement('button');
-    launch.type = 'button'; launch.className = 'object-builder-launcher'; launch.textContent = '+ ADD OBJECT';
-    launch.title = 'Add Object (Cmd/Ctrl+Shift+A)'; launch.addEventListener('click', () => this.open());
-    this.options.toolbar.append(launch);
+    const launch = this.options.toolbar.querySelector<HTMLButtonElement>('#object-builder-launcher');
+    if (!launch) throw new Error('Missing #object-builder-launcher');
+    launch.addEventListener('pointerdown', (event) => {
+      event.stopPropagation();
+    });
+    launch.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      this.open();
+    });
 
     this.overlay = document.createElement('div');
     this.overlay.className = 'object-builder-overlay hidden';

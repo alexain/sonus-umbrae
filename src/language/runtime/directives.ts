@@ -83,6 +83,12 @@ export function parseLanguageLogicNodeDirective(line: string): LanguageLogicNode
   }
 }
 
+export function parseLanguageLogicOutputDirective(line: string): { owner: string; node: string } | null {
+  const match = line.match(/^__logicout\("([A-Za-z_]\w*)","([A-Za-z_]\w*)"\)$/);
+  if (!match) return null;
+  return { owner: match[1], node: match[2] };
+}
+
 export function parseLanguageRegisterDeclaration(line: string): string | null {
   return line.match(/^__register\("([A-Za-z_]\w*)"\)$/)?.[1] ?? null;
 }

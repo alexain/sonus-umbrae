@@ -24,6 +24,7 @@ import { updateSampleWaveformViews as renderSampleWaveformViews } from './ui/sam
 import { SchemeRenderer } from './ui/scheme';
 import { ScopeRenderer } from './ui/scopes';
 import { MonitorPanels } from './ui/monitor-panels';
+import { ObjectBuilder } from './object-builder/object-builder';
 import {
   buildConstellationPanel,
   buildDrumkitPanel,
@@ -48,6 +49,7 @@ app.innerHTML = `
   <main class="machine" aria-label="Sonus Umbrae live coding environment">
     <header class="statusbar">
       <span class="brand">SONUS UMBRAE / ${VERSION}</span>
+      <button id="object-builder-launcher" class="object-builder-launcher" type="button" title="Add Object (Cmd/Ctrl+Shift+A)">+ ADD OBJECT</button>
       <span class="status-item"><span class="label">CLK</span> <span id="clock-status" class="disabled">--.-</span></span>
       <span class="status-item"><span class="label">AUDIO ENGINE</span> <span id="live-dot" class="dot off" aria-label="engine stopped"></span></span>
       <span class="status-item"><span class="label">LIVE</span> <span id="code-status" class="disabled" aria-label="code stopped">○</span></span>
@@ -440,6 +442,8 @@ inlineViewStyle.textContent = `
 document.head.append(inlineViewStyle);
 
 const editor = must<HTMLTextAreaElement>('editor');
+const statusbar = document.querySelector<HTMLElement>('.statusbar');
+if (!statusbar) throw new Error('Missing .statusbar');
 const syntaxLayer = must<HTMLElement>('syntax-layer');
 const inlineViewLayer = must<HTMLElement>('inline-view-layer');
 const liveControlLayer = must<HTMLElement>('live-control-layer');
@@ -596,6 +600,12 @@ editorVisual = new EditorVisualLayer({
   phosphorLayer,
   isCaretVisible: () => shell.screen === 'live' && !shell.commandMode,
   inlineSpacerBeforePhysicalLine,
+});
+
+const objectBuilder = new ObjectBuilder({
+  editor,
+  toolbar: statusbar,
+  evaluateAfterAdd: recompileLiveCode,
 });
 
 appConfig = readAppConfig();
@@ -1526,9 +1536,10 @@ function drawScopes(): void {
   const lifeGrids = document.querySelectorAll<HTMLElement>('.life-grid');
   const constellationFields = document.querySelectorAll<SVGSVGElement>('.constellation-field');
   const snakeFields = document.querySelectorAll<HTMLElement>('.snake-field');
+  const logicCircuits = document.querySelectorAll<HTMLElement>('.logic-circuit');
   const drumkitPatterns = document.querySelectorAll<HTMLElement>('.drumkit-pattern');
   const sampleWaveforms = document.querySelectorAll<HTMLCanvasElement>('.sample-waveform-canvas');
-  if (canvases.length === 0 && liveValues.length === 0 && turingRegisters.length === 0 && lifeGrids.length === 0 && constellationFields.length === 0 && snakeFields.length === 0 && drumkitPatterns.length === 0 && sampleWaveforms.length === 0) return;
+  if (canvases.length === 0 && liveValues.length === 0 && turingRegisters.length === 0 && lifeGrids.length === 0 && constellationFields.length === 0 && snakeFields.length === 0 && logicCircuits.length === 0 && drumkitPatterns.length === 0 && sampleWaveforms.length === 0) return;
 
   scopeRenderer.drawAll();
 
@@ -2695,6 +2706,22 @@ document.addEventListener('keydown', (event) => {
       configNavigator.activate(0);
       return;
     }
+  }
+
+  if (objectBuilder.isOpen()) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      objectBuilder.close();
+    }
+    return;
+  }
+
+  if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 'a' && shell.screen === 'live') {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    objectBuilder.open();
+    return;
   }
 
   if (shell.commandMode) return;
