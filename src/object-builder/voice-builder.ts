@@ -62,6 +62,11 @@ export class VoiceBuilderPanel {
   private family = 'oscillator';
   private model = 'sine';
   private soundParams = new Map<string, SoundParamValue>();
+  private sampleRegionStart = 0;
+  private sampleRegionEnd = 100;
+  private sampleLoop = false;
+  private sampleReverse = false;
+  private sampleSlices: number | null = null;
   private pitchKind: PitchKind = 'notes';
   private pitchValue = 'pitch notes [C3]';
   private behaviorKind: BehaviorKind = 'none';
@@ -81,6 +86,7 @@ export class VoiceBuilderPanel {
     private readonly form: HTMLElement,
     private readonly editor: HTMLTextAreaElement,
     private readonly onChange: () => void,
+    private readonly getSampleAssetAliases: () => readonly string[],
     private readonly initialName = 'myVoice',
   ) {
     this.routing = new RoutingPanel({
@@ -136,12 +142,22 @@ export class VoiceBuilderPanel {
       const models = this.modelsForFamily(this.family);
       this.model = models[0]?.id ?? 'sine';
       this.soundParams.clear();
+      this.sampleRegionStart = 0;
+      this.sampleRegionEnd = 100;
+      this.sampleLoop = false;
+      this.sampleReverse = false;
+      this.sampleSlices = null;
       this.routing.reset();
       syncModelSelect(); this.onChange();
     });
     modelSelect.addEventListener('change', () => {
       this.model = modelSelect.value;
       this.soundParams.clear();
+      this.sampleRegionStart = 0;
+      this.sampleRegionEnd = 100;
+      this.sampleLoop = false;
+      this.sampleReverse = false;
+      this.sampleSlices = null;
       this.routing.reset();
       this.updateCustomizeRow(); this.onChange();
     });
@@ -165,8 +181,20 @@ export class VoiceBuilderPanel {
     const withView = this.checked('view') ? ' with view' : '';
     const lines = [`VOICE ${name}${withView}:`];
     lines.push(`    sound ${this.soundExpression()}`);
+    if (this.model === 'sample') {
+      let region = `    region ${this.sampleRegionStart} ${this.sampleRegionEnd}`;
+      if (this.sampleSlices !== null) {
+        region += ` with slices ${this.sampleSlices}`;
+      } else {
+        const modifiers: string[] = [];
+        if (this.sampleLoop) modifiers.push('loop');
+        if (this.sampleReverse) modifiers.push('reverse');
+        if (modifiers.length) region += ` with ${modifiers.join(', ')}`;
+      }
+      lines.push(region);
+    }
     for (const [id, state] of this.soundParams) {
-      if (id === 'lpg' || id === 'polyphony') continue;
+      if (id === 'lpg' || id === 'polyphony' || id === 'asset') continue;
       if (state.value === '' || state.value === false) continue;
       lines.push(`    ${state.live ? 'live ' : ''}${id} ${state.value}`);
     }
@@ -230,11 +258,25 @@ export class VoiceBuilderPanel {
     const body = document.createElement('div'); body.className = 'object-builder-secondary-fields';
     const draft = new Map(this.soundParams);
     for (const parameter of parameters) {
+      if (this.model === 'sample' && ['region', 'slices', 'loop', 'reverse'].includes(parameter.id)) continue;
       const row = document.createElement('div'); row.className = 'object-builder-secondary-param';
       const label = document.createElement('label'); appendSoundParameterLabel(label, this.model, parameter);
       let control: HTMLInputElement | HTMLSelectElement;
       if (parameter.control === 'toggle') {
         control = document.createElement('input'); control.type = 'checkbox'; control.checked = draft.get(parameter.id)?.value === true;
+      } else if (parameter.control === 'sample') {
+        control = document.createElement('select');
+        const aliases = [...new Set(this.getSampleAssetAliases())];
+        if (!aliases.length) {
+          control.append(new Option('No samples loaded', ''));
+          control.disabled = true;
+        } else {
+          control.append(new Option('— choose sample —', ''));
+          for (const alias of aliases) control.append(new Option(alias, alias));
+        }
+        const current = String(draft.get(parameter.id)?.value ?? '');
+        if (current && !aliases.includes(current)) control.append(new Option(`${current} — unavailable`, current));
+        control.value = current;
       } else if (parameter.control === 'select') {
         control = document.createElement('select');
         for (const option of parameter.options ?? []) control.append(new Option(option, option));
@@ -267,8 +309,177 @@ export class VoiceBuilderPanel {
       control.addEventListener('change', sync);
       live.addEventListener('change', sync);
     }
+
+    let regionStart = this.sampleRegionStart;
+    let regionEnd = this.sampleRegionEnd;
+    let sampleLoop = this.sampleLoop;
+    let sampleReverse = this.sampleReverse;
+    let sampleSlices = this.sampleSlices;
+    let lastSlices = this.sampleSlices ?? 16;
+
+    if (this.model === 'sample') {
+      const playback = document.createElement('section');
+      playback.className = 'object-builder-sample-playback';
+
+      const heading = document.createElement('h3');
+      heading.textContent = 'SAMPLE PLAYBACK';
+      playback.append(heading);
+
+      const regionRow = document.createElement('div');
+      regionRow.className = 'object-builder-sample-playback-row object-builder-sample-region-row';
+
+      const regionLabel = document.createElement('label');
+      regionLabel.textContent = 'Region';
+
+      const range = document.createElement('div');
+      range.className = 'object-builder-sample-region';
+
+      const values = document.createElement('div');
+      values.className = 'object-builder-sample-region-values';
+      const startValue = document.createElement('output');
+      const endValue = document.createElement('output');
+
+      const track = document.createElement('div');
+      track.className = 'object-builder-sample-region-track';
+
+      const start = document.createElement('input');
+      start.type = 'range';
+      start.min = '0';
+      start.max = '100';
+      start.step = '1';
+      start.value = String(regionStart);
+      start.setAttribute('aria-label', 'Region start');
+
+      const end = document.createElement('input');
+      end.type = 'range';
+      end.min = '0';
+      end.max = '100';
+      end.step = '1';
+      end.value = String(regionEnd);
+      end.setAttribute('aria-label', 'Region end');
+
+      const syncRegion = (source?: 'start' | 'end'): void => {
+        let nextStart = Number(start.value);
+        let nextEnd = Number(end.value);
+        if (nextStart > nextEnd) {
+          if (source === 'start') nextStart = nextEnd;
+          else nextEnd = nextStart;
+        }
+        regionStart = nextStart;
+        regionEnd = nextEnd;
+        start.value = String(nextStart);
+        end.value = String(nextEnd);
+        startValue.textContent = `${nextStart}%`;
+        endValue.textContent = `${nextEnd}%`;
+        range.style.setProperty('--region-start', `${nextStart}%`);
+        range.style.setProperty('--region-end', `${nextEnd}%`);
+      };
+
+      start.addEventListener('input', () => syncRegion('start'));
+      end.addEventListener('input', () => syncRegion('end'));
+      syncRegion();
+
+      values.append(startValue, endValue);
+      track.append(start, end);
+      range.append(values, track);
+      regionRow.append(regionLabel, range);
+      playback.append(regionRow);
+
+      const optionsRow = document.createElement('div');
+      optionsRow.className = 'object-builder-sample-options-row';
+
+      const playbackModes = document.createElement('div');
+      playbackModes.className = 'object-builder-sample-toggle-pair';
+
+      const loopLabel = document.createElement('label');
+      const loop = document.createElement('input');
+      loop.type = 'checkbox';
+      loop.checked = sampleLoop;
+      loopLabel.append(loop, document.createTextNode(' LOOP'));
+
+      const reverseLabel = document.createElement('label');
+      const reverse = document.createElement('input');
+      reverse.type = 'checkbox';
+      reverse.checked = sampleReverse;
+      reverseLabel.append(reverse, document.createTextNode(' REVERSE'));
+
+      playbackModes.append(loopLabel, reverseLabel);
+
+      const slicesWrap = document.createElement('div');
+      slicesWrap.className = 'object-builder-sample-slices';
+
+      const slicesHead = document.createElement('div');
+      slicesHead.className = 'object-builder-sample-slices-head';
+
+      const slicesEnableLabel = document.createElement('label');
+      const slicesEnable = document.createElement('input');
+      slicesEnable.type = 'checkbox';
+      slicesEnable.checked = sampleSlices !== null;
+      slicesEnableLabel.append(slicesEnable, document.createTextNode(' SLICES'));
+
+      const slicesValue = document.createElement('output');
+
+      const slicesSlider = document.createElement('input');
+      slicesSlider.type = 'range';
+      slicesSlider.min = '1';
+      slicesSlider.max = '128';
+      slicesSlider.step = '1';
+      slicesSlider.value = String(lastSlices);
+
+      slicesHead.append(slicesEnableLabel, slicesValue);
+      slicesWrap.append(slicesHead, slicesSlider);
+
+      const syncPlaybackModes = (): void => {
+        const slicesOn = slicesEnable.checked;
+        slicesSlider.disabled = !slicesOn;
+        loop.disabled = slicesOn;
+        reverse.disabled = slicesOn;
+
+        if (slicesOn) {
+          sampleLoop = false;
+          sampleReverse = false;
+          loop.checked = false;
+          reverse.checked = false;
+          lastSlices = Math.max(1, Math.min(128, Math.round(Number(slicesSlider.value) || 1)));
+          slicesSlider.value = String(lastSlices);
+          sampleSlices = lastSlices;
+        } else {
+          sampleSlices = null;
+          sampleLoop = loop.checked;
+          sampleReverse = reverse.checked;
+        }
+        slicesValue.textContent = slicesOn ? String(lastSlices) : 'OFF';
+      };
+
+      loop.addEventListener('change', syncPlaybackModes);
+      reverse.addEventListener('change', syncPlaybackModes);
+      slicesEnable.addEventListener('change', syncPlaybackModes);
+      slicesSlider.addEventListener('input', syncPlaybackModes);
+      syncPlaybackModes();
+
+      optionsRow.append(playbackModes, slicesWrap);
+      playback.append(optionsRow);
+
+      const hint = document.createElement('p');
+      hint.className = 'object-builder-sample-playback-hint';
+      hint.textContent = 'Slices accepts 1–128. Slice mode is mutually exclusive with loop and reverse.';
+      playback.append(hint);
+
+      body.append(playback);
+    }
+
+
     this.openSecondary(`CUSTOMIZE SOUND — ${this.model}`, body, () => {
-      this.soundParams = draft; this.updateCustomizeRow(); this.onChange();
+      this.soundParams = draft;
+      if (this.model === 'sample') {
+        this.sampleRegionStart = regionStart;
+        this.sampleRegionEnd = regionEnd;
+        this.sampleLoop = sampleLoop;
+        this.sampleReverse = sampleReverse;
+        this.sampleSlices = sampleSlices;
+      }
+      this.updateCustomizeRow();
+      this.onChange();
     });
   }
 

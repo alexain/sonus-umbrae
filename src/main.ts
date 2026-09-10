@@ -606,6 +606,7 @@ const objectBuilder = new ObjectBuilder({
   editor,
   toolbar: statusbar,
   evaluateAfterAdd: recompileLiveCode,
+  getSampleAssetAliases: () => assetLibrary.getAll().map((asset) => asset.alias),
 });
 
 appConfig = readAppConfig();

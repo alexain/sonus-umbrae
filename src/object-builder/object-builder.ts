@@ -14,6 +14,7 @@ export interface ObjectBuilderOptions {
   editor: HTMLTextAreaElement;
   toolbar: HTMLElement;
   evaluateAfterAdd: () => boolean;
+  getSampleAssetAliases: () => readonly string[];
 }
 
 export class ObjectBuilder {
@@ -101,7 +102,13 @@ export class ObjectBuilder {
     this.fxPanel = null;
     this.modPanel = null;
     if (this.selected.kind === 'voice') {
-      this.voicePanel = new VoiceBuilderPanel(this.form, this.options.editor, () => this.refreshPreview(), this.suggestAvailableName('myVoice'));
+      this.voicePanel = new VoiceBuilderPanel(
+        this.form,
+        this.options.editor,
+        () => this.refreshPreview(),
+        this.options.getSampleAssetAliases,
+        this.suggestAvailableName('myVoice'),
+      );
       this.voicePanel.mount(); this.refreshPreview(); return;
     }
     if (this.selected.kind === 'logic') {
