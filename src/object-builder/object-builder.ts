@@ -4,6 +4,11 @@ import type { BuilderObjectDefinition, BuilderParameterDefinition } from './type
 import { VoiceBuilderPanel } from './voice-builder';
 import { RoutingPanel } from './routing-panel';
 import { LogicBuilderPanel } from './logic-builder';
+import { SeqBuilderPanel } from './seq-builder';
+import { RegisterBuilderPanel } from './register-builder';
+import { DrumkitBuilderPanel } from './drumkit-builder';
+import { FxBuilderPanel } from './fx-builder';
+import { ModBuilderPanel } from './mod-builder';
 
 export interface ObjectBuilderOptions {
   editor: HTMLTextAreaElement;
@@ -21,6 +26,11 @@ export class ObjectBuilder {
   private existingMasterLine: { start: number; end: number; text: string } | null = null;
   private voicePanel: VoiceBuilderPanel | null = null;
   private logicPanel: LogicBuilderPanel | null = null;
+  private seqPanel: SeqBuilderPanel | null = null;
+  private registerPanel: RegisterBuilderPanel | null = null;
+  private drumkitPanel: DrumkitBuilderPanel | null = null;
+  private fxPanel: FxBuilderPanel | null = null;
+  private modPanel: ModBuilderPanel | null = null;
   private readonly filterRouting: RoutingPanel;
 
   constructor(private readonly options: ObjectBuilderOptions) {
@@ -39,7 +49,7 @@ export class ObjectBuilder {
     this.overlay.classList.remove('hidden');
     this.render();
   }
-  close(): void { this.voicePanel?.closeSecondaryModal(); this.logicPanel?.closeSecondaryModal(); this.filterRouting.closeExpanded(); this.overlay.classList.add('hidden'); this.options.editor.focus(); }
+  close(): void { this.voicePanel?.closeSecondaryModal(); this.logicPanel?.closeSecondaryModal(); this.seqPanel?.closeSecondaryModal(); this.registerPanel?.closeSecondaryModal(); this.drumkitPanel?.closeSecondaryModal(); this.fxPanel?.closeSecondaryModal(); this.modPanel?.closeSecondaryModal(); this.filterRouting.closeExpanded(); this.overlay.classList.add('hidden'); this.options.editor.focus(); }
   isOpen(): boolean { return !this.overlay.classList.contains('hidden'); }
 
   private mount(): void {
@@ -85,6 +95,11 @@ export class ObjectBuilder {
     this.form.replaceChildren();
     this.voicePanel = null;
     this.logicPanel = null;
+    this.seqPanel = null;
+    this.registerPanel = null;
+    this.drumkitPanel = null;
+    this.fxPanel = null;
+    this.modPanel = null;
     if (this.selected.kind === 'voice') {
       this.voicePanel = new VoiceBuilderPanel(this.form, this.options.editor, () => this.refreshPreview(), this.suggestAvailableName('myVoice'));
       this.voicePanel.mount(); this.refreshPreview(); return;
@@ -92,6 +107,36 @@ export class ObjectBuilder {
     if (this.selected.kind === 'logic') {
       this.logicPanel = new LogicBuilderPanel(this.form, this.options.editor, () => this.refreshPreview(), this.suggestAvailableName('myLogic'));
       this.logicPanel.mount(); this.refreshPreview(); return;
+    }
+    if (this.selected.kind === 'seq') {
+      this.seqPanel = new SeqBuilderPanel(this.form, this.options.editor, () => this.refreshPreview(), this.suggestAvailableName('mySeq'));
+      this.seqPanel.mount(); this.refreshPreview(); return;
+    }
+    if (this.selected.kind === 'register') {
+      this.registerPanel = new RegisterBuilderPanel(this.form, this.options.editor, () => this.refreshPreview(), this.suggestAvailableName('myRegister'));
+      this.registerPanel.mount(); this.refreshPreview(); return;
+    }
+    if (this.selected.kind === 'drumkit') {
+      this.drumkitPanel = new DrumkitBuilderPanel(this.form, this.options.editor, () => this.refreshPreview(), this.suggestAvailableName('myDrumkit'));
+      this.drumkitPanel.mount(); this.refreshPreview(); return;
+    }
+    if (this.selected.kind === 'fx') {
+      this.fxPanel = new FxBuilderPanel(
+        this.form,
+        this.options.editor,
+        () => this.refreshPreview(),
+        () => this.routingDestinations(),
+        this.suggestAvailableName('myFx'),
+      );
+      this.fxPanel.mount(); this.refreshPreview(); return;
+    }
+    if (this.selected.kind === 'mod') {
+      this.modPanel = new ModBuilderPanel(
+        this.form,
+        () => this.refreshPreview(),
+        this.suggestAvailableName('myMod'),
+      );
+      this.modPanel.mount(); this.refreshPreview(); return;
     }
     const title = document.createElement('h2'); title.textContent = this.selected.label.toUpperCase(); this.form.append(title);
     if (this.selected.kind === 'clock') { this.renderClockForm(); this.refreshPreview(); return; }
@@ -344,7 +389,17 @@ export class ObjectBuilder {
       ? this.voicePanel.previewDescription()
       : this.selected.kind === 'logic' && this.logicPanel
         ? this.logicPanel.previewDescription()
-        : (ports.length ? ports.map((p) => `${p.direction === 'input' ? '→' : '←'} ${p.label}  ${p.domain.toUpperCase()}`).join('\n') : 'NO EXTERNAL PORTS');
+        : this.selected.kind === 'seq' && this.seqPanel
+          ? this.seqPanel.previewDescription()
+          : this.selected.kind === 'register' && this.registerPanel
+            ? this.registerPanel.previewDescription()
+            : this.selected.kind === 'drumkit' && this.drumkitPanel
+              ? this.drumkitPanel.previewDescription()
+              : this.selected.kind === 'fx' && this.fxPanel
+                ? this.fxPanel.previewDescription()
+                : this.selected.kind === 'mod' && this.modPanel
+                  ? this.modPanel.previewDescription()
+          : (ports.length ? ports.map((p) => `${p.direction === 'input' ? '→' : '←'} ${p.label}  ${p.domain.toUpperCase()}`).join('\n') : 'NO EXTERNAL PORTS');
     if (this.selected.kind === 'voice' && this.voicePanel) {
       this.info.innerHTML = `<h3>OUTPUT ROUTING</h3>`;
       this.info.append(this.voicePanel.renderRoutingPreview());
@@ -352,6 +407,18 @@ export class ObjectBuilder {
     } else if (this.selected.kind === 'filter') {
       this.info.innerHTML = `<h3>OUTPUT ROUTING</h3>`;
       this.info.append(this.filterRouting.renderPreview());
+      const codeTitle = document.createElement('h3'); codeTitle.textContent = 'GENERATED CODE'; this.info.append(codeTitle);
+    } else if (this.selected.kind === 'fx' && this.fxPanel) {
+      this.info.innerHTML = `<h3>OUTPUT ROUTING</h3>`;
+      this.info.append(this.fxPanel.renderRoutingPreview());
+      const codeTitle = document.createElement('h3'); codeTitle.textContent = 'GENERATED CODE'; this.info.append(codeTitle);
+    } else if (this.selected.kind === 'mod' && this.modPanel) {
+      this.info.innerHTML = '';
+      this.info.append(this.modPanel.renderOutputPreview());
+      const codeTitle = document.createElement('h3'); codeTitle.textContent = 'GENERATED CODE'; this.info.append(codeTitle);
+    } else if (this.selected.kind === 'register' && this.registerPanel) {
+      this.info.innerHTML = `<h3>REGISTER OUTPUTS</h3>`;
+      this.info.append(this.registerPanel.renderInfoPreview());
       const codeTitle = document.createElement('h3'); codeTitle.textContent = 'GENERATED CODE'; this.info.append(codeTitle);
     } else {
       this.info.innerHTML = `<h3>INFO / PREVIEW</h3><div class="object-builder-diagram"></div><h3>GENERATED CODE</h3>`;
@@ -368,6 +435,11 @@ export class ObjectBuilder {
     if (this.selected.kind === 'clock') return this.generateClockCode(value, checked);
     if (this.selected.kind === 'voice' && this.voicePanel) return this.voicePanel.generateCode();
     if (this.selected.kind === 'logic' && this.logicPanel) return this.logicPanel.generateCode();
+    if (this.selected.kind === 'seq' && this.seqPanel) return this.seqPanel.generateCode();
+    if (this.selected.kind === 'register' && this.registerPanel) return this.registerPanel.generateCode();
+    if (this.selected.kind === 'drumkit' && this.drumkitPanel) return this.drumkitPanel.generateCode();
+    if (this.selected.kind === 'fx' && this.fxPanel) return this.fxPanel.generateCode();
+    if (this.selected.kind === 'mod' && this.modPanel) return this.modPanel.generateCode();
     if (this.selected.kind === 'filter') return this.generateFilterCode(value);
     const name = value('name') || this.selected.kind;
     const model = value('model');
@@ -525,6 +597,26 @@ export class ObjectBuilder {
     if (this.selected.kind === 'logic' && this.logicPanel) {
       const logicError = this.logicPanel.validate();
       if (logicError) { this.showError(logicError); return false; }
+    }
+    if (this.selected.kind === 'seq' && this.seqPanel) {
+      const seqError = this.seqPanel.validate();
+      if (seqError) { this.showError(seqError); return false; }
+    }
+    if (this.selected.kind === 'register' && this.registerPanel) {
+      const registerError = this.registerPanel.validate();
+      if (registerError) { this.showError(registerError); return false; }
+    }
+    if (this.selected.kind === 'drumkit' && this.drumkitPanel) {
+      const drumkitError = this.drumkitPanel.validate();
+      if (drumkitError) { this.showError(drumkitError); return false; }
+    }
+    if (this.selected.kind === 'fx' && this.fxPanel) {
+      const fxError = this.fxPanel.validate();
+      if (fxError) { this.showError(fxError); return false; }
+    }
+    if (this.selected.kind === 'mod' && this.modPanel) {
+      const modError = this.modPanel.validate();
+      if (modError) { this.showError(modError); return false; }
     }
     if (this.selected.kind === 'filter' && this.filterEmbedded()) {
       const voiceName = this.selectedEmbedVoiceName();

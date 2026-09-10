@@ -65,19 +65,30 @@
   width: 100%;
   box-sizing: border-box;
   border: 1px solid var(--line);
-  background-color: var(--bg);
-  color: var(--phosphor);
+  background-color: #050605 !important;
+  color: var(--phosphor) !important;
   color-scheme: dark;
   font: inherit;
   padding: 6px 8px;
+}
+
+.object-builder-form input[type=text],
+.object-builder-form input[type=number],
+.object-builder-form textarea,
+.object-builder-secondary-dialog input[type=text],
+.object-builder-secondary-dialog input[type=number],
+.object-builder-secondary-dialog textarea {
+  background: var(--bg);
+  color: var(--phosphor);
+  color-scheme: dark;
 }
 
 .object-builder-form select option,
 .object-builder-form select optgroup,
 .object-builder-secondary-dialog select option,
 .object-builder-secondary-dialog select optgroup {
-  background-color: var(--bg);
-  color: var(--phosphor);
+  background-color: #050605 !important;
+  color: var(--phosphor) !important;
 }
 
 .object-builder-form select:disabled,
@@ -591,3 +602,797 @@
 }
 .object-builder-logic-out-terminal.invalid i { border-color: var(--line); }
 .object-builder-logic-canvas .object-builder-logic-status { grid-row: auto; margin-top: 8px; }
+
+/* SEQ builder ------------------------------------------------------------ */
+.object-builder-seq-panel { display: grid; gap: 14px; }
+.object-builder-seq-panel > h3 { margin-bottom: 0; }
+.object-builder-seq-hero { display: grid; gap: 5px; padding: 12px; border: 1px solid var(--line); background: color-mix(in srgb, var(--phosphor) 3%, var(--bg)); }
+.object-builder-seq-hero strong { font-size: 12px; letter-spacing: .09em; }
+.object-builder-seq-hero span { color: var(--phosphor-dim); font-size: 11px; line-height: 1.45; }
+.object-builder-seq-two-column { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.object-builder-seq-three-column { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.object-builder-seq-bias-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.object-builder-seq-inline-slider { display: grid; grid-template-columns: minmax(0, 1fr) 52px; gap: 8px; align-items: center; }
+.object-builder-seq-inline-slider input[type=range] { width: 100%; }
+.object-builder-seq-inline-slider output { text-align: right; color: var(--phosphor); font-size: 10px; font-variant-numeric: tabular-nums; }
+.object-builder-seq-material { display: grid; gap: 10px; padding-top: 12px; border-top: 1px solid var(--line); }
+.object-builder-seq-material h4 { margin: 0; color: var(--phosphor-dim); font-size: 10px; letter-spacing: .12em; }
+.object-builder-seq-material .object-builder-row { margin-bottom: 8px; }
+.object-builder-seq-timing { padding-top: 12px; border-top: 1px solid var(--line); }
+.object-builder-seq-timing .object-builder-timing-column { border-left: 0; padding: 0; }
+.object-builder-seq-matrix-wrap textarea { width: 100%; box-sizing: border-box; resize: vertical; min-height: 118px; border: 1px solid var(--line); background: var(--bg); color: var(--phosphor); font: 12px/1.6 monospace; padding: 9px 10px; }
+.object-builder-seq-life-controls { display: grid; gap: 3px; }
+.object-builder-seq-life-controls .object-builder-row { margin-bottom: 7px; }
+.object-builder-seq-generated-material[hidden], .object-builder-seq-matrix-wrap[hidden] { display: none !important; }
+@media(max-width:1050px){
+  .object-builder-seq-bias-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .object-builder-seq-three-column { grid-template-columns: 1fr 1fr; }
+}
+@media(max-width:760px){
+  .object-builder-seq-two-column,.object-builder-seq-three-column,.object-builder-seq-bias-grid { grid-template-columns: 1fr; }
+}
+
+.object-builder-pitch-only-dialog { width: min(680px, calc(100vw - 48px)); }
+
+.object-builder-seq-timing-modal .object-builder-timing-column { border-left: 0; padding: 0; }
+/* REGISTER builder */
+.object-builder-register-model {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: baseline;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg) 88%, #35d6d3 12%);
+}
+.object-builder-register-model span,
+.object-builder-register-model small,
+.object-builder-register-control-head span,
+.object-builder-register-view-head span {
+  color: var(--phosphor-dim);
+  font-size: 10px;
+}
+.object-builder-register-model strong { color: #35d6d3; letter-spacing: .08em; }
+.object-builder-register-controls { display: grid; gap: 12px; }
+.object-builder-register-control-head,
+.object-builder-register-timing,
+.object-builder-register-view-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.object-builder-register-control-head > div:first-child,
+.object-builder-register-timing > div:first-child,
+.object-builder-register-view-head > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+.object-builder-register-stepper {
+  display: grid;
+  grid-template-columns: 34px 46px 34px;
+  align-items: center;
+}
+.object-builder-register-stepper button,
+.object-builder-register-timing button {
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: #35d6d3;
+  min-height: 30px;
+}
+.object-builder-register-stepper output {
+  display: grid;
+  place-items: center;
+  min-height: 28px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  color: var(--phosphor);
+  font-weight: 700;
+}
+.object-builder-register-timing {
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.object-builder-register-timing span {
+  display: block;
+  color: var(--phosphor-dim);
+  font-size: 10px;
+}
+.object-builder-register-view { overflow: hidden; }
+.object-builder-register-preview { display: grid; gap: 9px; min-width: 0; }
+.object-builder-register-flow-canvas {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 54px;
+  min-width: max-content;
+  padding: 12px 12px 14px;
+  overflow: visible;
+}
+.object-builder-register-column {
+  position: relative;
+  z-index: 2;
+  width: 82px;
+  flex: 0 0 82px;
+}
+.object-builder-register-column-label {
+  height: 34px;
+  display: grid;
+  align-content: start;
+  gap: 1px;
+  text-align: center;
+}
+.object-builder-register-column-label strong {
+  color: var(--phosphor);
+  font-size: 10px;
+  letter-spacing: .06em;
+}
+.object-builder-register-column-label span {
+  color: var(--phosphor-dim);
+  font-size: 8px;
+}
+.object-builder-register-cells {
+  display: grid;
+  border: 1px solid var(--line);
+  background: var(--bg);
+}
+.object-builder-register-cell {
+  position: relative;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-bottom: 1px solid var(--line);
+  color: var(--phosphor-dim);
+  overflow: hidden;
+}
+.object-builder-register-cell:last-child { border-bottom: 0; }
+.object-builder-register-cell small {
+  position: absolute;
+  left: 4px;
+  top: 3px;
+  color: color-mix(in srgb, var(--phosphor-dim) 70%, transparent);
+  font-size: 7px;
+}
+.object-builder-register-cell b {
+  font-size: 11px;
+  font-weight: 700;
+  transition: transform .18s ease, opacity .18s ease;
+}
+.object-builder-register-cell.reference {
+  border-color: #35d6d3;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, #35d6d3 35%, transparent);
+}
+.object-builder-register-cell.reference b {
+  color: #35d6d3;
+  text-shadow: 0 0 8px color-mix(in srgb, #35d6d3 55%, transparent);
+}
+.object-builder-register-cell.incoming b { color: #e6c85c; }
+.object-builder-register-flow-wires {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: visible;
+  pointer-events: none;
+}
+.object-builder-register-wire {
+  fill: none;
+  stroke: #35d6d3;
+  stroke-width: 1.6;
+  opacity: .9;
+  filter: drop-shadow(0 0 3px color-mix(in srgb, #35d6d3 55%, transparent));
+}
+#register-arrow-cyan path { fill: #35d6d3; }
+.object-builder-register-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  color: var(--phosphor-dim);
+  font-size: 9px;
+}
+.object-builder-register-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.object-builder-register-legend i { width: 7px; height: 7px; border-radius: 50%; }
+.object-builder-register-legend i.cyan { background: #35d6d3; }
+.object-builder-register-legend i.yellow { background: #e6c85c; }
+.object-builder-register-info-preview { display: grid; gap: 8px; }
+.object-builder-register-info-preview > strong { color: #35d6d3; font-size: 10px; }
+.object-builder-register-endpoints { display: flex; flex-wrap: wrap; gap: 5px; }
+.object-builder-register-endpoints span {
+  min-width: 28px;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  text-align: center;
+  color: var(--phosphor);
+  font-size: 9px;
+}
+.object-builder-register-endpoints span:first-child {
+  color: #35d6d3;
+  border-color: #35d6d3;
+}
+.object-builder-register-timing-modal .object-builder-timing-column { border-left: 0; padding: 0; }
+
+@media(max-width:1050px) {
+  .object-builder-register-flow-canvas { gap: 38px; }
+}
+/* REGISTER 0083: stages are outputs, columns are narrow square stream views */
+.object-builder-register-stage-canvas {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 34px;
+  min-width: max-content;
+  padding: 12px 12px 16px;
+}
+.object-builder-register-source-node {
+  position: relative;
+  z-index: 2;
+  width: 76px;
+  min-height: 54px;
+  margin-top: 47px;
+  display: grid;
+  align-content: center;
+  gap: 2px;
+  padding: 7px 8px;
+  border: 1px solid #e6c85c;
+  background: var(--bg);
+}
+.object-builder-register-source-node strong {
+  overflow: hidden;
+  color: #e6c85c;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.object-builder-register-source-node span {
+  color: var(--phosphor);
+  font-size: 8px;
+}
+.object-builder-register-source-node small {
+  color: var(--phosphor-dim);
+  font-size: 8px;
+}
+.object-builder-register-stage-strip {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: flex-start;
+  gap: 38px;
+}
+.object-builder-register-stage-column {
+  width: 32px;
+  flex: 0 0 32px;
+}
+.object-builder-register-stage-label {
+  width: 32px;
+  height: 38px;
+  display: grid;
+  align-content: start;
+  justify-items: center;
+  gap: 1px;
+  text-align: center;
+}
+.object-builder-register-stage-label strong {
+  color: #e6c85c;
+  font-size: 10px;
+}
+.object-builder-register-stage-label span {
+  color: var(--phosphor-dim);
+  font-size: 8px;
+}
+.object-builder-register-stage-cells {
+  width: 32px;
+  display: grid;
+  border: 1px solid var(--line);
+  background: var(--bg);
+}
+.object-builder-register-stage-cell {
+  box-sizing: border-box;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-bottom: 1px solid var(--line);
+  color: var(--phosphor-dim);
+}
+.object-builder-register-stage-cell:last-child {
+  border-bottom: 0;
+}
+.object-builder-register-stage-cell b {
+  font-size: 10px;
+  font-weight: 700;
+}
+.object-builder-register-stage-cell.reference {
+  border-color: #35d6d3;
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, #35d6d3 40%, transparent),
+    0 0 8px color-mix(in srgb, #35d6d3 22%, transparent);
+}
+.object-builder-register-stage-cell.reference b {
+  color: #35d6d3;
+  text-shadow: 0 0 7px color-mix(in srgb, #35d6d3 58%, transparent);
+}
+.object-builder-register-stage-cell.incoming {
+  background: color-mix(in srgb, #e6c85c 10%, var(--bg));
+}
+.object-builder-register-stage-cell.incoming b {
+  color: #35d6d3;
+}
+.object-builder-register-stage-cell.ellipsis b,
+.object-builder-register-stage-cell.tail b {
+  color: color-mix(in srgb, var(--phosphor-dim) 75%, transparent);
+  font-size: 8px;
+}
+.object-builder-register-stage-wires {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: visible;
+  pointer-events: none;
+}
+.object-builder-register-stage-wire {
+  fill: none;
+  stroke: #35d6d3;
+  stroke-width: 1.55;
+  opacity: .92;
+  filter: drop-shadow(0 0 3px color-mix(in srgb, #35d6d3 50%, transparent));
+}
+#register-stage-arrow-cyan path {
+  fill: #35d6d3;
+}
+/* REGISTER 0084: cap the explanatory flow at five stages */
+.object-builder-register-example-label {
+  color: #35d6d3;
+  font-size: 9px;
+  letter-spacing: .07em;
+}
+.object-builder-register-continuation {
+  width: 46px;
+  height: 68px;
+  margin-top: 38px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 3px;
+  color: var(--phosphor-dim);
+}
+.object-builder-register-continuation strong {
+  color: #35d6d3;
+  font-size: 16px;
+  line-height: 1;
+}
+.object-builder-register-continuation span {
+  color: #e6c85c;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+
+/* DRUMKIT builder -------------------------------------------------------- */
+.object-builder-drumkit-view-row {
+  display: grid;
+  grid-template-columns: 1fr 150px;
+  gap: 12px;
+  align-items: center;
+  margin: 0 0 13px;
+}
+.object-builder-drumkit-view-row label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--phosphor-dim);
+  font-size: 11px;
+  letter-spacing: .06em;
+}
+.object-builder-drumkit-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.object-builder-drumkit-head > div {
+  display: grid;
+  gap: 3px;
+}
+.object-builder-drumkit-head strong {
+  font-size: 11px;
+  letter-spacing: .12em;
+}
+.object-builder-drumkit-head span {
+  color: var(--phosphor-dim);
+  font-size: 10px;
+}
+.object-builder-drumkit-lanes {
+  display: grid;
+  gap: 7px;
+}
+.object-builder-drumkit-lane {
+  display: grid;
+  grid-template-columns: minmax(110px,.8fr) minmax(130px,1fr) auto auto 28px;
+  gap: 7px;
+  align-items: center;
+  min-height: 48px;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--phosphor) 2%, var(--bg));
+}
+.object-builder-drumkit-lane-name {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.object-builder-drumkit-lane-name strong {
+  overflow: hidden;
+  color: #35d6d3;
+  font-size: 11px;
+  letter-spacing: .06em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.object-builder-drumkit-lane-name span,
+.object-builder-drumkit-lane-summary {
+  overflow: hidden;
+  color: var(--phosphor-dim);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.object-builder-drumkit-lane button {
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--phosphor);
+  padding: 5px 7px;
+  font: inherit;
+  font-size: 9px;
+  cursor: pointer;
+}
+.object-builder-drumkit-lane button:hover { border-color: #35d6d3; }
+.object-builder-drumkit-add {
+  width: 100%;
+  margin-top: 9px;
+}
+.object-builder-drumkit-add:disabled {
+  opacity: .35;
+  cursor: default;
+}
+.object-builder-drumkit-dialog { width: min(720px, calc(100vw - 56px)); }
+.object-builder-drumkit-param-grid {
+  display: grid;
+  gap: 12px;
+}
+.object-builder-drumkit-param {
+  display: grid;
+  grid-template-columns: 92px minmax(0,1fr) 48px;
+  gap: 10px;
+  align-items: center;
+}
+.object-builder-drumkit-param > span {
+  color: var(--phosphor-dim);
+  font-size: 10px;
+  letter-spacing: .06em;
+}
+.object-builder-drumkit-param input[type=range] { width: 100%; }
+.object-builder-drumkit-param output {
+  text-align: right;
+  color: #35d6d3;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+@media(max-width:760px) {
+  .object-builder-drumkit-lane {
+    grid-template-columns: minmax(90px,1fr) auto auto 28px;
+  }
+  .object-builder-drumkit-lane-summary { display: none; }
+}
+
+.object-builder-timing-probability {
+  display: grid;
+  gap: 9px;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, #35d6d3 4%, var(--bg));
+}
+.object-builder-timing-probability-head {
+  display: grid;
+  gap: 2px;
+}
+.object-builder-timing-probability-head strong {
+  color: #35d6d3;
+  font-size: 10px;
+  letter-spacing: .08em;
+}
+.object-builder-timing-probability-head span {
+  color: var(--phosphor-dim);
+  font-size: 9px;
+}
+.object-builder-timing-probability .object-builder-chance-row {
+  padding-top: 0;
+}
+
+
+/* FX builder ------------------------------------------------------------- */
+.object-builder-fx-input-notice {
+  display: grid;
+  gap: 4px;
+}
+.object-builder-fx-input-notice strong {
+  color: #35d6d3;
+  font-size: 10px;
+  letter-spacing: .08em;
+}
+.object-builder-fx-input-notice span {
+  color: var(--phosphor-dim);
+  font-size: 10px;
+}
+.object-builder-fx-workspace {
+  display: grid;
+  gap: 14px;
+}
+.object-builder-fx-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 44px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, #35d6d3 5%, var(--bg));
+}
+.object-builder-fx-head > div {
+  display: grid;
+  gap: 3px;
+}
+.object-builder-fx-head strong {
+  color: #35d6d3;
+  font-size: 11px;
+  letter-spacing: .08em;
+}
+.object-builder-fx-head span {
+  color: var(--phosphor-dim);
+  font-size: 9px;
+}
+.object-builder-fx-block {
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.object-builder-fx-block > h3 {
+  margin: 0;
+  color: var(--phosphor-dim);
+  font-size: 10px;
+  letter-spacing: .12em;
+}
+.object-builder-fx-param-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 16px;
+}
+.object-builder-fx-slider {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr) 42px;
+  gap: 9px;
+  align-items: center;
+  min-width: 0;
+}
+.object-builder-fx-slider > span {
+  overflow: hidden;
+  color: var(--phosphor-dim);
+  font-size: 9px;
+  letter-spacing: .05em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.object-builder-fx-slider input[type=range] {
+  width: 100%;
+  min-width: 0;
+}
+.object-builder-fx-slider output {
+  text-align: right;
+  color: #35d6d3;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+.object-builder-fx-time-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(90px, .55fr) minmax(90px, .55fr);
+  gap: 10px;
+}
+
+/* FX fields must stay dark even when the platform/browser native theme is light. */
+.object-builder-form [data-fx-workspace] input[type=text],
+.object-builder-form [data-fx-workspace] input[type=number],
+.object-builder-form [data-fx-workspace] select,
+.object-builder-form select[name=fxModel] {
+  box-sizing: border-box;
+  width: 100%;
+  border: 1px solid var(--line);
+  background: #050605 !important;
+  color: #d7a92e !important;
+  color-scheme: dark;
+  font: inherit;
+  padding: 6px 8px;
+}
+.object-builder-form [data-fx-workspace] select option,
+.object-builder-form [data-fx-workspace] select optgroup,
+.object-builder-form select[name=fxModel] option,
+.object-builder-form select[name=fxModel] optgroup {
+  background: #050605 !important;
+  color: #d7a92e !important;
+}
+.object-builder-form [data-fx-workspace] input[type=number] {
+  appearance: textfield;
+}
+.object-builder-form [data-fx-workspace] input[type=number]::-webkit-inner-spin-button,
+.object-builder-form [data-fx-workspace] input[type=number]::-webkit-outer-spin-button {
+  opacity: .65;
+}
+
+@media(max-width:900px) {
+  .object-builder-fx-param-grid { grid-template-columns: 1fr; }
+}
+@media(max-width:700px) {
+  .object-builder-fx-time-grid { grid-template-columns: 1fr; }
+}
+
+
+/* MOD builder ------------------------------------------------------------ */
+.object-builder-mod-workspace {
+  display: grid;
+  gap: 14px;
+}
+.object-builder-mod-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 44px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, #35d6d3 5%, var(--bg));
+}
+.object-builder-mod-head > div {
+  display: grid;
+  gap: 3px;
+}
+.object-builder-mod-head strong {
+  color: #35d6d3;
+  font-size: 11px;
+  letter-spacing: .08em;
+}
+.object-builder-mod-head span {
+  color: var(--phosphor-dim);
+  font-size: 9px;
+}
+.object-builder-mod-block {
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.object-builder-mod-block > h3 {
+  margin: 0;
+  color: var(--phosphor-dim);
+  font-size: 10px;
+  letter-spacing: .12em;
+}
+.object-builder-mod-rate-grid,
+.object-builder-mod-param-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+}
+.object-builder-mod-slider {
+  display: grid;
+  grid-template-columns: 86px minmax(0, 1fr) 38px;
+  gap: 9px;
+  align-items: center;
+  min-width: 0;
+}
+.object-builder-mod-slider > span {
+  color: var(--phosphor-dim);
+  font-size: 9px;
+  letter-spacing: .05em;
+}
+.object-builder-mod-slider output,
+.object-builder-mod-level output {
+  color: #35d6d3;
+  text-align: right;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+.object-builder-mod-lfo-list {
+  display: grid;
+  gap: 8px;
+}
+.object-builder-mod-lfo-row {
+  display: grid;
+  grid-template-columns: 48px minmax(100px, 1fr) minmax(105px, 1fr) 82px 82px minmax(125px, 1fr) 30px;
+  gap: 8px;
+  align-items: end;
+  padding: 9px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, #35d6d3 3%, var(--bg));
+}
+.object-builder-mod-lfo-row > strong {
+  align-self: center;
+  color: #35d6d3;
+  font-size: 10px;
+  letter-spacing: .07em;
+}
+.object-builder-mod-level {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 36px;
+  gap: 6px;
+  align-items: center;
+}
+.object-builder-mod-level input {
+  width: 100%;
+}
+.object-builder-mod-add-output {
+  justify-self: start;
+}
+.object-builder-mod-output-preview {
+  display: grid;
+  gap: 10px;
+}
+.object-builder-mod-output-preview > strong {
+  color: var(--phosphor-dim);
+  font-size: 10px;
+  letter-spacing: .1em;
+}
+.object-builder-mod-output-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.object-builder-mod-output-list span {
+  padding: 5px 8px;
+  border: 1px solid #35d6d3;
+  color: #35d6d3;
+  font-size: 10px;
+}
+.object-builder-mod-output-preview p {
+  margin: 0;
+  color: var(--phosphor-dim);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+/* Keep every native MOD form field dark regardless of browser/platform theme. */
+.object-builder-form [data-mod-workspace] input[type=text],
+.object-builder-form [data-mod-workspace] input[type=number],
+.object-builder-form [data-mod-workspace] select,
+.object-builder-form select[name=modModel] {
+  box-sizing: border-box;
+  width: 100%;
+  border: 1px solid var(--line);
+  background: #050605 !important;
+  color: #d7a92e !important;
+  color-scheme: dark;
+  font: inherit;
+  padding: 6px 8px;
+}
+.object-builder-form [data-mod-workspace] select option,
+.object-builder-form [data-mod-workspace] select optgroup,
+.object-builder-form select[name=modModel] option,
+.object-builder-form select[name=modModel] optgroup {
+  background: #050605 !important;
+  color: #d7a92e !important;
+}
+.object-builder-form [data-mod-workspace] input:disabled,
+.object-builder-form [data-mod-workspace] select:disabled {
+  opacity: .42;
+}
+
+@media(max-width:1050px) {
+  .object-builder-mod-lfo-row {
+    grid-template-columns: 46px repeat(2, minmax(110px, 1fr));
+  }
+  .object-builder-mod-lfo-row .object-builder-mod-field:nth-of-type(n+3) {
+    grid-column: span 1;
+  }
+}
+@media(max-width:700px) {
+  .object-builder-mod-rate-grid,
+  .object-builder-mod-param-grid,
+  .object-builder-mod-lfo-row {
+    grid-template-columns: 1fr;
+  }
+}

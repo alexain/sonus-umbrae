@@ -1,11 +1,11 @@
 import { builderModelDefinition } from './catalog';
 import type { BuilderModelDefinition, BuilderParameterDefinition } from './types';
-import { findScaleDefinition, scalesForEdo, type SupportedEdo } from '../language/scales';
+import type { SupportedEdo } from '../language/scales';
 import { RoutingPanel } from './routing-panel';
 import { TimingEditor } from './timing-editor';
+import { PitchEditor, type PitchKind } from './pitch-editor';
 
 type SoundParamValue = { value: string | boolean; live: boolean };
-type PitchKind = 'notes' | 'freqs' | 'scale' | 'reference';
 type BehaviorKind = 'none' | 'every' | 'euclidean' | 'pattern' | 'reference';
 type VcaMode = 'none' | 'existing' | 'inline';
 
@@ -278,85 +278,17 @@ export class VoiceBuilderPanel {
     const columns = document.createElement('div');
     columns.className = 'object-builder-pitch-timing-grid';
 
-    // PITCH -----------------------------------------------------------------
-    const pitchColumn = document.createElement('section');
-    pitchColumn.className = 'object-builder-pitch-column';
-    const pitchHeading = document.createElement('h3'); pitchHeading.textContent = 'PITCH';
-    const kinds: PitchKind[] = ['notes', 'scale', 'freqs', 'reference'];
-    const pitchType = document.createElement('select');
-    const pitchLabels: Record<PitchKind, string> = { notes: 'Notes', scale: 'Scale', freqs: 'Frequencies', reference: 'Reference' };
-    for (const kind of kinds) pitchType.append(new Option(pitchLabels[kind], kind));
-    pitchType.value = this.pitchKind;
+    const pitchEditor = new PitchEditor({
+      editor: this.editor,
+      state: {
+        kind: this.pitchKind,
+        value: this.pitchValue,
+        scaleEdo: this.scaleEdo,
+        scaleRoot: this.scaleRoot,
+        scaleId: this.scaleId,
+      },
+    });
 
-    const pitchPanels = document.createElement('div');
-    pitchPanels.className = 'object-builder-pitch-panels';
-    const panelElements = new Map<PitchKind, HTMLElement>();
-
-    const notesInput = document.createElement('input'); notesInput.type = 'text'; notesInput.placeholder = 'C3 E3 G3';
-    const freqsInput = document.createElement('input'); freqsInput.type = 'text'; freqsInput.placeholder = '110 220 330';
-    const currentBody = this.pitchValue.replace(/^pitch\s+(notes|freqs)\s+/i, '').replace(/^pitch\s+/i, '').replace(/^\[|\]$/g, '');
-    notesInput.value = this.pitchKind === 'notes' ? currentBody : 'C3';
-    if (this.pitchKind === 'freqs') freqsInput.value = currentBody;
-    const notesPanel = document.createElement('div'); notesPanel.className = 'object-builder-pitch-text-panel';
-    notesPanel.append(this.labeledControl('Notes', notesInput), this.hint('Weights and note modifiers remain textual so the full Sonus syntax stays available.'));
-    const freqsPanel = document.createElement('div'); freqsPanel.className = 'object-builder-pitch-text-panel';
-    freqsPanel.append(this.labeledControl('Frequencies', freqsInput), this.hint('Enter the frequency list exactly as it should appear inside PITCH FREQS [...].'));
-
-    const scalePanel = document.createElement('div'); scalePanel.className = 'object-builder-scale-panel';
-    const scaleTop = document.createElement('div'); scaleTop.className = 'object-builder-scale-top';
-    const edo = document.createElement('select');
-    for (const value of [12, 15, 19, 22, 24] as SupportedEdo[]) edo.append(new Option(`EDO ${value}`, String(value)));
-    edo.value = String(this.scaleEdo);
-    const root = document.createElement('select');
-    for (const value of ['C','C#','D','Eb','E','F','F#','G','Ab','A','Bb','B']) root.append(new Option(value, value));
-    root.value = this.scaleRoot;
-    scaleTop.append(this.labeledControl('EDO', edo), this.labeledControl('Root', root));
-    const scale = document.createElement('select');
-    const scaleMap = document.createElement('div'); scaleMap.className = 'object-builder-scale-map';
-    scalePanel.append(scaleTop, this.labeledControl('Scale', scale), scaleMap);
-    const fillScales = (): void => {
-      const selectedEdo = Number(edo.value) as SupportedEdo;
-      const definitions = scalesForEdo(selectedEdo);
-      scale.replaceChildren();
-      for (const definition of definitions) {
-        const value = selectedEdo === 12 && definition.id === 'ionian' ? 'major' : definition.id;
-        scale.append(new Option(definition.name, value));
-      }
-      const wanted = selectedEdo === this.scaleEdo ? this.scaleId : (selectedEdo === 12 ? 'major' : definitions[0]?.id ?? '');
-      if ([...scale.options].some((option) => option.value === wanted)) scale.value = wanted;
-      this.renderScaleMap(scaleMap, selectedEdo, root.value, scale.value);
-    };
-    edo.addEventListener('change', fillScales);
-    root.addEventListener('change', () => this.renderScaleMap(scaleMap, Number(edo.value) as SupportedEdo, root.value, scale.value));
-    scale.addEventListener('change', () => this.renderScaleMap(scaleMap, Number(edo.value) as SupportedEdo, root.value, scale.value));
-    fillScales();
-
-    const referencePanel = document.createElement('div'); referencePanel.className = 'object-builder-reference-panel';
-    const reference = document.createElement('select');
-    const referenceInfo = document.createElement('div'); referenceInfo.className = 'object-builder-reference-info';
-    const references = this.findPitchReferences();
-    if (!references.length) reference.append(new Option('No compatible sources', ''));
-    else for (const item of references) reference.append(new Option(item.name, item.name));
-    const existingReference = this.pitchKind === 'reference' ? this.pitchValue.replace(/^pitch\s+/i, '').trim() : '';
-    if (existingReference && references.some((item) => item.name === existingReference)) reference.value = existingReference;
-    const updateReferenceInfo = (): void => {
-      const item = references.find((entry) => entry.name === reference.value);
-      referenceInfo.replaceChildren();
-      if (!item) { referenceInfo.textContent = 'Declare a compatible SET or SEQ to use it here.'; return; }
-      const type = document.createElement('strong'); type.textContent = item.type;
-      const detail = document.createElement('span'); detail.textContent = item.detail;
-      referenceInfo.append(type, detail);
-    };
-    reference.addEventListener('change', updateReferenceInfo); updateReferenceInfo();
-    referencePanel.append(this.labeledControl('Source', reference), referenceInfo);
-
-    panelElements.set('notes', notesPanel); panelElements.set('scale', scalePanel); panelElements.set('freqs', freqsPanel); panelElements.set('reference', referencePanel);
-    for (const [kind, panel] of panelElements) { panel.dataset.pitchPanel = kind; pitchPanels.append(panel); }
-    const selectPitchType = (): void => { for (const [kind, panel] of panelElements) panel.hidden = kind !== pitchType.value; };
-    pitchType.addEventListener('change', selectPitchType); selectPitchType();
-    pitchColumn.append(pitchHeading, this.labeledControl('Type', pitchType), pitchPanels);
-
-    // TIMING ----------------------------------------------------------------
     const timingEditor = new TimingEditor({
       editor: this.editor,
       state: {
@@ -368,15 +300,16 @@ export class VoiceBuilderPanel {
       },
       showEnabledToggle: true,
     });
-    const timingColumn = timingEditor.mount();
 
-    columns.append(pitchColumn, timingColumn); body.append(columns);
+    columns.append(pitchEditor.mount(), timingEditor.mount());
+    body.append(columns);
     this.openSecondary('PITCH & TIMING', body, () => {
-      const selectedKind = pitchType.value as PitchKind; this.pitchKind = selectedKind;
-      if (selectedKind === 'notes') this.pitchValue = `pitch notes [${notesInput.value.trim().replace(/^\[|\]$/g, '') || 'C3'}]`;
-      else if (selectedKind === 'freqs') this.pitchValue = `pitch freqs [${freqsInput.value.trim().replace(/^\[|\]$/g, '') || '440'}]`;
-      else if (selectedKind === 'scale') { this.scaleEdo = Number(edo.value) as SupportedEdo; this.scaleRoot = root.value; this.scaleId = scale.value; this.pitchValue = `pitch scale ${this.scaleRoot} ${this.scaleId}`; }
-      else this.pitchValue = reference.value ? `pitch ${reference.value}` : 'pitch notes [C3]';
+      const pitchState = pitchEditor.getState();
+      this.pitchKind = pitchState.kind;
+      this.pitchValue = pitchState.value;
+      this.scaleEdo = pitchState.scaleEdo;
+      this.scaleRoot = pitchState.scaleRoot;
+      this.scaleId = pitchState.scaleId;
 
       const timingState = timingEditor.getState();
       this.timingEnabled = timingState.enabled;
@@ -384,7 +317,8 @@ export class VoiceBuilderPanel {
       this.behaviorValue = timingState.value;
       this.timingReaderMode = timingState.readerMode;
       this.timingReaderAmount = timingState.readerAmount;
-      this.updateActionSummary('pitch', this.pitchTimingSummary()); this.onChange();
+      this.updateActionSummary('pitch', this.pitchTimingSummary());
+      this.onChange();
     });
     this.modal?.querySelector('.object-builder-secondary-dialog')?.classList.add('object-builder-pitch-dialog');
   }
@@ -396,59 +330,6 @@ export class VoiceBuilderPanel {
     if (!this.timingEnabled || !this.behaviorValue) return `${pitch} · timing off`;
     const mode = this.behaviorKind === 'every' && this.timingReaderMode !== 'forward' ? ` · ${this.timingReaderMode}${this.timingReaderMode === 'walk' ? ` ${this.timingReaderAmount}` : ''}` : '';
     return `${pitch} · ${this.behaviorValue}${mode}`;
-  }
-
-  private renderScaleMap(container: HTMLElement, edo: SupportedEdo, root: string, scaleId: string): void {
-    const definition = findScaleDefinition(scaleId);
-    container.replaceChildren();
-    if (!definition || definition.edo !== edo) return;
-    const title = document.createElement('div'); title.className = 'object-builder-scale-map-title'; title.textContent = `${root} · ${definition.name} · ${edo}-EDO`;
-    container.append(title);
-    if (edo === 12) {
-      const keyboard = document.createElement('div'); keyboard.className = 'object-builder-scale-keyboard';
-      const rootPc = ['C','C#','D','Eb','E','F','F#','G','Ab','A','Bb','B'].indexOf(root);
-      const active = new Set(definition.degrees.map((degree) => (rootPc + degree) % 12));
-      for (const pc of [0, 2, 4, 5, 7, 9, 11]) {
-        const key = document.createElement('div'); key.className = 'object-builder-scale-key white';
-        key.classList.toggle('active', active.has(pc)); key.classList.toggle('root', pc === rootPc); key.dataset.pc = String(pc); keyboard.append(key);
-      }
-      for (const pc of [1, 3, 6, 8, 10]) {
-        const key = document.createElement('div'); key.className = 'object-builder-scale-key black';
-        key.classList.toggle('active', active.has(pc)); key.classList.toggle('root', pc === rootPc); key.dataset.pc = String(pc); keyboard.append(key);
-      }
-      container.append(keyboard);
-    } else {
-      const map = document.createElement('div'); map.className = 'object-builder-edo-map'; map.style.setProperty('--edo-columns', String(edo));
-      const active = new Set(definition.degrees);
-      for (let step = 0; step < edo; step++) {
-        const cell = document.createElement('div'); cell.className = 'object-builder-edo-step'; cell.classList.toggle('active', active.has(step)); cell.classList.toggle('root', step === 0);
-        cell.title = `${step} · ${Math.round(step * 1200 / edo)}¢`; const dot = document.createElement('i'); const label = document.createElement('span'); label.textContent = `${Math.round(step * 1200 / edo)}¢`; cell.append(dot, label); map.append(cell);
-      }
-      container.append(map);
-    }
-  }
-
-  private findPitchReferences(): Array<{ name: string; type: string; detail: string }> {
-    const result: Array<{ name: string; type: string; detail: string }> = [];
-    const lines = this.editor.value.split(/\r?\n/);
-    for (let index = 0; index < lines.length; index++) {
-      const line = lines[index];
-      const set = line.match(/^\s*SET\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+)$/i);
-      if (set) {
-        const body = set[2].trim();
-        if (/^\[[^\]]+\]$/.test(body)) result.push({ name: set[1], type: 'SET · NOTES', detail: body });
-        else if (/^\[[^\]]+\]\s*hz$/i.test(body) || /^\d+(?:\.\d+)?\s*hz$/i.test(body)) result.push({ name: set[1], type: 'SET · FREQS', detail: body });
-        else if (/^[A-Ga-g][#b]?-?\d+$/.test(body)) result.push({ name: set[1], type: 'SET · NOTE', detail: body });
-        else if (/^[A-Ga-g][#b]?\s+[A-Za-z_][A-Za-z0-9_-]*/.test(body) && findScaleDefinition(body.split(/\s+/)[1])) result.push({ name: set[1], type: 'SET · SCALE', detail: body });
-      }
-      const seq = line.match(/^\s*SEQ\s+([A-Za-z_][A-Za-z0-9_]*)\b/i);
-      if (seq) {
-        const details: string[] = [];
-        for (let j = index + 1; j < lines.length; j++) { if (/^\S/.test(lines[j]) && lines[j].trim()) break; const item = lines[j].trim(); if (/^(model|pitch)\b/i.test(item)) details.push(item); }
-        result.push({ name: seq[1], type: 'SEQ', detail: details.join(' · ') || 'pitch source' });
-      }
-    }
-    return result.filter((item, index) => result.findIndex((other) => other.name === item.name) === index);
   }
 
   private openVcaEditor(): void {
